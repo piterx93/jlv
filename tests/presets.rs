@@ -1,37 +1,20 @@
 //! The format presets against the fixture logs in `tests/fixtures`, one per preset.
 
-use std::fs;
 use std::ops::Range;
-use std::path::Path;
 
 use insta::assert_snapshot;
 use jlv::format::{EntryHead, Preset, strip_ansi};
-use jlv::source::LineIndex;
 
-/// Every preset but `Raw`, with its fixture.
-const FIXTURES: [(Preset, &str); 6] = [
-    (Preset::Logback, "logback.log"),
-    (Preset::LogbackBasic, "logback-basic.log"),
-    (Preset::Spring3, "spring3.log"),
-    (Preset::Spring2, "spring2.log"),
-    (Preset::Wildfly, "wildfly.log"),
-    (Preset::WildflyConsole, "wildfly-console.log"),
-];
+mod common;
 
-fn fixture(name: &str) -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    fs::read(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
-}
+use common::{FIXTURES, fixture, lines};
 
 /// The fixture's lines without line endings and ANSI-stripped, as the parser gets
 /// them.
-fn lines(name: &str) -> Vec<Vec<u8>> {
-    let bytes = fixture(name);
-    let index = LineIndex::new(&bytes);
-    (0..index.len())
-        .map(|i| strip_ansi(index.line(&bytes, i)).into_owned())
+fn stripped_lines(name: &str) -> Vec<Vec<u8>> {
+    lines(&fixture(name))
+        .into_iter()
+        .map(|line| strip_ansi(line).into_owned())
         .collect()
 }
 
@@ -52,7 +35,7 @@ fn text(line: &[u8], span: Range<usize>) -> String {
 fn outline(preset: Preset, name: &str) -> String {
     let mut out = Vec::new();
     let mut run = 0;
-    for line in lines(name) {
+    for line in stripped_lines(name) {
         let Some(head) = parse(preset, &line) else {
             run += 1;
             continue;
@@ -281,7 +264,7 @@ fn finds_every_entry_of_the_wildfly_console_fixture() {
 #[test]
 fn every_fixture_has_at_least_20_entries() {
     for (preset, name) in FIXTURES {
-        let entries = lines(name)
+        let entries = stripped_lines(name)
             .iter()
             .filter(|line| parse(preset, line).is_some())
             .count();
@@ -295,7 +278,7 @@ fn every_fixture_has_at_least_20_entries() {
 fn no_preset_parses_a_line_of_another_presets_fixture() {
     let mut clashes = Vec::new();
     for (own, name) in FIXTURES {
-        for (n, line) in lines(name).iter().enumerate() {
+        for (n, line) in stripped_lines(name).iter().enumerate() {
             for (preset, _) in FIXTURES {
                 if preset != own && parse(preset, line).is_some() {
                     clashes.push(format!("{name}:{} parses as {preset:?}", n + 1));
