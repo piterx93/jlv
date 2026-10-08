@@ -108,6 +108,15 @@ impl DatesBackward {
         self.later = Later::Entry(date.to_datetime(time));
         date
     }
+
+    /// The instant of the entry at `time`: its [`date`](Self::date) and `time` as
+    /// local time in `zone`, read as [`EntryParser::timestamp`] reads a timestamp
+    /// without offset. `None` only at the ends of jiff's range.
+    ///
+    /// [`EntryParser::timestamp`]: crate::format::EntryParser::timestamp
+    pub fn timestamp(&mut self, time: Time, zone: &TimeZone) -> Option<Timestamp> {
+        local_to_instant(self.date(time).to_datetime(time), zone)
+    }
 }
 
 /// `date` moved back by `midnights` as [`midnights_between`] counts them, which is
@@ -142,9 +151,7 @@ pub fn resolve_timestamps(
     for (time, slot) in times.iter().zip(&mut resolved).rev() {
         *slot = match *time {
             Some(LogTime::Instant(instant)) => Some(instant),
-            Some(LogTime::TimeOfDay(time)) => {
-                local_to_instant(dates.date(time).to_datetime(time), zone)
-            }
+            Some(LogTime::TimeOfDay(time)) => dates.timestamp(time, zone),
             None => None,
         };
     }

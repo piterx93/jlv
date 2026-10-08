@@ -52,8 +52,10 @@ const TOO_SMALL: &str = "terminal too small (80×24 needed)";
 const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
 const TAB_STOP: usize = 4;
 
-/// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ Raw`), the lines
-/// on screen with `▶` in front of the selected one, and the key hints in the footer.
+/// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
+/// preset the index reads the file in, followed by ` ─ indexing <percent>%` until the
+/// index is complete), the rows on screen with `▶` in front of the selected one, and
+/// the key hints in the footer.
 /// The lines in between follow the frame's height, so this resizes `app`.
 ///
 /// Below 80×24 the lines are replaced by `terminal too small (80×24 needed)` and `app`
@@ -67,10 +69,17 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     ])
     .areas(area);
 
+    let progress = app.progress();
+    let indexing = if progress.is_complete() {
+        String::new()
+    } else {
+        format!(" ─ indexing {}%", progress.percent())
+    };
     let title = format!(
-        "jlv ─ {} ─ {} ─ Raw",
+        "jlv ─ {} ─ {} ─ {}{indexing}",
         printable(app.file_name()),
-        human_size(app.size())
+        human_size(app.size()),
+        app.settings().preset
     );
     let bar = Style::new().reversed();
     frame.render_widget(Line::from(title).style(theme.paint(bar.bold())), header);

@@ -225,6 +225,23 @@ fn assert_every_preset_parses(parts: &Parts) {
 // --- presets ---
 
 #[test]
+fn every_preset_has_a_name_for_the_header() {
+    let names: Vec<String> = Preset::ALL.iter().map(Preset::to_string).collect();
+    assert_eq!(
+        names,
+        [
+            "Logback",
+            "Logback basic",
+            "Spring Boot 3",
+            "Spring Boot 2",
+            "WildFly",
+            "WildFly console",
+            "Raw",
+        ]
+    );
+}
+
+#[test]
 fn raw_comes_last() {
     assert_eq!(Preset::ALL.last(), Some(&Preset::Raw));
 }

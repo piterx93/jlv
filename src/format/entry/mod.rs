@@ -4,7 +4,7 @@
 use std::ops::Range;
 use std::sync::LazyLock;
 
-use regex::bytes::Regex;
+use regex::bytes::{CaptureLocations, Regex};
 
 use super::{EntryHead, EntryParser, Preset, strip_ansi};
 
@@ -33,7 +33,9 @@ pub struct Entry {
 /// until a line starts the next one, since more continuation lines may follow.
 #[derive(Debug)]
 pub struct EntryGrouper {
-    parser: Option<EntryParser>,
+    /// The parser of entry starts and the room it finds columns in, kept from line to
+    /// line. `None` under `Raw`.
+    parser: Option<(EntryParser, CaptureLocations)>,
     open: Option<Entry>,
 }
 
@@ -41,7 +43,9 @@ impl EntryGrouper {
     /// A grouper for `preset`'s entry-start lines. Under `Raw` every line is an entry.
     pub fn new(preset: Preset) -> Self {
         EntryGrouper {
-            parser: preset.entry_parser(),
+            parser: preset
+                .entry_parser()
+                .map(|parser| (parser, parser.locations())),
             open: None,
         }
     }
@@ -51,21 +55,29 @@ impl EntryGrouper {
     /// entry it closes is returned.
     pub fn push(&mut self, line: &[u8]) -> Option<Entry> {
         // Under `Raw` the line's content doesn't matter, so it isn't even stripped.
-        let Some(parser) = self.parser else {
+        if self.parser.is_none() {
+            return self.start(None, false);
+        }
+        self.push_stripped(&strip_ansi(line))
+    }
+
+    /// [`push`](Self::push) for a line that is already ANSI-stripped, for a caller
+    /// that strips into a buffer of its own and reads the line as well.
+    pub fn push_stripped(&mut self, line: &[u8]) -> Option<Entry> {
+        let Some((parser, locations)) = &mut self.parser else {
             return self.start(None, false);
         };
-        let line = strip_ansi(line);
-        if let Some(head) = parser.parse(&line) {
+        if let Some(head) = parser.parse_with(line, locations) {
             return self.start(Some(head), false);
         }
         match &mut self.open {
             Some(entry) => {
                 entry.lines.end += 1;
                 // Once flagged, the rest of a long stack trace needn't be matched.
-                entry.has_exception = entry.has_exception || is_exception_line(&line);
+                entry.has_exception = entry.has_exception || is_exception_line(line);
                 None
             }
-            None => self.start(None, is_exception_line(&line)),
+            None => self.start(None, is_exception_line(line)),
         }
     }
 

@@ -76,6 +76,24 @@ pub fn strip_ansi(line: &[u8]) -> Cow<'_, [u8]> {
         return Cow::Borrowed(line);
     }
     let mut out = Vec::with_capacity(line.len());
+    append_stripped(line, &mut out);
+    Cow::Owned(out)
+}
+
+/// [`strip_ansi`] for a caller that strips line after line: a line with escape codes
+/// is stripped into `buffer`, which keeps its allocation from one line to the next,
+/// and the result borrows from there. A line without any is returned as is.
+pub fn strip_ansi_into<'a>(line: &'a [u8], buffer: &'a mut Vec<u8>) -> &'a [u8] {
+    if memchr(ESC, line).is_none() {
+        return line;
+    }
+    buffer.clear();
+    append_stripped(line, buffer);
+    buffer
+}
+
+/// Appends `line` without its escape sequences to `out`.
+fn append_stripped(line: &[u8], out: &mut Vec<u8>) {
     let mut rest = line;
     while let Some(esc) = memchr(ESC, rest) {
         let (text, sequence) = rest.split_at(esc);
@@ -83,7 +101,6 @@ pub fn strip_ansi(line: &[u8]) -> Cow<'_, [u8]> {
         rest = after_escape(&sequence[1..]);
     }
     out.extend_from_slice(rest);
-    Cow::Owned(out)
 }
 
 const ESC: u8 = 0x1b;

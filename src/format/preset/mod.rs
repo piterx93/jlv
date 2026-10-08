@@ -1,11 +1,12 @@
 //! The log layouts jlv knows and how to recognise the first line of an entry in each.
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::LazyLock;
 
 use clap::ValueEnum;
 use jiff::tz::TimeZone;
-use regex::bytes::Regex;
+use regex::bytes::{CaptureLocations, Regex};
 
 use crate::format::{LogTime, time};
 
@@ -42,6 +43,22 @@ pub enum Preset {
     Raw,
 }
 
+/// The preset's name as the header shows it: `Logback`, `Logback basic`,
+/// `Spring Boot 3`, `Spring Boot 2`, `WildFly`, `WildFly console` and `Raw`.
+impl fmt::Display for Preset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Preset::Logback => "Logback",
+            Preset::LogbackBasic => "Logback basic",
+            Preset::Spring3 => "Spring Boot 3",
+            Preset::Spring2 => "Spring Boot 2",
+            Preset::Wildfly => "WildFly",
+            Preset::WildflyConsole => "WildFly console",
+            Preset::Raw => "Raw",
+        })
+    }
+}
+
 impl Preset {
     /// Every preset in a fixed order: within a family the one with a date comes before
     /// the time-only one, and `Raw` comes last. Detection breaks ties in this order.
@@ -58,13 +75,14 @@ impl Preset {
     /// What recognises this preset's entry-start lines. `Raw` has none: it doesn't
     /// group lines, so whoever reads a file under `Raw` treats every line as an entry.
     pub fn entry_parser(self) -> Option<EntryParser> {
-        static LOGBACK: Pattern = Pattern::new(|| entry_regex(DATE_TIME, LOGBACK_COLUMNS));
-        static LOGBACK_BASIC: Pattern = Pattern::new(|| entry_regex(TIME, LOGBACK_COLUMNS));
-        static SPRING3: Pattern = Pattern::new(|| entry_regex(ISO_DATE_TIME, SPRING3_COLUMNS));
-        static SPRING2: Pattern = Pattern::new(|| entry_regex(DATE_TIME, SPRING2_COLUMNS));
-        static WILDFLY: Pattern = Pattern::new(|| entry_regex(DATE_TIME, WILDFLY_COLUMNS));
-        static WILDFLY_CONSOLE: Pattern = Pattern::new(|| entry_regex(TIME, WILDFLY_COLUMNS));
-        let regex: &'static Regex = match self {
+        static LOGBACK: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, LOGBACK_COLUMNS));
+        static LOGBACK_BASIC: Pattern = Pattern::new(|| EntryPattern::new(TIME, LOGBACK_COLUMNS));
+        static SPRING3: Pattern =
+            Pattern::new(|| EntryPattern::new(ISO_DATE_TIME, SPRING3_COLUMNS));
+        static SPRING2: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, SPRING2_COLUMNS));
+        static WILDFLY: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, WILDFLY_COLUMNS));
+        static WILDFLY_CONSOLE: Pattern = Pattern::new(|| EntryPattern::new(TIME, WILDFLY_COLUMNS));
+        let pattern: &'static EntryPattern = match self {
             Preset::Logback => &LOGBACK,
             Preset::LogbackBasic => &LOGBACK_BASIC,
             Preset::Spring3 => &SPRING3,
@@ -75,7 +93,7 @@ impl Preset {
         };
         Some(EntryParser {
             preset: self,
-            regex,
+            pattern,
         })
     }
 }
@@ -84,7 +102,7 @@ impl Preset {
 #[derive(Debug, Clone, Copy)]
 pub struct EntryParser {
     preset: Preset,
-    regex: &'static Regex,
+    pattern: &'static EntryPattern,
 }
 
 impl EntryParser {
@@ -96,16 +114,34 @@ impl EntryParser {
     ///
     /// [`Level`]: crate::format::Level
     pub fn parse(self, line: &[u8]) -> Option<EntryHead> {
-        let captures = self.regex.captures(line)?;
-        let span = |name| captures.name(name).map(|column| column.range());
+        self.parse_with(line, &mut self.locations())
+    }
+
+    /// Room for [`parse_with`](Self::parse_with) to find the columns in.
+    pub(in crate::format) fn locations(self) -> CaptureLocations {
+        self.pattern.regex.capture_locations()
+    }
+
+    /// [`parse`](Self::parse) in `locations`, which [`locations`](Self::locations)
+    /// gave and which are reused from line to line. Fresh ones cost an allocation and
+    /// an update of a reference count that every thread parsing with this preset
+    /// shares, which keeps parsing on many threads at once from getting any faster.
+    pub(in crate::format) fn parse_with(
+        self,
+        line: &[u8],
+        locations: &mut CaptureLocations,
+    ) -> Option<EntryHead> {
+        let matched = self.pattern.regex.captures_read(locations, line)?;
+        let span = |group| locations.get(group).map(|(start, end)| start..end);
+        let groups = &self.pattern.groups;
         Some(EntryHead {
-            timestamp: span("timestamp")?,
-            level: span("level")?,
-            thread: span("thread")?,
-            class: span("class")?,
+            timestamp: span(groups.timestamp)?,
+            level: span(groups.level)?,
+            thread: span(groups.thread)?,
+            class: span(groups.class)?,
             // Matching the message too would cost time proportional to its length on
             // every line, for a span that is known anyway.
-            message: captures.get_match().end()..line.len(),
+            message: matched.end()..line.len(),
         })
     }
 
@@ -139,7 +175,42 @@ impl EntryParser {
     }
 }
 
-type Pattern = LazyLock<Regex>;
+type Pattern = LazyLock<EntryPattern>;
+
+/// A preset's entry-start regex and which of its groups holds each column.
+#[derive(Debug)]
+struct EntryPattern {
+    regex: Regex,
+    groups: ColumnGroups,
+}
+
+/// Group indices, so that a match isn't searched for the columns by name.
+#[derive(Debug)]
+struct ColumnGroups {
+    timestamp: usize,
+    level: usize,
+    thread: usize,
+    class: usize,
+}
+
+impl EntryPattern {
+    fn new(timestamp: &str, columns: &str) -> EntryPattern {
+        let regex = entry_regex(timestamp, columns);
+        let group = |name| {
+            regex
+                .capture_names()
+                .position(|group| group == Some(name))
+                .expect("the built-in patterns have a group for every column")
+        };
+        let groups = ColumnGroups {
+            timestamp: group("timestamp"),
+            level: group("level"),
+            thread: group("thread"),
+            class: group("class"),
+        };
+        EntryPattern { regex, groups }
+    }
+}
 
 // The patterns are byte patterns without Unicode (`-u`), so a line that isn't UTF-8
 // still parses, and `.` takes any byte (`s`). Fractions of a second have 1 to 9

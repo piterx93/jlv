@@ -11,7 +11,10 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, action};
-use crate::test_support::{app, char_key, key, named_app, numbered_log, row};
+use crate::format::Preset;
+use crate::test_support::{
+    app, app_in, char_key, key, named_app, numbered_log, row, unindexed_app,
+};
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
     terminal.draw(|frame| render(frame, app, theme)).unwrap();
@@ -166,6 +169,75 @@ fn empty_file_shows_an_empty_body() {
     "                                                                                "
     "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
     "#);
+}
+
+#[test]
+fn header_shows_the_indexing_progress_until_the_index_is_complete() {
+    let mut app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ indexing 0%                                      "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn header_names_the_preset_the_file_is_read_in() {
+    let mut app = app_in(
+        Preset::Logback,
+        b"2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
+    );
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 63 B ─ Logback");
+}
+
+#[test]
+fn empty_file_shows_no_indexing_progress() {
+    let mut app = unindexed_app(Preset::Raw, b"");
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 0 B ─ Raw");
+}
+
+#[test]
+fn body_shows_a_row_per_entry() {
+    let log = [
+        "2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
+        "2026-10-07 12:00:01.500 [main] ERROR com.example.App - Failed\n",
+        "java.lang.IllegalStateException: boom\n",
+        "\tat com.example.App.main(App.java:10)\n",
+        "2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done\n",
+    ]
+    .concat();
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    let body: Vec<String> = (1..4).map(|y| row(&terminal, y)).collect();
+    assert_snapshot!(body.join("\n"), @r"
+    ▶2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started
+     2026-10-07 12:00:01.500 [main] ERROR com.example.App - Failed
+     2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done
+    ");
+    assert_eq!(row(&terminal, 4), "");
 }
 
 #[test]
@@ -788,6 +860,13 @@ fn any_action() -> impl Strategy<Value = Action> {
 }
 
 proptest! {
+    // A case whose file never finishes indexing fails only at the deadline, and so
+    // would every step of shrinking it. Shrinking stops after two seconds instead.
+    #![proptest_config(ProptestConfig {
+        max_shrink_time: 2_000,
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn any_file_at_any_size_draws_only_printable_cells(
         bytes in prop::collection::vec(any::<u8>(), 0..512),

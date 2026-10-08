@@ -1,11 +1,18 @@
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
-use crate::test_support::{app, char_key, ctrl, key, named_app, numbered_log};
+use crate::index::Progress;
+use crate::test_support;
+use crate::test_support::{
+    LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, key, named_app, numbered_log, unindexed_app,
+    wait_for_index, wait_for_index_within,
+};
 
 /// `(top, selected)`: the first line on screen and the selected line.
 fn pos(app: &App) -> (usize, Option<usize>) {
@@ -222,6 +229,142 @@ fn size_is_the_file_length_in_bytes() {
 #[test]
 fn empty_file_has_size_zero() {
     assert_eq!(app(b"").size(), 0);
+}
+
+// --- rows from the index ---
+
+const STARTED: &str = "2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n";
+const FAILED: &str = "2026-10-07 12:00:01.500 [main] ERROR com.example.App - Failed\n";
+const EXCEPTION: &str = "java.lang.IllegalStateException: boom\n";
+const FRAME: &str = "\tat com.example.App.main(App.java:10)\n";
+const DONE: &str = "2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done\n";
+
+fn logback(lines: &[&str]) -> App {
+    app_in(Preset::Logback, lines.concat().as_bytes())
+}
+
+#[test]
+fn every_entry_is_a_row() {
+    let app = logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]);
+    assert_eq!(app.viewport().total(), 3);
+}
+
+#[test]
+fn row_shows_the_first_line_of_its_entry() {
+    let app = logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]);
+    assert_eq!(app.line(1), FAILED.trim_end());
+    assert_eq!(app.line(2), DONE.trim_end());
+}
+
+#[test]
+fn row_of_the_headless_entry_shows_the_first_line_of_the_file() {
+    let app = logback(&[EXCEPTION, FRAME, STARTED]);
+    assert_eq!(app.viewport().total(), 2);
+    assert_eq!(app.line(0), EXCEPTION.trim_end());
+}
+
+#[test]
+fn row_of_an_entry_with_crlf_endings_has_no_line_ending() {
+    let text = [FAILED, FRAME, DONE].concat().replace('\n', "\r\n");
+    let app = app_in(Preset::Logback, text.as_bytes());
+    assert_eq!(app.line(0), FAILED.trim_end());
+    assert_eq!(app.line(1), DONE.trim_end());
+}
+
+#[test]
+fn last_row_without_a_newline_shows_the_whole_line() {
+    let app = app(b"first\nlast");
+    assert_eq!(app.line(1), "last");
+}
+
+#[test]
+fn new_app_has_no_rows_before_the_index_is_polled() {
+    let app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
+    assert_eq!(app.viewport().total(), 0);
+    assert_eq!(app.viewport().selected(), None);
+}
+
+#[test]
+fn app_indexes_in_the_preset_zone_and_anchor_it_was_given() {
+    let mtime: Timestamp = "2026-10-08T12:00:00Z".parse().unwrap();
+    let zone = TimeZone::get("Europe/Warsaw").unwrap();
+    let app = App::new(
+        Path::new("/var/log/console.log"),
+        test_support::source(b"12:00:00,123 INFO  [org.jboss.as] (main) started\n"),
+        Preset::WildflyConsole,
+        zone.clone(),
+        mtime,
+    );
+    let settings = app.settings();
+    assert_eq!(settings.preset, Preset::WildflyConsole);
+    assert_eq!(settings.zone, zone);
+    assert_eq!(
+        settings.anchor,
+        Anchor::Modified("2026-10-08T14:00:00".parse().unwrap())
+    );
+}
+
+#[test]
+fn anchor_comes_from_a_date_in_the_file_name() {
+    let app = App::new(
+        Path::new("/var/log/server.log.2026-10-06"),
+        test_support::source(b"x\n"),
+        Preset::LogbackBasic,
+        test_support::zone(),
+        test_support::mtime(),
+    );
+    assert_eq!(
+        app.settings().anchor,
+        Anchor::Named("2026-10-06".parse().unwrap())
+    );
+}
+
+#[test]
+fn new_app_has_indexed_none_of_the_file() {
+    let content = numbered_log(100);
+    let app = unindexed_app(Preset::Raw, content.as_bytes());
+    let total = content.len() as u64;
+    assert_eq!(app.progress(), Progress { indexed: 0, total });
+}
+
+#[test]
+fn polling_the_index_to_the_end_brings_in_every_row() {
+    let content = numbered_log(100);
+    let mut app = unindexed_app(Preset::Raw, content.as_bytes());
+    wait_for_index(&mut app);
+    let total = content.len() as u64;
+    assert_eq!(
+        app.progress(),
+        Progress {
+            indexed: total,
+            total
+        }
+    );
+    assert_eq!(app.viewport().total(), 100);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn empty_file_is_indexed_without_rows() {
+    let app = app(b"");
+    assert!(app.progress().is_complete());
+    assert_eq!(app.viewport().total(), 0);
+}
+
+#[test]
+fn rows_taken_in_later_keep_the_selection() {
+    let mut app = unindexed_app(Preset::LogbackBasic, numbered_log(40_000).as_bytes());
+    app.resize(10);
+    let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
+    while app.viewport().total() < 2 {
+        assert!(Instant::now() < deadline, "no rows came in");
+        thread::sleep(Duration::from_millis(1));
+        app.poll_index();
+    }
+    app.apply(Action::Down);
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    assert_eq!(app.viewport().total(), 40_000);
+    assert_eq!(pos(&app), (0, Some(1)));
 }
 
 #[test]

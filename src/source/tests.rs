@@ -1,5 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::SystemTime;
+
+use jiff::Timestamp;
 
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -19,16 +22,19 @@ fn mapped(path: &Path) -> Source {
 }
 
 /// The lines of a text input, as text, for readable failures.
-fn lines(text: &str) -> Vec<&str> {
-    let index = LineIndex::new(text.as_bytes());
-    (0..index.len())
-        .map(|i| std::str::from_utf8(index.line(text.as_bytes(), i)).unwrap())
+fn text_lines(text: &str) -> Vec<&str> {
+    lines(text.as_bytes())
+        .map(|line| std::str::from_utf8(line).unwrap())
         .collect()
 }
 
 fn byte_lines(bytes: &[u8]) -> Vec<&[u8]> {
-    let index = LineIndex::new(bytes);
-    (0..index.len()).map(|i| index.line(bytes, i)).collect()
+    lines(bytes).collect()
+}
+
+/// Where `line`, a slice of `bytes`, starts in it.
+fn offset_in(bytes: &[u8], line: &[u8]) -> usize {
+    line.as_ptr() as usize - bytes.as_ptr() as usize
 }
 
 fn a_times(n: usize) -> String {
@@ -40,6 +46,61 @@ fn cut(kept: &str) -> String {
 }
 
 // --- mapping ---
+
+/// Sets the modification time of the file at `path` to `rfc3339`.
+fn set_mtime(path: &Path, rfc3339: &str) {
+    let mtime: Timestamp = rfc3339.parse().unwrap();
+    let file = File::options().write(true).open(path).unwrap();
+    file.set_modified(SystemTime::from(mtime)).unwrap();
+}
+
+#[test]
+fn source_knows_when_the_file_was_modified() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, b"one\n");
+    set_mtime(&path, "2026-10-06T21:15:30Z");
+    assert_eq!(
+        mapped(&path).modified(),
+        Some("2026-10-06T21:15:30Z".parse().unwrap())
+    );
+}
+
+#[test]
+fn empty_source_knows_when_the_file_was_modified() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, b"");
+    set_mtime(&path, "2026-10-06T21:15:30Z");
+    assert_eq!(
+        mapped(&path).modified(),
+        Some("2026-10-06T21:15:30Z".parse().unwrap())
+    );
+}
+
+/// A file rotated or touched after it was opened doesn't change what the viewer
+/// dates its entries from.
+#[test]
+fn modification_time_is_the_one_from_when_the_file_was_mapped() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, b"one\n");
+    set_mtime(&path, "2026-10-06T21:15:30Z");
+    let source = mapped(&path);
+    set_mtime(&path, "2026-10-08T09:00:00Z");
+    assert_eq!(
+        source.modified(),
+        Some("2026-10-06T21:15:30Z".parse().unwrap())
+    );
+}
+
+#[test]
+fn opened_source_knows_when_the_file_was_modified() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, b"one\n");
+    set_mtime(&path, "2026-10-06T21:15:30Z");
+    assert_eq!(
+        open(&path).unwrap().modified(),
+        Some("2026-10-06T21:15:30Z".parse().unwrap())
+    );
+}
 
 #[test]
 fn mapped_source_holds_the_file_content() {
@@ -84,95 +145,101 @@ fn mapping_outlives_the_deleted_file() {
 }
 
 #[test]
-fn line_starts_index_into_the_mapped_file() {
+fn source_as_bytes_is_the_mapped_content() {
     let dir = TempDir::new().unwrap();
     let path = file_with(&dir, b"INFO one\r\nWARN two\nERROR three");
     let source = mapped(&path);
-    let index = LineIndex::new(source.bytes());
-    assert_eq!(index.starts(), [0, 10, 19]);
-    assert_eq!(&source.bytes()[19..], b"ERROR three");
+    let bytes: &[u8] = source.as_ref();
+    assert_eq!(bytes, b"INFO one\r\nWARN two\nERROR three");
+}
+
+#[test]
+fn lines_of_the_mapped_file_are_slices_of_it() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, b"INFO one\r\nWARN two\nERROR three");
+    let source = mapped(&path);
+    let starts: Vec<usize> = lines(source.bytes())
+        .map(|line| offset_in(source.bytes(), line))
+        .collect();
+    assert_eq!(starts, [0, 10, 19]);
 }
 
 // --- line splitting ---
 
 #[test]
 fn empty_input_has_no_lines() {
-    let index = LineIndex::new(b"");
-    assert_eq!(index.len(), 0);
-    assert!(index.is_empty());
-    assert_eq!(index.starts(), [0usize; 0]);
+    assert_eq!(lines(b"").next(), None);
 }
 
 #[test]
 fn lone_newline_is_one_empty_line() {
-    assert_eq!(lines("\n"), [""]);
+    assert_eq!(text_lines("\n"), [""]);
 }
 
 #[test]
 fn text_without_newline_is_one_line() {
-    assert_eq!(lines("a"), ["a"]);
+    assert_eq!(text_lines("a"), ["a"]);
 }
 
 #[test]
 fn trailing_newline_does_not_start_another_line() {
-    assert_eq!(lines("a\n"), ["a"]);
-}
-
-#[test]
-fn input_with_lines_is_not_empty() {
-    assert!(!LineIndex::new(b"\n").is_empty());
+    assert_eq!(text_lines("a\n"), ["a"]);
 }
 
 #[test]
 fn last_line_without_newline_still_counts() {
-    assert_eq!(lines("first\nsecond"), ["first", "second"]);
+    assert_eq!(text_lines("first\nsecond"), ["first", "second"]);
 }
 
 #[test]
 fn consecutive_newlines_give_empty_lines() {
-    assert_eq!(lines("a\n\n\nb\n"), ["a", "", "", "b"]);
+    assert_eq!(text_lines("a\n\n\nb\n"), ["a", "", "", "b"]);
 }
 
 #[test]
 fn crlf_endings_are_not_part_of_the_line() {
-    assert_eq!(lines("a\r\nb\r\n"), ["a", "b"]);
+    assert_eq!(text_lines("a\r\nb\r\n"), ["a", "b"]);
 }
 
 #[test]
 fn mixed_line_endings_are_both_understood() {
-    assert_eq!(lines("a\r\nb\nc\r\nd"), ["a", "b", "c", "d"]);
+    assert_eq!(text_lines("a\r\nb\nc\r\nd"), ["a", "b", "c", "d"]);
 }
 
 #[test]
 fn lone_cr_in_the_middle_is_not_a_separator() {
-    assert_eq!(lines("a\rb\nc"), ["a\rb", "c"]);
+    assert_eq!(text_lines("a\rb\nc"), ["a\rb", "c"]);
 }
 
 #[test]
 fn only_one_cr_before_the_newline_is_dropped() {
-    assert_eq!(lines("a\r\r\n"), ["a\r"]);
+    assert_eq!(text_lines("a\r\r\n"), ["a\r"]);
 }
 
 #[test]
 fn cr_at_the_very_end_without_newline_is_kept() {
-    assert_eq!(lines("a\nb\r"), ["a", "b\r"]);
+    assert_eq!(text_lines("a\nb\r"), ["a", "b\r"]);
 }
 
 #[test]
 fn crlf_alone_is_one_empty_line() {
-    assert_eq!(lines("\r\n"), [""]);
+    assert_eq!(text_lines("\r\n"), [""]);
 }
 
 #[test]
-fn line_starts_are_byte_offsets() {
-    let index = LineIndex::new(b"ab\r\ncd\n\nx");
-    assert_eq!(index.starts(), [0, 4, 7, 8]);
+fn lines_start_after_each_newline() {
+    let bytes = b"ab\r\ncd\n\nx";
+    let starts: Vec<usize> = lines(bytes).map(|line| offset_in(bytes, line)).collect();
+    assert_eq!(starts, [0, 4, 7, 8]);
 }
 
 #[test]
-fn line_starts_count_bytes_not_characters() {
-    let index = LineIndex::new("é😀\nü\n".as_bytes());
-    assert_eq!(index.starts(), [0, 7]);
+fn lines_run_out_after_the_last_line() {
+    let mut lines = lines(b"one\ntwo\n");
+    assert_eq!(lines.next(), Some(&b"one"[..]));
+    assert_eq!(lines.next(), Some(&b"two"[..]));
+    assert_eq!(lines.next(), None);
+    assert_eq!(lines.next(), None);
 }
 
 #[test]
@@ -185,19 +252,10 @@ fn nul_and_invalid_bytes_are_ordinary_line_content() {
 }
 
 #[test]
-fn any_line_can_be_read_without_the_ones_before() {
-    let text = "one\ntwo\r\nthree\nfour";
-    let index = LineIndex::new(text.as_bytes());
-    assert_eq!(index.line(text.as_bytes(), 3), b"four");
-    assert_eq!(index.line(text.as_bytes(), 1), b"two");
-}
-
-#[test]
-fn many_lines_are_all_indexed() {
+fn many_lines_are_all_read() {
     let text: String = (0..10_000).map(|i| format!("line {i}\n")).collect();
-    let index = LineIndex::new(text.as_bytes());
-    assert_eq!(index.len(), 10_000);
-    assert_eq!(index.line(text.as_bytes(), 9_999), b"line 9999");
+    assert_eq!(lines(text.as_bytes()).count(), 10_000);
+    assert_eq!(lines(text.as_bytes()).last(), Some(&b"line 9999"[..]));
 }
 
 /// What the lines must rejoin to: the input without the `\r` before each `\n` and
@@ -229,13 +287,10 @@ fn log_bytes() -> impl Strategy<Value = Vec<u8>> {
 
 proptest! {
     #[test]
-    fn line_index_never_panics_on_arbitrary_bytes(
+    fn lines_never_panic_on_arbitrary_bytes(
         bytes in prop::collection::vec(any::<u8>(), 0..1024)
     ) {
-        let index = LineIndex::new(&bytes);
-        for i in 0..index.len() {
-            index.line(&bytes, i);
-        }
+        lines(&bytes).for_each(drop);
     }
 
     #[test]
@@ -245,12 +300,10 @@ proptest! {
     }
 
     #[test]
-    fn every_line_sits_at_its_start_offset(bytes in log_bytes()) {
-        let index = LineIndex::new(&bytes);
-        prop_assert_eq!(index.starts().len(), index.len());
-        for (i, &start) in index.starts().iter().enumerate() {
-            let line = index.line(&bytes, i);
-            prop_assert!(bytes[start..].starts_with(line));
+    fn every_line_starts_at_the_start_or_after_a_newline(bytes in log_bytes()) {
+        for line in lines(&bytes) {
+            let start = offset_in(&bytes, line);
+            prop_assert!(start < bytes.len());
             prop_assert!(!line.contains(&b'\n'));
             prop_assert!(start == 0 || bytes[start - 1] == b'\n');
         }
@@ -260,7 +313,7 @@ proptest! {
     fn every_newline_ends_a_line(bytes in log_bytes()) {
         let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
         let unterminated = usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'));
-        prop_assert_eq!(LineIndex::new(&bytes).len(), newlines + unterminated);
+        prop_assert_eq!(lines(&bytes).count(), newlines + unterminated);
     }
 }
 

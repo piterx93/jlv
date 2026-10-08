@@ -3,10 +3,16 @@
 
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
+
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::source::{self, LineIndex, Source};
+use crate::format::{Anchor, Preset};
+use crate::index::{Indexer, Progress, Record, Settings};
+use crate::source::{self, Source};
 use crate::viewport::Viewport;
 
 #[cfg(test)]
@@ -60,27 +66,73 @@ pub fn action(key: KeyEvent) -> Option<Action> {
 #[derive(Debug)]
 pub struct App {
     name: String,
-    source: Source,
-    lines: LineIndex,
+    source: Arc<Source>,
+    indexer: Indexer,
+    records: Vec<Record>,
+    progress: Progress,
+    settings: Settings,
     viewport: Viewport,
     quit: bool,
 }
 
 impl App {
-    /// A viewer over `source` at the top of the file with the first line selected.
-    /// `path` is where the file was opened from. The screen has no lines until the
-    /// first [`resize`](Self::resize).
-    pub fn new(path: &Path, source: Source) -> Self {
+    /// A viewer over `source`, which starts indexing it in the background in
+    /// `preset`. `path` is where the file was opened from; its name and `mtime`, the
+    /// file's modification time, give the anchor for dating a time-only log (see
+    /// [`Anchor::for_file`](crate::format::Anchor::for_file)). Timestamps without an
+    /// offset are local time in `zone`.
+    ///
+    /// It has no rows until [`poll_index`](Self::poll_index) takes in the first
+    /// entries, and the screen has no lines until the first [`resize`](Self::resize).
+    pub fn new(
+        path: &Path,
+        source: Source,
+        preset: Preset,
+        zone: TimeZone,
+        mtime: Timestamp,
+    ) -> Self {
         // A path like `..` has no last component; showing it whole is the next best thing.
         let name = path.file_name().unwrap_or(path.as_os_str());
-        let lines = LineIndex::new(source.bytes());
+        let anchor = Anchor::for_file(path, mtime, &zone);
+        let source = Arc::new(source);
+        let settings = Settings {
+            preset,
+            zone,
+            anchor,
+        };
+        let progress = Progress {
+            indexed: 0,
+            total: source.bytes().len() as u64,
+        };
         Self {
             name: name.to_string_lossy().into_owned(),
-            viewport: Viewport::new(lines.len(), 0),
+            indexer: Indexer::spawn(Arc::clone(&source), settings.clone()),
             source,
-            lines,
+            records: Vec::new(),
+            progress,
+            settings,
+            viewport: Viewport::new(0, 0),
             quit: false,
         }
+    }
+
+    /// Takes in the entries indexed since the last call, one row each. The selection
+    /// stays where it was; with no rows before, the first row is selected.
+    pub fn poll_index(&mut self) {
+        self.progress = self.indexer.poll(&mut self.records);
+        self.viewport.set_total(self.records.len());
+    }
+
+    /// How far indexing got as of the last [`poll_index`](Self::poll_index):
+    /// nothing of the file's size before the first.
+    pub fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    /// How the file is indexed: the preset, the zone and the anchor `new` made of
+    /// its arguments.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
     }
 
     /// The last component of the path, decoded lossily. Not yet safe to show: it may
@@ -94,10 +146,14 @@ impl App {
         self.source.bytes().len() as u64
     }
 
-    /// Line `i` as text (see [`crate::source::display`]). Not yet safe to show: it may
-    /// hold control characters. Panics if `i` is not below `viewport().total()`.
+    /// The first line of row `i`'s entry as text (see [`crate::source::display`]).
+    /// Not yet safe to show: it may hold control characters. Panics if `i` is not
+    /// below `viewport().total()`.
     pub fn line(&self, i: usize) -> Cow<'_, str> {
-        source::display(self.lines.line(self.source.bytes(), i))
+        let bytes = self.records[i].bytes();
+        // The records index the mapped file, so their offsets fit a `usize`.
+        let entry = &self.source.bytes()[bytes.start as usize..bytes.end as usize];
+        source::display(source::lines(entry).next().unwrap_or_default())
     }
 
     /// Which lines are on screen and which one is selected.

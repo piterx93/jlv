@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use jlv::format::Preset;
-use jlv::source::LineIndex;
+use jlv::source;
 
 /// Every preset but `Raw`, with its fixture in `tests/fixtures`, in the order of
 /// [`Preset::ALL`].
@@ -38,6 +38,5 @@ pub fn fixture(name: &str) -> Vec<u8> {
 
 /// The lines of `bytes` as in the file, without line endings.
 pub fn lines(bytes: &[u8]) -> Vec<&[u8]> {
-    let index = LineIndex::new(bytes);
-    (0..index.len()).map(|i| index.line(bytes, i)).collect()
+    source::lines(bytes).collect()
 }
