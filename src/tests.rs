@@ -433,3 +433,124 @@ proptest! {
         }
     }
 }
+
+// --- event loop ---
+
+mod event_loop {
+    use std::collections::VecDeque;
+    use std::io;
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    };
+
+    use crate::app::App;
+    use crate::event_loop;
+    use crate::test_support::{app, char_key, numbered_log, row};
+    use crate::ui::Theme;
+
+    /// Hands out `events` one by one; asking for more is a test failure, since the
+    /// loop should have stopped at `q`.
+    fn script(events: Vec<Event>) -> impl FnMut() -> io::Result<Event> {
+        let mut events = VecDeque::from(events);
+        move || Ok(events.pop_front().expect("read past the last event"))
+    }
+
+    fn keys(chars: &str) -> Vec<Event> {
+        chars.chars().map(|c| Event::Key(char_key(c))).collect()
+    }
+
+    fn terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(80, 24)).unwrap()
+    }
+
+    fn hundred_lines() -> App {
+        app(numbered_log(100).as_bytes())
+    }
+
+    #[test]
+    fn q_ends_the_loop() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let result = event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q")));
+        assert!(result.is_ok(), "{result:?}");
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn first_screen_is_drawn_before_waiting_for_a_key() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
+        assert_eq!(
+            row(&terminal, 1),
+            "▶12:00:00.001 [main] INFO  com.example.App - step 1"
+        );
+    }
+
+    #[test]
+    fn keys_are_applied_and_the_screen_redrawn() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("Gq"))).unwrap();
+        assert_eq!(app.viewport().selected(), Some(99));
+        assert_eq!(
+            row(&terminal, 22),
+            "▶12:00:00.100 [main] INFO  com.example.App - step 100"
+        );
+    }
+
+    #[test]
+    fn unbound_keys_and_other_events_are_ignored() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 3,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        let events = vec![
+            Event::Key(char_key('x')),
+            Event::FocusGained,
+            Event::Mouse(mouse),
+            Event::Resize(100, 40),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(char_key('q')),
+        ];
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        assert_eq!(app.viewport().selected(), Some(1));
+    }
+
+    #[test]
+    fn theme_is_used_for_drawing() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        event_loop(&mut terminal, &mut app, Theme::Plain, script(keys("q"))).unwrap();
+        let empty = ratatui::buffer::Cell::EMPTY.style();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| cell.style() == empty)
+        );
+    }
+
+    #[test]
+    fn error_reading_events_ends_the_loop_with_that_error() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let mut reads = 0;
+        let failing = || {
+            reads += 1;
+            Err(io::Error::other("terminal went away"))
+        };
+        let err = event_loop(&mut terminal, &mut app, Theme::Styled, failing).unwrap_err();
+        assert_eq!(err.to_string(), "terminal went away");
+        assert_eq!(reads, 1);
+    }
+}

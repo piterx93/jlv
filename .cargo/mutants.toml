@@ -1,2 +1,7 @@
 # main.rs only hands the command line to the library, where the logic and its tests live.
 exclude_globs = ["src/main.rs"]
+
+exclude_re = [
+    # `run` only sets up the real terminal around `event_loop`; testing it needs a tty.
+    'src/lib\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)$',
+]

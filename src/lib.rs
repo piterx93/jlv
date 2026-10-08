@@ -1,17 +1,26 @@
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 
 use clap::Parser;
 use clap::error::ErrorKind;
+use ratatui::Terminal;
+use ratatui::backend::Backend;
+use ratatui::crossterm::event::Event;
 
+use crate::app::{App, action};
 use crate::cli::Args;
 use crate::source::Source;
+use crate::ui::Theme;
 
+pub mod app;
 pub mod cli;
 pub mod source;
+pub mod ui;
 pub mod viewport;
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -59,6 +68,48 @@ where
             Err(FAILURE)
         }
     }
+}
+
+/// Shows the file until the user quits. Switches the terminal to raw mode and the
+/// alternate screen and restores it on return, error or panic.
+pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
+    let mut app = App::new(&launch.args.file, launch.source);
+    // try_init can fail after raw mode is on; restore ignores what isn't set up.
+    let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        theme,
+        ratatui::crossterm::event::read,
+    );
+    ratatui::restore();
+    result
+}
+
+/// Draws the screen, waits for the next event from `next_event`, applies the key's
+/// action, and again, until the app should quit. Other events only redraw. Errors from
+/// drawing or reading events end the loop.
+pub fn event_loop<B>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    theme: Theme,
+    mut next_event: impl FnMut() -> io::Result<Event>,
+) -> io::Result<()>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+{
+    while !app.should_quit() {
+        terminal
+            .draw(|frame| ui::render(frame, app, theme))
+            .map_err(io::Error::other)?;
+        if let Event::Key(key) = next_event()?
+            && let Some(action) = action(key)
+        {
+            app.apply(action);
+        }
+    }
+    Ok(())
 }
 
 const SUCCESS: u8 = 0;
