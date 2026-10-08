@@ -4,7 +4,10 @@ use std::ops::Range;
 use std::sync::LazyLock;
 
 use clap::ValueEnum;
+use jiff::tz::TimeZone;
 use regex::bytes::Regex;
+
+use crate::format::{LogTime, time};
 
 #[cfg(test)]
 mod tests;
@@ -110,6 +113,29 @@ impl EntryParser {
     /// `WildflyConsole`) it is only a time of day.
     pub fn has_date(self) -> bool {
         !matches!(self.preset, Preset::LogbackBasic | Preset::WildflyConsole)
+    }
+
+    /// What the timestamp span `span` (the bytes of [`EntryHead::timestamp`]) says:
+    /// an instant if this preset writes a date, else a time of day. The fraction of a
+    /// second follows a `.` or a `,` and has 1 to 9 digits. A timestamp without an
+    /// offset is local time in `zone`; one that falls into a gap or a fold of `zone`
+    /// is resolved the way jiff's `compatible` disambiguation does. `None` if `span`
+    /// isn't a timestamp or names a date or time that doesn't exist (`2026-02-30`,
+    /// `25:00`, `12:60`) or that jiff can't represent.
+    pub fn timestamp(self, span: &[u8], zone: &TimeZone) -> Option<LogTime> {
+        if !self.has_date() {
+            time::time_of_day(span).map(LogTime::TimeOfDay)
+        } else if self.has_offset() {
+            time::instant_with_offset(span).map(LogTime::Instant)
+        } else {
+            time::local_instant(span, zone).map(LogTime::Instant)
+        }
+    }
+
+    /// Whether the timestamp ends in an offset. Only Spring Boot 3 writes one, in
+    /// ISO 8601 with a `T` before the time.
+    fn has_offset(self) -> bool {
+        self.preset == Preset::Spring3
     }
 }
 

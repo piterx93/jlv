@@ -1,6 +1,6 @@
 //! Understanding log lines: the format presets and detecting which one a file is in,
-//! severity levels, removing terminal escape codes before a line is parsed, and
-//! grouping lines into entries.
+//! severity levels, removing terminal escape codes before a line is parsed,
+//! grouping lines into entries and reading their timestamps.
 
 use std::borrow::Cow;
 
@@ -9,10 +9,12 @@ use memchr::{memchr, memchr2};
 mod detect;
 mod entry;
 mod preset;
+mod time;
 
 pub use detect::detect;
 pub use entry::{Entry, EntryGrouper, is_exception_line};
 pub use preset::{EntryHead, EntryParser, Preset};
+pub use time::LogTime;
 
 #[cfg(test)]
 mod tests;
