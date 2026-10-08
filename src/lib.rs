@@ -15,6 +15,7 @@ use crate::ui::Theme;
 
 pub mod app;
 pub mod cli;
+pub mod format;
 pub mod source;
 pub mod ui;
 pub mod viewport;
