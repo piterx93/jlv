@@ -2,13 +2,23 @@
 name = "jlv"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Terminal log viewer for Java application logs"
 authors = ["Piotr Owczarek <piter19993@gmail.com>"]
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+memchr = "2.8"
+memmap2 = "0.9"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+unicode-width = "0.2"
+
+[dev-dependencies]
+insta = "1.49"
+proptest = "1"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

@@ -1,0 +1,4 @@
+[alias]
+# Coverage gate shared by CI and scripts/check. The threshold is about the library;
+# main.rs is only wiring.
+cov = ["llvm-cov", "--locked", "--ignore-filename-regex", "src/main\\.rs$", "--fail-under-lines", "80"]
