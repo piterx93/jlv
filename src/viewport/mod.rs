@@ -114,6 +114,12 @@ impl Viewport {
         self.select(row, top);
     }
 
+    /// Selects `row` (the last row if `row` is past the end) and shows it on screen
+    /// line `line`, or as close to it as the ends allow.
+    pub fn select_on_line(&mut self, row: usize, line: usize) {
+        self.select(row, row.saturating_sub(line));
+    }
+
     /// Changes the number of screen lines. The selection stays; the screen scrolls
     /// only as far as needed to show it and to not run past the last row.
     pub fn resize(&mut self, height: usize) {

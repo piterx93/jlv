@@ -66,7 +66,9 @@ const TAB_STOP: usize = 4;
 /// in [`level_style`]), the thread if shown (15 wide, a longer name keeps its end
 /// after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
 /// cut with `…` if even the abbreviation is too wide) and the message in the rest.
-/// The headless entry has only a message, its first line. Messages are cut at the
+/// The headless entry has only a message, its first line. A folded entry's message
+/// ends with ` [+N]`, N being the lines it hides; an unfolded entry's continuation
+/// lines are rows of their own, in the message column. Messages are cut at the
 /// right edge, or wrapped onto the following lines of the message column; scrolled
 /// right, they stop once the longest message on screen ends at the right edge.
 /// The lines in between follow the frame's height, so this resizes `app`.

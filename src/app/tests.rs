@@ -128,6 +128,21 @@ fn capital_p_cycles_the_preset() {
     assert_eq!(action(char_key('P')), Some(Action::CyclePreset));
 }
 
+#[test]
+fn space_toggles_the_fold_of_the_selected_entry() {
+    assert_eq!(action(char_key(' ')), Some(Action::ToggleFold));
+}
+
+#[test]
+fn z_folds_every_entry() {
+    assert_eq!(action(char_key('z')), Some(Action::FoldAll));
+}
+
+#[test]
+fn capital_z_unfolds_every_entry() {
+    assert_eq!(action(char_key('Z')), Some(Action::UnfoldAll));
+}
+
 // --- key mapping: quitting ---
 
 #[test]

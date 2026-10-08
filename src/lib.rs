@@ -18,6 +18,7 @@ use crate::ui::Theme;
 
 pub mod app;
 pub mod cli;
+pub mod fold;
 pub mod format;
 pub mod index;
 pub mod source;

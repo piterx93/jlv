@@ -1,6 +1,8 @@
 //! The rows between the header and the footer: each entry's first line, cut into the
-//! columns of its preset, or whole under `Raw`.
+//! columns of its preset, or whole under `Raw`, and the continuation lines of the
+//! unfolded entries.
 
+use std::borrow::Cow;
 use std::iter;
 
 use ratatui::Frame;
@@ -45,7 +47,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect)
     let overflow = if app.wraps() {
         0
     } else {
-        let widest = rows.iter().map(|row| row.message.width()).max();
+        let widest = rows.iter().map(|row| row.text.width()).max();
         widest.unwrap_or(0).saturating_sub(columns.message)
     };
     app.limit_scroll(overflow);
@@ -148,24 +150,19 @@ impl Columns {
 
     /// Row `i` of `app`, its text made safe to show.
     fn row(&self, app: &App, i: usize, theme: Theme) -> Row {
-        let line = app.first_line(i);
+        let shown = app.row(i);
         // `Raw` doesn't look into lines, so escape codes are shown, made harmless.
         let Some(table) = &self.table else {
-            return Row {
-                cells: Vec::new(),
-                message: text(line),
-            };
+            return Row::new(Vec::new(), text(shown.line), shown.hidden);
         };
-        let line = strip_ansi(line);
-        let Some(head) = table.parser.parse(&line) else {
-            // The headless entry has nothing but a message.
+        let line = strip_ansi(shown.line);
+        let head = shown.first.then(|| table.parser.parse(&line)).flatten();
+        let Some(head) = head else {
+            // Continuation lines and the headless entry have nothing but a message.
             let blank = Span::raw(" ".repeat(self.lead));
-            return Row {
-                cells: vec![blank],
-                message: text(&line),
-            };
+            return Row::new(vec![blank], text(&line), shown.hidden);
         };
-        let record = app.record(i);
+        let record = shown.record;
         let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
             let local = app.settings().zone.to_datetime(timestamp);
             local.strftime(table.timestamp_format).to_string()
@@ -189,34 +186,53 @@ impl Columns {
         let class = text(&line[head.class]);
         let class = cell(&abbreviate(&class, table.class), table.class);
         cells.push(Span::raw(class + " "));
-        Row {
-            cells,
-            message: text(&line[head.message]),
-        }
+        Row::new(cells, text(&line[head.message]), shown.hidden)
     }
 }
 
 /// One row's text: the cells before the message, each padded to its column with the
-/// space after it, and the message.
+/// space after it, and the message followed by the marker of the lines folded away.
 struct Row {
     cells: Vec<Span<'static>>,
-    message: String,
+    text: String,
+    /// Where the marker starts in `text`.
+    marker: usize,
 }
 
 impl Row {
-    /// How many screen lines the row takes when wrapped.
-    fn height(&self, columns: &Columns) -> usize {
-        wrap(&self.message, columns.message).len()
+    /// The row of `message` after `cells`, marked ` [+hidden]` unless no lines are
+    /// hidden.
+    fn new(cells: Vec<Span<'static>>, message: String, hidden: usize) -> Self {
+        let marker = message.len();
+        let mut text = message;
+        if hidden > 0 {
+            text += &format!(" [+{hidden}]");
+        }
+        Row {
+            cells,
+            text,
+            marker,
+        }
     }
 
-    /// The row's screen lines: one with the message scrolled as far as the app says,
-    /// or, wrapped, as many as the message needs, the cells only on the first. The
-    /// gutter of the first has `▶` if the row is `selected`.
+    /// How many screen lines the row takes when wrapped.
+    fn height(&self, columns: &Columns) -> usize {
+        wrap(&self.text, columns.message).len()
+    }
+
+    /// The row's screen lines: one with the message scrolled as far as the app says
+    /// and cut where the marker still fits, or, wrapped, as many as the message and
+    /// the marker need, the cells only on the first. The gutter of the first has `▶`
+    /// if the row is `selected`.
     fn lines(&self, columns: &Columns, app: &App, selected: bool) -> Vec<Line<'_>> {
         let parts = if app.wraps() {
-            wrap(&self.message, columns.message)
+            let parts = wrap(&self.text, columns.message);
+            parts.into_iter().map(Cow::Borrowed).collect()
         } else {
-            vec![skip_columns(&self.message, app.scroll())]
+            let (message, marker) = self.text.split_at(self.marker);
+            let width = columns.message.saturating_sub(marker.width());
+            let kept = take_columns(skip_columns(message, app.scroll()).chars(), width);
+            vec![Cow::Owned(kept + marker)]
         };
         let mut parts = parts.into_iter().map(Span::raw);
         let gutter = Span::raw(if selected { "▶" } else { " " });

@@ -368,7 +368,7 @@ fn plain_theme_draws_the_table_without_any_style() {
             " 12:00:00.200 DEBUG com.example.App          Config loaded                      ",
             " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   ",
             " 12:00:01.000 WARN  com.example.App          Retry 1/3                          ",
-            " 12:00:02.000 ERROR com.example.App          Failed                             ",
+            " 12:00:02.000 ERROR com.example.App          Failed [+2]                        ",
             " 12:00:03.000 FATAL com.example.App          Giving up                          ",
             "                                                                                ",
             "                                                                                ",
@@ -457,7 +457,7 @@ fn capital_t_shows_the_thread_column() {
      12:00:00.200 DEBUG main            com.example.App          Config loaded
      12:00:00.300 INFO  …io-8080-exec-3 c.e.order.OrderService   Order 42 created
      12:00:01.000 WARN  main            com.example.App          Retry 1/3
-     12:00:02.000 ERROR main            com.example.App          Failed
+     12:00:02.000 ERROR main            com.example.App          Failed [+2]
      12:00:03.000 FATAL main            com.example.App          Giving up
     ");
 }
@@ -701,6 +701,167 @@ fn cycled_preset_replaces_the_notice_in_the_header() {
     assert_eq!(
         row(&terminal, 0),
         "jlv ─ app.log ─ 12 B ─ Logback ─ indexing 0%"
+    );
+}
+
+// --- folding ---
+
+/// Entry `i`, counted from 1, says `step i` and has `frames[i - 1]` stack frames.
+fn entries_with_frames(frames: &[usize]) -> App {
+    let log: String = (1..)
+        .zip(frames)
+        .map(|(i, &n)| {
+            let frames: String = (1..=n)
+                .map(|f| format!("\tat App.step(App.java:{f})\n"))
+                .collect();
+            format!("2026-10-07 12:00:00.{i:03} [main] INFO  com.example.App - step {i}\n{frames}")
+        })
+        .collect();
+    app_in(Preset::Logback, log.as_bytes())
+}
+
+fn traces() -> App {
+    entries_with_frames(&[0, 2, 1, 0])
+}
+
+#[test]
+fn space_unfolds_the_selected_entry_under_its_message_column() {
+    let out = lines_after(&mut traces(), &[char_key('j'), char_key(' ')], 1..=6);
+    assert_snapshot!(out, @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ▶12:00:00.002 INFO  com.example.App          step 2
+                                                     at App.step(App.java:1)
+                                                     at App.step(App.java:2)
+     12:00:00.003 INFO  com.example.App          step 3 [+1]
+     12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+#[test]
+fn capital_z_unfolds_every_entry() {
+    let out = lines_after(&mut traces(), &[char_key('Z')], 1..=7);
+    assert_snapshot!(out, @r"
+    ▶12:00:00.001 INFO  com.example.App          step 1
+     12:00:00.002 INFO  com.example.App          step 2
+                                                     at App.step(App.java:1)
+                                                     at App.step(App.java:2)
+     12:00:00.003 INFO  com.example.App          step 3
+                                                     at App.step(App.java:1)
+     12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+#[test]
+fn z_folds_every_entry_again() {
+    let keys = [char_key('Z'), char_key('z')];
+    assert_eq!(
+        screen_after(&mut traces(), &keys),
+        screen_after(&mut traces(), &[])
+    );
+}
+
+#[test]
+fn space_on_a_single_line_entry_changes_nothing() {
+    let toggled = screen_after(&mut traces(), &[char_key(' ')]);
+    assert_eq!(toggled, screen_after(&mut traces(), &[]));
+}
+
+/// 30 entries of three lines, more than the 22 lines of the body once unfolded.
+fn thirty_traces() -> App {
+    entries_with_frames(&[2; 30])
+}
+
+#[test]
+fn unfolding_all_keeps_the_selected_entry_on_its_screen_line() {
+    let mut keys = vec![char_key('j'); 5];
+    keys.push(char_key('Z'));
+    let out = lines_after(&mut thirty_traces(), &keys, 5..=7);
+    assert_snapshot!(out, @r"
+                                                     at App.step(App.java:2)
+    ▶12:00:00.006 INFO  com.example.App          step 6
+                                                     at App.step(App.java:1)
+    ");
+}
+
+#[test]
+fn folding_from_a_stack_frame_selects_its_entry_on_the_same_screen_line() {
+    // `j` 40 times selects the first frame of entry 14 on the last line.
+    let mut keys = vec![char_key('Z')];
+    keys.extend([char_key('j'); 40]);
+    keys.push(char_key(' '));
+    let out = lines_after(&mut thirty_traces(), &keys, 21..=22);
+    assert_snapshot!(out, @r"
+                                                     at App.step(App.java:2)
+    ▶12:00:00.014 INFO  com.example.App          step 14 [+2]
+    ");
+}
+
+#[test]
+fn folding_the_last_entry_at_the_bottom_keeps_it_on_the_bottom_line() {
+    let keys = [char_key('Z'), char_key('G'), char_key(' ')];
+    let out = lines_after(&mut thirty_traces(), &keys, 21..=22);
+    assert_snapshot!(out, @r"
+                                                     at App.step(App.java:2)
+    ▶12:00:00.030 INFO  com.example.App          step 30 [+2]
+    ");
+}
+
+/// 30 single-line entries and a last one of 31 lines, taller than the body.
+fn tall_last_entry() -> App {
+    let mut frames = vec![0; 30];
+    frames.push(30);
+    entries_with_frames(&frames)
+}
+
+#[test]
+fn unfolding_all_at_the_bottom_keeps_an_entry_taller_than_the_screen_on_the_bottom_line() {
+    let out = lines_after(
+        &mut tall_last_entry(),
+        &[char_key('G'), char_key('Z')],
+        21..=22,
+    );
+    assert_snapshot!(out, @r"
+     12:00:00.030 INFO  com.example.App          step 30
+    ▶12:00:00.031 INFO  com.example.App          step 31
+    ");
+}
+
+#[test]
+fn bottom_after_unfolding_all_selects_the_last_frame_of_an_entry_taller_than_the_screen() {
+    let keys = [char_key('G'), char_key('Z'), char_key('G')];
+    let out = lines_after(&mut tall_last_entry(), &keys, 21..=22);
+    assert_snapshot!(out, @r"
+                                                     at App.step(App.java:29)
+    ▶                                                at App.step(App.java:30)
+    ");
+}
+
+#[test]
+fn unfolding_all_keeps_a_selected_stack_frame_on_its_screen_line() {
+    // Entry 20 unfolded on a scrolled screen, its first frame selected on line 13.
+    let mut keys = vec![char_key('G')];
+    keys.extend([char_key('k'); 10]);
+    keys.extend([char_key(' '), char_key('j'), char_key('Z')]);
+    let out = lines_after(&mut thirty_traces(), &keys, 12..=13);
+    assert_snapshot!(out, @r"
+     12:00:00.020 INFO  com.example.App          step 20
+    ▶                                                at App.step(App.java:1)
+    ");
+}
+
+#[test]
+fn wrapped_bottom_of_an_unfolded_entry_taller_than_the_screen_shows_its_last_frames() {
+    let mut frames = vec![0; 30];
+    frames.push(100);
+    let keys = [char_key('w'), char_key('G'), char_key('Z'), char_key('G')];
+    let terminal = terminal_after(&mut entries_with_frames(&frames), &keys);
+    let frame = |n: usize| format!("    at App.step(App.java:{n})");
+    assert_eq!(
+        [row(&terminal, 1), row(&terminal, 22)],
+        [
+            format!(" {:44}{}", "", frame(79)),
+            format!("▶{:44}{}", "", frame(100))
+        ]
     );
 }
 
