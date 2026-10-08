@@ -26,7 +26,7 @@
 2. Recognize common Java log formats automatically — zero configuration for the 90% case.
 3. Live follow that survives log rotation.
 4. Fast, composable filtering by **level**, **class/package**, **time window**, and **text/regex**.
-5. Work identically over SSH and locally (Linux + macOS), shipped as a single static binary.
+5. Work identically over SSH and locally, shipped as a single static Linux binary.
 
 ### Non-goals (v1)
 
@@ -51,7 +51,8 @@ Target: Java developers, DevOps/SRE, support engineers. Open source project.
 ## 5. Platform & distribution
 
 - **Language/stack:** Rust + `ratatui` (`crossterm` backend).
-- **Platforms:** Linux (x86_64, aarch64; static musl builds) and macOS (x86_64, arm64).
+- **Platforms:** Linux x86_64 (static musl build). That's the only target that is built and tested. Other targets (aarch64, macOS) may come later if someone needs them.
+- **Local development:** `scripts/dev` runs any command in a Debian-based Rust container (`docker/dev.Dockerfile`), so Linux-specific behaviour (inotify, musl) gets tested on a macOS machine too. `JLV_PLATFORM=linux/amd64` switches to the exact CI architecture.
 - **Terminals:** must work with 256 colors and a minimum 80×24 terminal; use truecolor when available; respect `NO_COLOR`.
 - **Distribution:** GitHub Releases (prebuilt binaries), `.deb` / `.rpm` packages; `cargo install` and a Homebrew tap once the repo is public.
 - **Visibility:** the repo stays private until 1.0 and is open-sourced after that.
@@ -69,14 +70,14 @@ Target: Java developers, DevOps/SRE, support engineers. Open source project.
 
 `jlv --version` also prints the short commit hash for CI builds, e.g. `jlv 0.3.0-dev.42 (a1b2c3d)`.
 
-**Test job** (runs on every trigger; matrix `ubuntu-latest`, `macos-latest`):
+**Test job** (runs on every trigger, `ubuntu-latest`):
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test --all`
-- A final aggregate job, **`ci-required`**, depends on the whole matrix and fails if any leg failed. This gives branch protection one stable check name to require, whatever the matrix contains.
+- A final aggregate job, **`ci-required`**, fails if any check job failed. This gives branch protection one stable check name to require, even if the check jobs are later split or extended.
 
 **Package job** (only `develop` and `main`; `needs: ci-required`, so it never runs on red tests):
-- Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`.
+- Target: `x86_64-unknown-linux-musl`. The built binary is smoke-tested with `--version`.
 - Artifacts: `jlv-<version>-<target>.tar.gz`, `.deb` (`cargo-deb`), `.rpm` (`cargo-generate-rpm`), `SHA256SUMS`.
 - The version is injected at build time via `JLV_VERSION` / `JLV_COMMIT`; CI never edits `Cargo.toml`. On `develop`, `Cargo.toml` holds the *next* planned version, so it must be bumped right after each release.
 - deb/rpm get `X.Y.Z~dev.<run>`, so that package managers sort dev builds before the release.
@@ -245,7 +246,7 @@ jlv [OPTIONS] <FILE>
 
 ## 11. Configuration
 
-`~/.config/jlv/config.toml` (XDG; on macOS also `~/Library/Application Support/jlv/`):
+`~/.config/jlv/config.toml` (XDG):
 
 ```toml
 [ui]

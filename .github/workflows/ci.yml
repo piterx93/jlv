@@ -18,12 +18,7 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -34,7 +29,7 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
 
-  # Branch protection requires this one check, so the test matrix can change freely.
+  # Branch protection requires this one check, so the jobs above can change freely.
   ci-required:
     if: always()
     needs: [test]
@@ -70,58 +65,38 @@ jobs:
           echo "pkg-version=$pkg_version" >> "$GITHUB_OUTPUT"
 
   package:
-    name: package (${{ matrix.target }})
     needs: [version]
-    strategy:
-      matrix:
-        include:
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
-          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
-          - { target: aarch64-apple-darwin, os: macos-latest }
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     env:
-      TARGET: ${{ matrix.target }}
+      TARGET: x86_64-unknown-linux-musl
       JLV_VERSION: ${{ needs.version.outputs.version }}
       PKG_VERSION: ${{ needs.version.outputs.pkg-version }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
         with:
-          key: ${{ matrix.target }}
-      - if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.14.1
-      - if: runner.os == 'Linux'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild,cargo-deb,cargo-generate-rpm
+          tool: cargo-deb,cargo-generate-rpm
+      - run: sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Build
         run: |
-          export JLV_COMMIT="${GITHUB_SHA:0:7}"
-          if [ "$RUNNER_OS" = Linux ]; then
-            cargo zigbuild --locked --release --target "$TARGET"
-          else
-            cargo build --locked --release --target "$TARGET"
-          fi
+          JLV_COMMIT="${GITHUB_SHA:0:7}" cargo build --locked --release --target "$TARGET"
+          "target/$TARGET/release/jlv" --version
 
       - name: Package
         run: |
           mkdir dist
           tar -czf "dist/jlv-$JLV_VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" jlv
-          if [ "$RUNNER_OS" = Linux ]; then
-            cargo deb --no-build --no-strip --target "$TARGET" --deb-version "$PKG_VERSION" --output dist/
-            cargo generate-rpm --target "$TARGET" --set-metadata "version = \"$PKG_VERSION\"" --output dist/
-          fi
+          cargo deb --no-build --no-strip --target "$TARGET" --deb-version "$PKG_VERSION" --output dist/
+          cargo generate-rpm --target "$TARGET" --set-metadata "version = \"$PKG_VERSION\"" --output dist/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jlv-${{ matrix.target }}
+          name: packages
           path: dist/*
 
   publish:
@@ -136,8 +111,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: packages
           path: dist
-          merge-multiple: true
       - run: cd dist && sha256sum -- * > SHA256SUMS
 
       - name: Publish dev build

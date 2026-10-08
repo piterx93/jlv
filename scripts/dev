@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Runs a command in the Linux dev container, e.g.:
+#   scripts/dev cargo test
+#   scripts/dev cargo run -- /var/log/app.log
+#   JLV_PLATFORM=linux/amd64 scripts/dev cargo build --release
+#
+# target/ and the cargo registry live in named volumes: bind-mounted build dirs
+# are slow on macOS and would clash with a native build.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+platform="${JLV_PLATFORM:-}"
+suffix="${platform:+-${platform//\//-}}"
+image="jlv-dev$suffix"
+
+build_opts=(-q -t "$image" -f "$root/docker/dev.Dockerfile")
+run_opts=(--rm -e TERM
+    -v "$root:/src"
+    -v "jlv-target$suffix:/src/target"
+    -v "jlv-cargo-registry$suffix:/usr/local/cargo/registry")
+
+if [ -n "$platform" ]; then
+    build_opts+=(--platform "$platform")
+    run_opts+=(--platform "$platform")
+fi
+if [ -t 0 ] && [ -t 1 ]; then
+    run_opts+=(-it)
+fi
+
+docker build "${build_opts[@]}" "$root/docker" > /dev/null
+exec docker run "${run_opts[@]}" "$image" "$@"
