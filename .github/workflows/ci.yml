@@ -5,6 +5,7 @@ on:
     branches: ["**"]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -38,7 +39,7 @@ jobs:
       - run: test "${{ needs.test.result }}" = success
 
   version:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     needs: [ci-required]
     runs-on: ubuntu-latest
     outputs:
