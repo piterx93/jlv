@@ -1,12 +1,15 @@
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::Duration;
 
 use clap::Parser;
 use clap::error::ErrorKind;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::crossterm::event::Event;
+use ratatui::crossterm::event::{self, Event};
 
 use crate::app::{App, action};
 use crate::cli::Args;
@@ -15,6 +18,9 @@ use crate::ui::Theme;
 
 pub mod app;
 pub mod cli;
+pub mod fold;
+pub mod format;
+pub mod index;
 pub mod source;
 pub mod ui;
 pub mod viewport;
@@ -72,38 +78,61 @@ where
 
 /// Shows the file until the user quits. Switches the terminal to raw mode and the
 /// alternate screen and restores it on return, error or panic.
+///
+/// It opens at the end of the file, or at the top with `--no-follow`. The file is
+/// read in the preset `--format` names, detected without it. Timestamps without an
+/// offset are local time in the system's time zone, and a time-only log is dated
+/// from the file's modification time. Events are read from the terminal; a wait
+/// with a timeout ends with `None` when nothing came.
 pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
-    let mut app = App::new(&launch.args.file, launch.source);
+    let Launch { args, source } = launch;
+    // Without an mtime a time-only log is dated from now, the latest its entries can be.
+    let mtime = source.modified().unwrap_or_else(Timestamp::now);
+    let follow = !args.no_follow;
+    let mut app = App::new(
+        &args.file,
+        source,
+        args.format,
+        TimeZone::system(),
+        mtime,
+        follow,
+    );
     // try_init can fail after raw mode is on; restore ignores what isn't set up.
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
-    let result = event_loop(
-        &mut terminal,
-        &mut app,
-        theme,
-        ratatui::crossterm::event::read,
-    );
+    let result = event_loop(&mut terminal, &mut app, theme, |timeout| {
+        let ready = timeout.map_or(Ok(true), event::poll)?;
+        ready.then(event::read).transpose()
+    });
     ratatui::restore();
     result
 }
 
 /// Draws the screen, waits for the next event from `next_event`, applies the key's
-/// action, and again, until the app should quit. Other events only redraw. Errors from
-/// drawing or reading events end the loop.
+/// action, and again, until the app should quit. Other events, and a wait that timed
+/// out, only redraw. Errors from drawing or reading events end the loop.
+///
+/// Before every drawing the app takes in what its index found since the last one
+/// ([`App::poll_index`]). While indexing goes on, `next_event` is asked to wait at
+/// most 100 ms, so that the screen keeps up with it; `next_event(Some(timeout))`
+/// returns `Ok(None)` when nothing came in time. Once the index is complete it is
+/// asked to wait for as long as it takes (`None`).
 pub fn event_loop<B>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     theme: Theme,
-    mut next_event: impl FnMut() -> io::Result<Event>,
+    mut next_event: impl FnMut(Option<Duration>) -> io::Result<Option<Event>>,
 ) -> io::Result<()>
 where
     B: Backend,
     B::Error: Send + Sync + 'static,
 {
     while !app.should_quit() {
+        app.poll_index();
         terminal
             .draw(|frame| ui::render(frame, app, theme))
             .map_err(io::Error::other)?;
-        if let Event::Key(key) = next_event()?
+        let timeout = (!app.progress().is_complete()).then_some(INDEXING_REDRAW);
+        if let Some(Event::Key(key)) = next_event(timeout)?
             && let Some(action) = action(key)
         {
             app.apply(action);
@@ -111,6 +140,10 @@ where
     }
     Ok(())
 }
+
+/// How long the event loop waits for an event while indexing goes on, before it
+/// takes in what the index found and redraws.
+const INDEXING_REDRAW: Duration = Duration::from_millis(100);
 
 const SUCCESS: u8 = 0;
 const FAILURE: u8 = 1;

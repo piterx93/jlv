@@ -10,7 +10,8 @@ use proptest::prelude::*;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cli::{Args, Format};
+use crate::cli::Args;
+use crate::format::Preset;
 
 #[test]
 fn version_without_commit_is_printed_as_is() {
@@ -236,7 +237,7 @@ fn every_option_is_handed_over() {
         launch.args,
         Args {
             file,
-            format: Some(Format::LogbackBasic),
+            format: Some(Preset::LogbackBasic),
             no_follow: true,
             no_mouse: true,
             config: Some(PathBuf::from("/nonexistent/config.toml")),
@@ -439,6 +440,8 @@ proptest! {
 mod event_loop {
     use std::collections::VecDeque;
     use std::io;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -448,14 +451,17 @@ mod event_loop {
 
     use crate::app::App;
     use crate::event_loop;
-    use crate::test_support::{app, char_key, numbered_log, row};
+    use crate::format::Preset;
+    use crate::test_support::{
+        LARGE_INDEX_DEADLINE, app, char_key, following_app, numbered_log, row, unindexed_app,
+    };
     use crate::ui::Theme;
 
-    /// Hands out `events` one by one; asking for more is a test failure, since the
-    /// loop should have stopped at `q`.
-    fn script(events: Vec<Event>) -> impl FnMut() -> io::Result<Event> {
+    /// Hands out `events` one by one, whatever the timeout; asking for more is a test
+    /// failure, since the loop should have stopped at `q`.
+    fn script(events: Vec<Event>) -> impl FnMut(Option<Duration>) -> io::Result<Option<Event>> {
         let mut events = VecDeque::from(events);
-        move || Ok(events.pop_front().expect("read past the last event"))
+        move |_| Ok(Some(events.pop_front().expect("read past the last event")))
     }
 
     fn keys(chars: &str) -> Vec<Event> {
@@ -487,6 +493,22 @@ mod event_loop {
         assert_eq!(
             row(&terminal, 1),
             "▶12:00:00.001 [main] INFO  com.example.App - step 1"
+        );
+    }
+
+    #[test]
+    fn first_screen_of_a_followed_file_shows_its_end() {
+        let mut terminal = terminal();
+        // Several chunks of the index, so it is far from complete at the first screen.
+        let mut app = following_app(Preset::Raw, numbered_log(10_000).as_bytes());
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
+        assert_eq!(
+            row(&terminal, 1),
+            " 12:00:00.9979 [main] INFO  com.example.App - step 9979"
+        );
+        assert_eq!(
+            row(&terminal, 22),
+            "▶12:00:00.10000 [main] INFO  com.example.App - step 10000"
         );
     }
 
@@ -545,12 +567,108 @@ mod event_loop {
         let mut terminal = terminal();
         let mut app = hundred_lines();
         let mut reads = 0;
-        let failing = || {
+        let failing = |_| {
             reads += 1;
             Err(io::Error::other("terminal went away"))
         };
         let err = event_loop(&mut terminal, &mut app, Theme::Styled, failing).unwrap_err();
         assert_eq!(err.to_string(), "terminal went away");
         assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn waits_without_a_timeout_once_the_index_is_complete() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let mut waits = Vec::new();
+        let mut events = script(keys("jq"));
+        event_loop(&mut terminal, &mut app, Theme::Styled, |timeout| {
+            waits.push(timeout);
+            events(timeout)
+        })
+        .unwrap();
+        assert_eq!(waits, [None, None]);
+    }
+
+    #[test]
+    fn timed_out_wait_redraws_and_waits_again() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let mut events = VecDeque::from([None, Some(Event::Key(char_key('q')))]);
+        let mut reads = 0;
+        event_loop(&mut terminal, &mut app, Theme::Styled, |_| {
+            reads += 1;
+            Ok(events.pop_front().expect("read past the last event"))
+        })
+        .unwrap();
+        assert_eq!(reads, 2);
+        assert!(app.should_quit());
+    }
+
+    /// A file indexed in several chunks: 2.2 MB of time-only lines.
+    fn slow_to_index() -> App {
+        unindexed_app(Preset::LogbackBasic, numbered_log(40_000).as_bytes())
+    }
+
+    /// Waits as a terminal would, up to the timeout, and says nothing came. Asked to
+    /// wait without a timeout, it answers `q`; so does it once indexing should long
+    /// be over, to end a loop that never gets there.
+    fn quit_once_waiting_without_timeout(
+        waits: &mut Vec<Option<Duration>>,
+    ) -> impl FnMut(Option<Duration>) -> io::Result<Option<Event>> + '_ {
+        let started = Instant::now();
+        move |timeout| {
+            waits.push(timeout);
+            match timeout {
+                Some(timeout) if started.elapsed() < LARGE_INDEX_DEADLINE => {
+                    thread::sleep(timeout.min(Duration::from_millis(10)));
+                    Ok(None)
+                }
+                _ => Ok(Some(Event::Key(char_key('q')))),
+            }
+        }
+    }
+
+    #[test]
+    fn while_indexing_waits_at_most_100_ms_at_a_time() {
+        let mut terminal = terminal();
+        let mut app = slow_to_index();
+        let mut waits = Vec::new();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            quit_once_waiting_without_timeout(&mut waits),
+        )
+        .unwrap();
+        let (last, before) = waits.split_last().unwrap();
+        assert_eq!(*last, None);
+        assert!(!before.is_empty());
+        assert!(
+            before.iter().all(|wait| wait
+                .is_some_and(|wait| wait > Duration::ZERO && wait <= Duration::from_millis(100))),
+            "{waits:?}"
+        );
+    }
+
+    #[test]
+    fn entries_are_taken_in_while_waiting_and_drawn() {
+        let mut terminal = terminal();
+        let mut app = slow_to_index();
+        let mut waits = Vec::new();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            quit_once_waiting_without_timeout(&mut waits),
+        )
+        .unwrap();
+        assert!(app.progress().is_complete());
+        assert_eq!(app.viewport().total(), 40_000);
+        assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 2.2 MB ─ Logback basic");
+        assert_eq!(
+            row(&terminal, 1),
+            "▶12:00:00.001 INFO  com.example.App          step 1"
+        );
     }
 }

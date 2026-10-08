@@ -1,11 +1,18 @@
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
-use crate::test_support::{app, char_key, ctrl, key, named_app, numbered_log};
+use crate::index::Progress;
+use crate::test_support;
+use crate::test_support::{
+    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
+    key, named_app, numbered_log, unindexed_app, wait_for_index, wait_for_index_within,
+};
 
 /// `(top, selected)`: the first line on screen and the selected line.
 fn pos(app: &App) -> (usize, Option<usize>) {
@@ -92,6 +99,48 @@ fn capital_g_reported_with_shift_goes_to_the_bottom() {
 #[test]
 fn end_goes_to_the_bottom() {
     assert_eq!(action(key(KeyCode::End)), Some(Action::Bottom));
+}
+
+// --- key mapping: the table ---
+
+#[test]
+fn left_arrow_scrolls_left() {
+    assert_eq!(action(key(KeyCode::Left)), Some(Action::ScrollLeft));
+}
+
+#[test]
+fn right_arrow_scrolls_right() {
+    assert_eq!(action(key(KeyCode::Right)), Some(Action::ScrollRight));
+}
+
+#[test]
+fn capital_t_toggles_the_thread_column() {
+    assert_eq!(action(char_key('T')), Some(Action::ToggleThread));
+}
+
+#[test]
+fn w_toggles_wrapping() {
+    assert_eq!(action(char_key('w')), Some(Action::ToggleWrap));
+}
+
+#[test]
+fn capital_p_cycles_the_preset() {
+    assert_eq!(action(char_key('P')), Some(Action::CyclePreset));
+}
+
+#[test]
+fn space_toggles_the_fold_of_the_selected_entry() {
+    assert_eq!(action(char_key(' ')), Some(Action::ToggleFold));
+}
+
+#[test]
+fn z_folds_every_entry() {
+    assert_eq!(action(char_key('z')), Some(Action::FoldAll));
+}
+
+#[test]
+fn capital_z_unfolds_every_entry() {
+    assert_eq!(action(char_key('Z')), Some(Action::UnfoldAll));
 }
 
 // --- key mapping: quitting ---
@@ -222,6 +271,155 @@ fn size_is_the_file_length_in_bytes() {
 #[test]
 fn empty_file_has_size_zero() {
     assert_eq!(app(b"").size(), 0);
+}
+
+// --- rows from the index ---
+
+const STARTED: &str = "2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n";
+const FAILED: &str = "2026-10-07 12:00:01.500 [main] ERROR com.example.App - Failed\n";
+const EXCEPTION: &str = "java.lang.IllegalStateException: boom\n";
+const FRAME: &str = "\tat com.example.App.main(App.java:10)\n";
+const DONE: &str = "2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done\n";
+
+fn logback(lines: &[&str]) -> App {
+    app_in(Preset::Logback, lines.concat().as_bytes())
+}
+
+#[test]
+fn every_entry_is_a_row() {
+    let app = logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]);
+    assert_eq!(app.viewport().total(), 3);
+}
+
+#[test]
+fn row_shows_the_first_line_of_its_entry() {
+    let app = logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]);
+    assert_eq!(app.line(1), FAILED.trim_end());
+    assert_eq!(app.line(2), DONE.trim_end());
+}
+
+#[test]
+fn row_of_the_headless_entry_shows_the_first_line_of_the_file() {
+    let app = logback(&[EXCEPTION, FRAME, STARTED]);
+    assert_eq!(app.viewport().total(), 2);
+    assert_eq!(app.line(0), EXCEPTION.trim_end());
+}
+
+#[test]
+fn row_of_an_entry_with_crlf_endings_has_no_line_ending() {
+    let text = [FAILED, FRAME, DONE].concat().replace('\n', "\r\n");
+    let app = app_in(Preset::Logback, text.as_bytes());
+    assert_eq!(app.line(0), FAILED.trim_end());
+    assert_eq!(app.line(1), DONE.trim_end());
+}
+
+#[test]
+fn last_row_without_a_newline_shows_the_whole_line() {
+    let app = app(b"first\nlast");
+    assert_eq!(app.line(1), "last");
+}
+
+#[test]
+fn new_app_has_no_rows_before_the_index_is_polled() {
+    let app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
+    assert_eq!(app.viewport().total(), 0);
+    assert_eq!(app.viewport().selected(), None);
+}
+
+#[test]
+fn app_indexes_in_the_preset_zone_and_anchor_it_was_given() {
+    let mtime: Timestamp = "2026-10-08T12:00:00Z".parse().unwrap();
+    let zone = TimeZone::get("Europe/Warsaw").unwrap();
+    let app = App::new(
+        Path::new("/var/log/console.log"),
+        test_support::source(b"12:00:00,123 INFO  [org.jboss.as] (main) started\n"),
+        Some(Preset::WildflyConsole),
+        zone.clone(),
+        mtime,
+        false,
+    );
+    let settings = app.settings();
+    assert_eq!(settings.preset, Preset::WildflyConsole);
+    assert_eq!(settings.zone, zone);
+    assert_eq!(
+        settings.anchor,
+        Anchor::Modified("2026-10-08T14:00:00".parse().unwrap())
+    );
+}
+
+#[test]
+fn anchor_comes_from_a_date_in_the_file_name() {
+    let app = App::new(
+        Path::new("/var/log/server.log.2026-10-06"),
+        test_support::source(b"x\n"),
+        Some(Preset::LogbackBasic),
+        test_support::zone(),
+        test_support::mtime(),
+        false,
+    );
+    assert_eq!(
+        app.settings().anchor,
+        Anchor::Named("2026-10-06".parse().unwrap())
+    );
+}
+
+#[test]
+fn app_without_a_format_reads_the_file_in_the_detected_preset() {
+    let app = detected_app(
+        [STARTED, FAILED, EXCEPTION, FRAME, DONE]
+            .concat()
+            .as_bytes(),
+    );
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.viewport().total(), 3);
+}
+
+#[test]
+fn new_app_has_indexed_none_of_the_file() {
+    let content = numbered_log(100);
+    let app = unindexed_app(Preset::Raw, content.as_bytes());
+    let total = content.len() as u64;
+    assert_eq!(app.progress(), Progress { indexed: 0, total });
+}
+
+#[test]
+fn polling_the_index_to_the_end_brings_in_every_row() {
+    let content = numbered_log(100);
+    let mut app = unindexed_app(Preset::Raw, content.as_bytes());
+    wait_for_index(&mut app);
+    let total = content.len() as u64;
+    assert_eq!(
+        app.progress(),
+        Progress {
+            indexed: total,
+            total
+        }
+    );
+    assert_eq!(app.viewport().total(), 100);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn empty_file_is_indexed_without_rows() {
+    let app = app(b"");
+    assert!(app.progress().is_complete());
+    assert_eq!(app.viewport().total(), 0);
+}
+
+#[test]
+fn rows_taken_in_later_keep_the_selection() {
+    let mut app = unindexed_app(Preset::LogbackBasic, numbered_log(40_000).as_bytes());
+    app.resize(10);
+    let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
+    while app.viewport().total() < 2 {
+        assert!(Instant::now() < deadline, "no rows came in");
+        thread::sleep(Duration::from_millis(1));
+        app.poll_index();
+    }
+    app.apply(Action::Down);
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    assert_eq!(app.viewport().total(), 40_000);
+    assert_eq!(pos(&app), (0, Some(1)));
 }
 
 #[test]
@@ -399,4 +597,140 @@ fn page_size_follows_the_new_height() {
     app.resize(20);
     app.apply(Action::PageDown);
     assert_eq!(pos(&app), (20, Some(20)));
+}
+
+// --- following ---
+
+/// The lines of the rows on screen, top to bottom.
+fn screen(app: &App) -> Vec<String> {
+    let viewport = app.viewport();
+    let end = viewport.total().min(viewport.top() + viewport.height());
+    (viewport.top()..end)
+        .map(|i| app.line(i).into_owned())
+        .collect()
+}
+
+#[test]
+fn following_shows_the_last_screen_until_the_whole_index_takes_over() {
+    // Several chunks of the index, so that some come in before it is complete.
+    let log = numbered_log(10_000);
+    let last_screen: Vec<&str> = log.lines().skip(9_990).collect();
+    let mut app = following_app(Preset::Raw, log.as_bytes());
+    app.resize(10);
+    let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        assert_eq!(screen(&app), last_screen, "{:?}", app.progress());
+        assert_eq!(
+            app.viewport().selected(),
+            Some(app.viewport().top() + 9),
+            "{:?}",
+            app.progress()
+        );
+        if app.progress().is_complete() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{:?}", app.progress());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(pos(&app), (9_990, Some(9_999)));
+}
+
+#[test]
+fn following_reads_the_last_entries_once_the_screen_has_lines() {
+    let log = numbered_log(100);
+    let mut app = following_app(Preset::Raw, log.as_bytes());
+    app.resize(0);
+    app.resize(10);
+    assert_eq!(screen(&app), log.lines().skip(90).collect::<Vec<_>>());
+    assert_eq!(app.viewport().selected(), Some(app.viewport().top() + 9));
+}
+
+#[test]
+fn following_a_file_whose_tail_is_too_far_back_waits_for_the_whole_index() {
+    // The last line starts further from the end than the tail may read.
+    let mut log = b"first\nsecond\n".to_vec();
+    log.resize(log.len() + TAIL_LIMIT + 1, b'x');
+    let mut app = following_app(Preset::Raw, &log);
+    app.resize(10);
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        if app.progress().is_complete() {
+            break;
+        }
+        assert_eq!(app.viewport().total(), 0, "{:?}", app.progress());
+        assert!(Instant::now() < deadline, "{:?}", app.progress());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(pos(&app), (0, Some(2)));
+}
+
+#[test]
+fn following_a_file_shorter_than_the_screen_selects_its_last_entry() {
+    let mut app = following_app(
+        Preset::Logback,
+        [STARTED, FAILED, EXCEPTION, FRAME, DONE]
+            .concat()
+            .as_bytes(),
+    );
+    app.resize(10);
+    app.poll_index();
+    assert_eq!(pos(&app), (0, Some(2)));
+    assert_eq!(app.line(2), DONE.trim_end());
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(2)));
+}
+
+// --- cycling presets ---
+
+fn cycled(mut app: App) -> App {
+    app.apply(Action::CyclePreset);
+    app
+}
+
+#[test]
+fn cycling_reads_the_file_in_the_next_preset() {
+    let app = cycled(logback(&[STARTED]));
+    assert_eq!(app.settings().preset, Preset::LogbackBasic);
+}
+
+#[test]
+fn cycling_past_raw_starts_again_at_the_first_preset() {
+    let app = cycled(app(STARTED.as_bytes()));
+    assert_eq!(app.settings().preset, Preset::Logback);
+}
+
+#[test]
+fn cycling_indexes_the_file_again_in_the_new_preset() {
+    let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
+    let mut app = cycled(app(log.as_bytes()));
+    wait_for_index(&mut app);
+    assert_eq!(app.viewport().total(), 3);
+    assert_eq!(app.line(2), DONE.trim_end());
+}
+
+#[test]
+fn cycling_a_file_opened_at_the_top_selects_the_first_row_again() {
+    let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
+    let mut app = app(log.as_bytes());
+    app.resize(10);
+    let mut app = cycled(applied(app, &[Action::Down, Action::Down, Action::Down]));
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn cycling_a_followed_file_shows_its_last_entries_in_the_new_preset_at_once() {
+    let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
+    let mut app = following_app(Preset::Raw, log.as_bytes());
+    app.resize(10);
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(4)));
+    let mut app = cycled(app);
+    assert_eq!(app.viewport().total(), 3);
+    assert_eq!(pos(&app), (0, Some(2)));
+    assert_eq!(app.line(2), DONE.trim_end());
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(2)));
 }

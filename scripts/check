@@ -24,6 +24,9 @@ cargo cov
 cargo test --locked --doc
 # the merge base keeps commits that landed on the base later out of the diff
 base="$(git -c safe.directory=/src merge-base "$1" HEAD)"
-git -c safe.directory=/src diff "$base" > target/mutants.diff
-cargo mutants --in-diff target/mutants.diff
+# target/ is shared between concurrent runs, so each run gets its own diff
+diff="$(mktemp target/mutants.XXXXXX.diff)"
+trap "rm -f $diff" EXIT
+git -c safe.directory=/src diff "$base" > "$diff"
+cargo mutants --in-diff "$diff" --jobs 4
 ' check "$base"

@@ -5,10 +5,11 @@ use std::borrow::Cow;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
-use std::iter;
+use std::mem;
 use std::path::Path;
 
-use memchr::memchr_iter;
+use jiff::Timestamp;
+use memchr::memchr;
 use memmap2::Mmap;
 
 #[cfg(test)]
@@ -55,13 +56,22 @@ pub fn open(path: &Path) -> Result<Source, OpenError> {
 pub struct Source {
     // `None` for an empty file: a mapping of zero bytes is an error on Linux.
     map: Option<Mmap>,
+    modified: Option<Timestamp>,
 }
 
 impl Source {
     /// Maps the whole file. A zero-length file gives an empty source.
     pub fn map(file: File) -> io::Result<Self> {
-        if file.metadata()?.len() == 0 {
-            return Ok(Self { map: None });
+        let metadata = file.metadata()?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| Timestamp::try_from(modified).ok());
+        if metadata.len() == 0 {
+            return Ok(Self {
+                map: None,
+                modified,
+            });
         }
         // SAFETY: the mapping is only sound while nobody changes the file, and nothing
         // can promise that for a log file. Appends are harmless, since bytes past the
@@ -70,55 +80,68 @@ impl Source {
         // garbled text. Truncation is the real hazard: touching a page past the new
         // end raises SIGBUS, which is not handled yet.
         let map = unsafe { Mmap::map(&file)? };
-        Ok(Self { map: Some(map) })
+        Ok(Self {
+            map: Some(map),
+            modified,
+        })
     }
 
     /// The file's content as it was when it was mapped.
     pub fn bytes(&self) -> &[u8] {
         self.map.as_deref().unwrap_or_default()
     }
+
+    /// When the file was last modified, as it was when it was mapped. `None` if the
+    /// system doesn't say or jiff can't represent it.
+    pub fn modified(&self) -> Option<Timestamp> {
+        self.modified
+    }
 }
 
-/// Where each line of a byte buffer starts. `\n` ends a line, a `\r` right before it is
-/// not part of the line, and a last line without `\n` still counts. The buffer is not
-/// stored: pass the same bytes to [`LineIndex::line`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineIndex {
-    starts: Vec<usize>,
+/// The same as [`Source::bytes`].
+impl AsRef<[u8]> for Source {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes()
+    }
 }
 
-impl LineIndex {
-    pub fn new(bytes: &[u8]) -> Self {
-        // A line starts at 0 and after every `\n`, unless that is the end of the buffer.
-        let starts = iter::once(0)
-            .chain(memchr_iter(b'\n', bytes).map(|newline| newline + 1))
-            .filter(|&start| start < bytes.len())
-            .collect();
-        Self { starts }
-    }
+/// The lines of `bytes`, read as they are asked for. `\n` ends a line, a `\r` right
+/// before it is not part of the line, and a last line without `\n` still counts.
+pub fn lines(bytes: &[u8]) -> Lines<'_> {
+    Lines { rest: bytes }
+}
 
-    pub fn len(&self) -> usize {
-        self.starts.len()
-    }
+/// The iterator [`lines`] returns.
+#[derive(Debug, Clone)]
+pub struct Lines<'a> {
+    rest: &'a [u8],
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.starts.is_empty()
+impl<'a> Lines<'a> {
+    /// The bytes after the lines read so far, line endings included: where the next
+    /// line starts is the length of the input minus the length of this.
+    pub fn rest(&self) -> &'a [u8] {
+        self.rest
     }
+}
 
-    /// The byte offset of every line's first byte, in order.
-    pub fn starts(&self) -> &[usize] {
-        &self.starts
-    }
+impl<'a> Iterator for Lines<'a> {
+    type Item = &'a [u8];
 
-    /// Line `i` without its line ending. Panics if `i >= self.len()`.
-    pub fn line<'a>(&self, bytes: &'a [u8], i: usize) -> &'a [u8] {
-        let end = self.starts.get(i + 1).copied().unwrap_or(bytes.len());
-        let line = &bytes[self.starts[i]..end];
-        match line.strip_suffix(b"\n") {
-            Some(line) => line.strip_suffix(b"\r").unwrap_or(line),
-            // only the last line can lack a `\n`, and then a `\r` is content
-            None => line,
+    fn next(&mut self) -> Option<&'a [u8]> {
+        if self.rest.is_empty() {
+            return None;
         }
+        let line = match memchr(b'\n', self.rest) {
+            Some(newline) => {
+                let line = &self.rest[..newline];
+                self.rest = &self.rest[newline + 1..];
+                line.strip_suffix(b"\r").unwrap_or(line)
+            }
+            // only the last line can lack a `\n`, and then a `\r` is content
+            None => mem::take(&mut self.rest),
+        };
+        Some(line)
     }
 }
 

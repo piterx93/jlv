@@ -6,6 +6,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
 use super::*;
+use crate::format::Preset;
 
 fn parse(args: &[&str]) -> Result<Args, clap::Error> {
     Args::try_parse_from(std::iter::once("jlv").chain(args.iter().copied()))
@@ -34,35 +35,35 @@ fn file_alone_leaves_every_option_at_its_default() {
 #[test]
 fn short_f_forces_a_format() {
     let args = parse(&["-f", "spring3", "app.log"]).unwrap();
-    assert_eq!(args.format, Some(Format::Spring3));
+    assert_eq!(args.format, Some(Preset::Spring3));
 }
 
 #[test]
 fn long_format_forces_a_format() {
     let args = parse(&["--format", "wildfly", "app.log"]).unwrap();
-    assert_eq!(args.format, Some(Format::Wildfly));
+    assert_eq!(args.format, Some(Preset::Wildfly));
 }
 
 #[test]
 fn format_accepts_the_equals_form() {
     let args = parse(&["--format=raw", "app.log"]).unwrap();
-    assert_eq!(args.format, Some(Format::Raw));
+    assert_eq!(args.format, Some(Preset::Raw));
 }
 
 #[test]
-fn every_preset_name_maps_to_its_format() {
+fn every_preset_name_maps_to_its_preset() {
     let presets = [
-        ("logback", Format::Logback),
-        ("logback-basic", Format::LogbackBasic),
-        ("spring3", Format::Spring3),
-        ("spring2", Format::Spring2),
-        ("wildfly", Format::Wildfly),
-        ("wildfly-console", Format::WildflyConsole),
-        ("raw", Format::Raw),
+        ("logback", Preset::Logback),
+        ("logback-basic", Preset::LogbackBasic),
+        ("spring3", Preset::Spring3),
+        ("spring2", Preset::Spring2),
+        ("wildfly", Preset::Wildfly),
+        ("wildfly-console", Preset::WildflyConsole),
+        ("raw", Preset::Raw),
     ];
-    for (name, format) in presets {
+    for (name, preset) in presets {
         let args = parse(&["-f", name, "app.log"]).unwrap();
-        assert_eq!(args.format, Some(format), "-f {name}");
+        assert_eq!(args.format, Some(preset), "-f {name}");
     }
 }
 
@@ -102,7 +103,7 @@ fn options_may_follow_the_file() {
     assert_eq!(
         args,
         Args {
-            format: Some(Format::Logback),
+            format: Some(Preset::Logback),
             no_follow: true,
             no_mouse: true,
             ..defaults("app.log")

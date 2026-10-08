@@ -4,4 +4,12 @@ exclude_globs = ["src/main.rs"]
 exclude_re = [
     # `run` only sets up the real terminal around `event_loop`; testing it needs a tty.
     'src/lib\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)$',
+    # The same goes for the flags `run` hands to `App::new`.
+    'src/lib\.rs:\d+:\d+: delete ! in run$',
+    # `at >= start` only differs for a first character wider than the whole line; the
+    # message column is at least 19 columns wide and no character is wider than 2.
+    'src/ui/table\.rs:\d+:41: replace > with >= in wrap$',
+    # Stepping from the cached line mark or from the entry's start finds the same line;
+    # the comparison only picks the shorter walk.
+    'src/app/mod\.rs:\d+:\d+: replace > with (==|<|>=) in App::entry_line$',
 ]

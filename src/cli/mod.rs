@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
+
+use crate::format::Preset;
 
 #[cfg(test)]
 mod tests;
@@ -17,7 +19,7 @@ pub struct Args {
 
     /// Force a format instead of detecting it
     #[arg(short, long, value_enum, value_name = "PRESET")]
-    pub format: Option<Format>,
+    pub format: Option<Preset>,
 
     /// Open at the top, don't follow
     #[arg(long)]
@@ -30,15 +32,4 @@ pub struct Args {
     /// Config file path
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Format {
-    Logback,
-    LogbackBasic,
-    Spring3,
-    Spring2,
-    Wildfly,
-    WildflyConsole,
-    Raw,
 }
