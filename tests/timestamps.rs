@@ -1,8 +1,12 @@
-//! Reading the timestamps of the fixture logs in `tests/fixtures`, one per preset.
+//! Reading the timestamps of the fixture logs in `tests/fixtures`, one per preset,
+//! and dating the ones that only show a time of day.
 
+use std::path::Path;
+
+use jiff::Timestamp;
 use jiff::civil::{DateTime, Time};
 use jiff::tz::TimeZone;
-use jlv::format::{LogTime, Preset, strip_ansi};
+use jlv::format::{Anchor, LogTime, Preset, resolve_timestamps, strip_ansi};
 
 mod common;
 
@@ -110,4 +114,79 @@ fn a_fixture_without_offsets_reads_in_the_given_zone() {
     assert_eq!(span, "2026-10-07 09:14:02.118");
     let expected = "2026-10-07T09:14:02.118Z".parse().unwrap();
     assert_eq!(*first, Some(LogTime::Instant(expected)));
+}
+
+/// The fixture's entry timestamps as `resolve_timestamps` dates them in `zone`, the
+/// anchor taken from `path` and `mtime`, each with the span it was read from.
+fn dated(
+    preset: Preset,
+    name: &str,
+    path: &str,
+    mtime: &str,
+    zone: &TimeZone,
+) -> Vec<(String, Timestamp)> {
+    let (spans, times): (Vec<String>, Vec<Option<LogTime>>) =
+        timestamps(preset, name, zone).into_iter().unzip();
+    let mtime: Timestamp = mtime.parse().unwrap();
+    let anchor = Anchor::for_file(Path::new(path), mtime, zone);
+    let resolved = resolve_timestamps(&times, anchor, zone);
+    assert_eq!(resolved.len(), spans.len(), "{name}");
+    spans
+        .into_iter()
+        .zip(resolved)
+        .map(|(span, resolved)| {
+            let resolved = resolved.unwrap_or_else(|| panic!("{name}: {span} has no timestamp"));
+            (span, resolved)
+        })
+        .collect()
+}
+
+/// Asserts that every entry before midnight in `dated` is on `day_before` and every
+/// one after it on `day`, at the time of day its span shows.
+fn assert_dated_across_midnight(
+    dated: &[(String, Timestamp)],
+    day_before: &str,
+    day: &str,
+    zone: &TimeZone,
+) {
+    for (span, resolved) in dated {
+        let date = if span.starts_with("23:") {
+            day_before
+        } else {
+            day
+        };
+        assert_eq!(
+            wall_clock(LogTime::Instant(*resolved), zone),
+            format!("{date} {}", normalized(span)),
+            "{span}"
+        );
+    }
+}
+
+#[test]
+fn dates_the_logback_basic_fixture_across_midnight_from_its_mtime() {
+    let warsaw = zone("Europe/Warsaw");
+    let dated = dated(
+        Preset::LogbackBasic,
+        "logback-basic.log",
+        "/var/log/2026-01-01/logback-basic.log",
+        "2026-10-07T22:10:00Z",
+        &warsaw,
+    );
+    assert_eq!(dated.len(), 22);
+    assert_dated_across_midnight(&dated, "2026-10-07", "2026-10-08", &warsaw);
+}
+
+#[test]
+fn dates_the_wildfly_console_fixture_across_midnight_from_its_file_name() {
+    let warsaw = zone("Europe/Warsaw");
+    let dated = dated(
+        Preset::WildflyConsole,
+        "wildfly-console.log",
+        "/var/log/wildfly/console.log.2026-10-08",
+        "2026-10-09T05:00:00Z",
+        &warsaw,
+    );
+    assert_eq!(dated.len(), 24);
+    assert_dated_across_midnight(&dated, "2026-10-07", "2026-10-08", &warsaw);
 }

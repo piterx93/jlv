@@ -32,7 +32,19 @@ pub(super) fn time_of_day(span: &[u8]) -> Option<Time> {
 /// `yyyy-MM-dd HH:mm:ss.f`, local time in `zone`.
 pub(super) fn local_instant(span: &[u8], zone: &TimeZone) -> Option<Timestamp> {
     let date_time = read_whole(span, |reader| reader.date_time(b' '))?;
+    local_to_instant(date_time, zone)
+}
+
+/// `date_time` read as local time in `zone`. In a DST gap it takes the offset from
+/// before the gap, in a fold the earlier instant. `None` only at the ends of jiff's
+/// range.
+pub(super) fn local_to_instant(date_time: DateTime, zone: &TimeZone) -> Option<Timestamp> {
     zone.to_ambiguous_timestamp(date_time).compatible().ok()
+}
+
+/// `yyyy-MM-dd`.
+pub(super) fn date(span: &[u8]) -> Option<Date> {
+    read_whole(span, Reader::date)
 }
 
 /// `yyyy-MM-ddTHH:mm:ss.f` followed by `Z` or `±hh:mm`.
