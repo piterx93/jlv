@@ -28,5 +28,5 @@ base="$(git -c safe.directory=/src merge-base "$1" HEAD)"
 diff="$(mktemp target/mutants.XXXXXX.diff)"
 trap "rm -f $diff" EXIT
 git -c safe.directory=/src diff "$base" > "$diff"
-cargo mutants --in-diff "$diff"
+cargo mutants --in-diff "$diff" --jobs 4
 ' check "$base"
