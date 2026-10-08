@@ -1,0 +1,2 @@
+# main.rs only hands the command line to the library, where the logic and its tests live.
+exclude_globs = ["src/main.rs"]

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Runs every local quality gate in the dev container. Run it before pushing.
+#   scripts/check                 mutation-test the changes since HEAD
+#   scripts/check origin/develop  mutation-test everything the branch changes
+#
+# Mutation testing covers edits to tracked files and staged new files, so new
+# Rust files must be staged first. The full mutants run happens nightly in CI.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+base="${1:-HEAD}"
+
+untracked="$(git -C "$root" ls-files --others --exclude-standard -- '*.rs')"
+if [ -n "$untracked" ]; then
+    echo "untracked Rust files, git add them first:" >&2
+    echo "$untracked" >&2
+    exit 1
+fi
+
+exec "$root/scripts/dev" bash -euxo pipefail -c '
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo cov
+cargo test --locked --doc
+# the merge base keeps commits that landed on the base later out of the diff
+base="$(git -c safe.directory=/src merge-base "$1" HEAD)"
+git -c safe.directory=/src diff "$base" > target/mutants.diff
+cargo mutants --in-diff target/mutants.diff
+' check "$base"

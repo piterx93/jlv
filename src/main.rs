@@ -4,16 +4,12 @@ const VERSION: &str = match option_env!("JLV_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-fn version() -> String {
-    match option_env!("JLV_COMMIT") {
-        Some(commit) => format!("{VERSION} ({commit})"),
-        None => VERSION.to_string(),
-    }
-}
-
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("-V" | "--version") => println!("jlv {}", version()),
+        Some("-V" | "--version") => {
+            let version = jlv::version_string(VERSION, option_env!("JLV_COMMIT"));
+            println!("jlv {version}");
+        }
         _ => {
             eprintln!("usage: jlv <FILE>");
             std::process::exit(2);

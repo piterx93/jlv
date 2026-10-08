@@ -1,5 +1,10 @@
 /target
 /dist
+/mutants.out*/
+
+# insta snapshots awaiting review
+*.pending-snap
+*.snap.new
 
 # scratch logs for manual testing; test fixtures live under tests/
 /*.log
