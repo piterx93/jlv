@@ -122,7 +122,7 @@ Variants to tolerate: `.` or `,` as the millisecond separator; `-` or `--` befor
 ### 6.3 Multi-line entries (stack traces)
 
 - Any line not matching the entry-start regex belongs to the previous entry.
-- An entry contains an **exception** if a continuation line matches `^\s+at `, `^Caused by: `, `^\s+\.\.\. \d+ (more|common frames omitted)`, or a `[\w.$]+(Exception|Error)(: |$)` header.
+- An entry contains an **exception** if a continuation line matches `^\s+at `, `^Caused by: `, `^\s+\.\.\. \d+ (more|common frames omitted)`, or a `^[\w.$]+(Exception|Error)(: |$)` header. The first line of an entry with a recognised start is never checked, so a message like `Error: …` doesn't count; a headless entry (a file that starts mid-trace) has all of its lines checked.
 - In the list view, multi-line entries are **folded** by default and show a marker (e.g. `[+37]`). The user can expand or collapse one entry, or all entries.
 - Keys exist to jump to the next or previous entry with an exception.
 
@@ -143,7 +143,7 @@ Colors are configurable (§11).
 ### 6.5 Timestamps
 
 - If the format has a full date: parse it; use the explicit offset if present, otherwise local time.
-- If the format has **time only** (WildFly console, Logback default): take the date of the last entry from the file name if it contains one (`server.log.2026-10-06`, `app-2026-10-06.log.gz`), otherwise from the file's mtime, then walk backwards. When the time-of-day jumps *forward* while reading backwards, it means midnight was crossed, so decrement the day.
+- If the format has **time only** (WildFly console, Logback default): take the date of the last entry from the file name if it contains one (`server.log.2026-10-06`, `app-2026-10-06.log.gz`), otherwise from the file's mtime, taken with its time of day so that a file flushed just after midnight isn't dated a day late. Then walk backwards. When the earlier entry's time of day is more than 2 h *after* the later one, midnight was crossed, so decrement the day; smaller steps back are out-of-order logging or a DST fall-back. When the earlier entry's time of day is more than 23 h 59 min *before* the later one, a late thread wrote the later entry just before midnight, so the earlier entry belongs to the next day.
 - Entries without a parseable timestamp inherit the timestamp of the previous entry (used for time filters and the histogram).
 
 ## 7. UI
