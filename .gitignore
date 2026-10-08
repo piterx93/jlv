@@ -9,3 +9,6 @@
 .idea/
 .vscode/
 *.swp
+
+# local Claude Code agents and settings
+/.claude/

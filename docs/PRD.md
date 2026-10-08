@@ -1,7 +1,7 @@
 # PRD: `jlv` — interactive TUI log viewer for Java logs
 
 > Working name: **jlv** (Java Log Viewer) — to be finalized.
-> Status: Draft v0.1 · 2026-10-07
+> Status: Draft v0.2 · 2026-10-08
 
 ---
 
@@ -74,7 +74,10 @@ Target: Java developers, DevOps/SRE, support engineers. Open source project.
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test --all`
+- `cargo llvm-cov --fail-under-lines 80` (line coverage of the library crate)
 - A final aggregate job, **`ci-required`**, fails if any check job failed. This gives branch protection one stable check name to require, even if the check jobs are later split or extended.
+
+A separate **nightly** workflow runs the full `cargo mutants` suite and uploads the report as an artifact. It does not gate merges; per-change mutation runs happen locally before a change is pushed (§14.1).
 
 **Package job** (only `develop` and `main`; `needs: ci-required`, so it never runs on red tests):
 - Target: `x86_64-unknown-linux-musl`. The built binary is smoke-tested with `--version`.
@@ -114,7 +117,7 @@ Variants to tolerate: `.` or `,` as the millisecond separator; `-` or `--` befor
 - Sample the first ~200 non-empty lines (for `.gz`: the first decompressed lines).
 - Score each preset by the ratio of lines matching its entry-start regex. Continuation lines (stack traces) are ignored in the denominator if they look like continuations (see 6.3).
 - Pick the highest score ≥ 60%; otherwise fall back to **Raw** and show a status-bar notice.
-- User override: `--format <preset>` CLI flag and a key to cycle presets at runtime.
+- User override: `--format <preset>` CLI flag and `P` to cycle presets at runtime.
 
 ### 6.3 Multi-line entries (stack traces)
 
@@ -140,7 +143,7 @@ Colors are configurable (§11).
 ### 6.5 Timestamps
 
 - If the format has a full date: parse it; use the explicit offset if present, otherwise local time.
-- If the format has **time only** (WildFly console, Logback default): derive the date from the file's mtime for the last entry, then walk backwards. When the time-of-day jumps *forward* while reading backwards, it means midnight was crossed, so decrement the day.
+- If the format has **time only** (WildFly console, Logback default): take the date of the last entry from the file name if it contains one (`server.log.2026-10-06`, `app-2026-10-06.log.gz`), otherwise from the file's mtime, then walk backwards. When the time-of-day jumps *forward* while reading backwards, it means midnight was crossed, so decrement the day.
 - Entries without a parseable timestamp inherit the timestamp of the previous entry (used for time filters and the histogram).
 
 ## 7. UI
@@ -166,7 +169,7 @@ Colors are configurable (§11).
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Header:** file name, size, detected format, follow status, number of new lines since pause, counters per level (for the current filter scope).
+- **Header:** file name, size, detected format, follow status, number of new lines since pause, counters per level. The counters respect the class, time and text filters but ignore the level filter, so hidden levels don't drop to zero.
 - **Filter bar:** active filters; hidden when there are none.
 - **Histogram (toggleable):** WARN/ERROR counts per time bucket. The bucket size adapts to the visible range. Selecting a bucket (mouse click or keys) sets the time filter to that bucket.
 - **Table:** Timestamp | Level | Class | Message, plus optional **Thread** (hidden by default, toggle key). In v2 a **Source** column is added for multi-file views.
@@ -204,13 +207,13 @@ Wheel scrolls; click selects a row; double-click toggles fold; click on a histog
 ### 9.2 Search (highlight & jump)
 
 - `/` searches forward and `?` searches backward; `n/N` go to the next or previous match.
-- Modes: plain (default), regex, case-insensitive. Toggled in the prompt with `Ctrl-r` and `Ctrl-i`.
+- Modes: plain (default), regex, case-insensitive. Toggled in the prompt with `Ctrl-r` and `Ctrl-i` (terminals send `Ctrl-i` as `Tab`, so both work).
 - All visible matches are highlighted. The status bar shows `match 3/57`.
 - Search also covers folded stack-trace lines; a match inside a folded entry marks the entry.
 
 ### 9.3 Filters (hide non-matching)
 
-All active filters combine with **AND** and apply live, including in follow mode. `Esc` in the filter panel or `x` clears all filters.
+All active filters combine with **AND** and apply live, including in follow mode. `x` clears all filters; `Esc` closes a filter panel without applying pending edits.
 
 | Filter | Behavior | Keys |
 |--------|----------|------|
@@ -227,15 +230,16 @@ All active filters combine with **AND** and apply live, including in follow mode
 
 ### 9.5 Export & clipboard
 
-- `F8` / `e` exports the currently filtered entries (raw original lines, including stack traces) to a file. The prompt suggests `<name>.filtered.log`.
-- `y` copies the selected entry (raw, with stack trace) to the clipboard via **OSC 52**, which works over SSH. Locally there is a native clipboard fallback.
+- `F8` / `e` exports the currently filtered entries (original lines, including stack traces, with ANSI escapes stripped) to a file. The prompt suggests `<name>.filtered.log` in the current directory.
+- `y` copies the selected entry (with stack trace, ANSI escapes stripped) to the clipboard via **OSC 52**, which works over SSH. Locally there is a native clipboard fallback.
 
 ## 10. CLI
 
 ```
 jlv [OPTIONS] <FILE>
 
-  -f, --format <PRESET>     Force format (logback, spring3, spring2, wildfly, wildfly-console, raw)
+  -f, --format <PRESET>     Force format (logback, logback-basic, spring3, spring2,
+                            wildfly, wildfly-console, raw)
       --no-follow           Open at top, don't follow
   -l, --level <LEVELS>      Initial level filter, e.g. WARN,ERROR
   -c, --class <RULES>       Initial class filter, e.g. 'com.myco.*,!org.hibernate'
@@ -279,11 +283,12 @@ default_class_excludes = []   # e.g. ["org.hibernate.SQL"]
 
 | Key | Action |
 |-----|--------|
-| `?` / `F1` | Help overlay |
+| `F1` | Help overlay (`?` is backward search) |
 | `j k ↑ ↓` | Move |
 | `PgUp PgDn Ctrl-u Ctrl-d` | Page |
 | `g G Home End` | Top / bottom |
 | `F` | Toggle follow |
+| `P` | Cycle format preset |
 | `/` `?` `n` `N` | Search |
 | `F2`, `1`–`6` | Level filter |
 | `F4` / `&` | Text filter |
@@ -336,14 +341,25 @@ default_class_excludes = []   # e.g. ["org.hibernate.SQL"]
 - **Source:** `memmap2` for plain files (remap on growth); `.gz` is decompressed to a temp file once (via `flate2`) and then treated as a plain file.
 - **Index:** a compact struct per entry, built in chunks; it grows on append, and rotation triggers a rebuild.
 - **Filter engine:** level/time/class checks use index fields only, so they are fast. Text and regex checks read entry bytes. Each filter generation can be cancelled.
-- **Crates (tentative):** `ratatui`, `crossterm`, `notify`, `memmap2`, `regex`, `jiff` or `chrono`, `flate2`, `serde` + `toml`, `clap`, `arboard` (local clipboard), `directories`.
-- **Testing:** fixture logs per preset (including stack traces, midnight rollover, and ANSI codes); integration tests for rotation (rename, copytruncate, delete+recreate); `criterion` benchmarks on a generated 2 GB synthetic log.
+- **Crates:** `ratatui`, `crossterm`, `notify`, `memmap2`, `regex`, `jiff`, `flate2`, `serde` + `toml`, `clap`, `arboard` (local clipboard), `directories`.
+- **Layout:** one crate with a library and a thin binary. `src/main.rs` only parses arguments and runs the app; everything else lives in library modules (`source`, `format`, `index`, `filter`, `follow`, `app`, `ui`, `config`). `format`, `index` and `filter` must not depend on `ui` or `ratatui`.
+
+### 14.1 Testing & quality
+
+- **Test-first.** Every feature starts with failing tests that describe the behaviour, including edge cases. Implementation changes only non-test code; if a test turns out to be wrong, it is fixed as a separate step.
+- **Unit tests** live in a `tests.rs` file next to the module (`#[cfg(test)] mod tests;`), not inline, so test and production code change in separate files.
+- **Integration tests** in `tests/`: fixture logs per preset (synthetic, including stack traces, midnight rollover and ANSI codes) and rotation scenarios (rename, copytruncate, delete+recreate).
+- **UI** is tested by rendering into ratatui's `TestBackend` and comparing against inline `insta` snapshots written by hand as the expected screen. App state and key handling are tested without rendering.
+- **Property tests** (`proptest`) for parsers, class abbreviation and the filter engine, e.g. "never panics on arbitrary bytes", "engine result equals a naive filter".
+- **Mutation testing** (`cargo mutants`): no surviving mutants in changed code before a change is pushed; equivalent mutants are excluded explicitly with a reason. Full run nightly.
+- **Coverage:** at least 80% line coverage, enforced in CI.
+- **Benchmarks:** `criterion` on a generated 2 GB synthetic log, run manually to verify §13; not part of CI.
 
 ## 15. Milestones
 
 | Milestone | Scope |
 |-----------|-------|
-| **M0** Skeleton | **First:** GHA pipeline per §5.1 (tests on every branch, `-dev` packages on `develop`, releases on `main`; merge blocking prepared but disabled). Then: CLI parsing, raw viewer with scroll |
+| **M0** Skeleton | **First:** GHA pipeline per §5.1 (tests on every branch, `-dev` packages on `develop`, releases on `main`; merge blocking prepared but disabled). Then: quality gates (§14.1), CLI parsing, raw viewer with scroll |
 | **M1** Parsing | Presets + auto-detection, columns, level colors, multi-line folding, class abbreviation, background index |
 | **M2** Follow | notify + polling, rotation & truncation handling, `less +F` pause/resume, `.gz` read |
 | **M3** Search & filter | Search (plain/regex/icase), level/class/time/text filters, live filtering, filter bar |
@@ -362,8 +378,12 @@ default_class_excludes = []   # e.g. ["org.hibernate.SQL"]
 
 ## 16. Open questions
 
-1. **Real sample logs:** 3–5 lines plus a stack trace from each format actually in use, to validate the presets in §6.1.
-2. **Final name:** `jlv` is a placeholder.
-3. Should time-only formats prefer the file mtime, or a date found in the file name (e.g. `server.log.2026-10-06`) when present?
-4. Should the level counters in the header reflect the whole file or the current filter?
-5. Should the Source column be omitted until v2? It has no meaning with a single file.
+1. **Final name:** `jlv` is a placeholder.
+
+### Resolved (v0.2)
+
+- **Sample logs:** presets are validated against synthetic fixtures built from the examples in §6.1 and the upstream docs of each framework.
+- **Date for time-only formats:** a date in the file name wins over mtime (§6.5).
+- **Level counters:** current filter scope without the level filter (§7.1).
+- **Source column:** not in v1; it arrives with multi-file views in v2.
+- **`?` key:** backward search; the help overlay is `F1` only.
