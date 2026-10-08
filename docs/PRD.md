@@ -202,7 +202,7 @@ Wheel scrolls; click selects a row; double-click toggles fold; click on a histog
 
 ### 9.1 Navigation
 
-`j/k`, `↑/↓` move by line; `PgUp/PgDn`, `Ctrl-u/d` move by page; `g/G` and `Home/End` go to the top or bottom; `:<n>` goes to entry n; `t` jumps to a time (`t 12:30`).
+`j/k`, `↑/↓` move by line; `PgUp/PgDn` move by page, `Ctrl-u/d` by half a page; `g/G` and `Home/End` go to the top or bottom; `:<n>` goes to entry n; `t` jumps to a time (`t 12:30`).
 
 ### 9.2 Search (highlight & jump)
 
