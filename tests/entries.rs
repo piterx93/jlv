@@ -7,7 +7,7 @@ use jlv::format::{Entry, EntryGrouper, Preset, strip_ansi};
 
 mod common;
 
-use common::{FIXTURES, fixture, lines};
+use common::{fixture, fixtures, lines};
 
 /// Feeds `lines` to a grouper for `preset` and returns every entry, the open one last.
 fn group(preset: Preset, lines: &[&[u8]]) -> Vec<Entry> {
@@ -245,7 +245,7 @@ fn groups_the_wildfly_console_fixture() {
 
 #[test]
 fn raw_makes_every_fixture_line_an_entry_without_exceptions() {
-    for (_, name) in FIXTURES {
+    for (_, name) in fixtures() {
         let bytes = fixture(name);
         let lines = lines(&bytes);
         let entries = group(Preset::Raw, &lines);

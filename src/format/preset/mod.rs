@@ -40,6 +40,18 @@ pub enum Preset {
 }
 
 impl Preset {
+    /// Every preset in a fixed order: within a family the one with a date comes before
+    /// the time-only one, and `Raw` comes last. Detection breaks ties in this order.
+    pub const ALL: [Preset; 7] = [
+        Preset::Logback,
+        Preset::LogbackBasic,
+        Preset::Spring3,
+        Preset::Spring2,
+        Preset::Wildfly,
+        Preset::WildflyConsole,
+        Preset::Raw,
+    ];
+
     /// What recognises this preset's entry-start lines. `Raw` has none: it doesn't
     /// group lines, so whoever reads a file under `Raw` treats every line as an entry.
     pub fn entry_parser(self) -> Option<EntryParser> {

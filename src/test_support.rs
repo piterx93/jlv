@@ -10,7 +10,36 @@ use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
+use crate::format::Preset;
 use crate::source::{self, Source};
+
+/// The example lines of PRD §6.1, one per preset but `Raw`.
+pub const EXAMPLES: [(Preset, &str); 6] = [
+    (
+        Preset::Logback,
+        "2026-10-07 12:00:00.123 [http-nio-8080-exec-3] INFO  com.example.OrderService - Order 42 created",
+    ),
+    (
+        Preset::LogbackBasic,
+        "12:00:00.123 [main] INFO  com.example.App -- Started",
+    ),
+    (
+        Preset::Spring3,
+        "2026-10-07T12:00:00.123+02:00  INFO 12345 --- [myapp] [           main] o.s.b.SpringApplication                  : Started App in 2.1s",
+    ),
+    (
+        Preset::Spring2,
+        "2026-10-07 12:00:00.123  INFO 12345 --- [           main] o.s.b.SpringApplication                  : Started App",
+    ),
+    (
+        Preset::Wildfly,
+        "2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: WildFly Full 33.0.0.Final started",
+    ),
+    (
+        Preset::WildflyConsole,
+        "12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: ...",
+    ),
+];
 
 /// `content` mapped from a file. The file is gone by the time this returns; the
 /// mapping stays valid.

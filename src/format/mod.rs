@@ -1,13 +1,16 @@
-//! Understanding log lines: the format presets, severity levels, removing terminal
-//! escape codes before a line is parsed, and grouping lines into entries.
+//! Understanding log lines: the format presets and detecting which one a file is in,
+//! severity levels, removing terminal escape codes before a line is parsed, and
+//! grouping lines into entries.
 
 use std::borrow::Cow;
 
 use memchr::{memchr, memchr2};
 
+mod detect;
 mod entry;
 mod preset;
 
+pub use detect::detect;
 pub use entry::{Entry, EntryGrouper, is_exception_line};
 pub use preset::{EntryHead, EntryParser, Preset};
 

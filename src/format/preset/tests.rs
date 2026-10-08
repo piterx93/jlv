@@ -1,47 +1,17 @@
+use std::collections::HashSet;
 use std::ops::Range;
 
 use proptest::prelude::*;
 
 use super::*;
 use crate::format::strip_ansi;
+use crate::test_support::EXAMPLES;
 
-/// Every preset but `Raw`.
-const STRUCTURED: [Preset; 6] = [
-    Preset::Logback,
-    Preset::LogbackBasic,
-    Preset::Spring3,
-    Preset::Spring2,
-    Preset::Wildfly,
-    Preset::WildflyConsole,
-];
-
-/// The example lines of PRD §6.1.
-const EXAMPLES: [(Preset, &str); 6] = [
-    (
-        Preset::Logback,
-        "2026-10-07 12:00:00.123 [http-nio-8080-exec-3] INFO  com.example.OrderService - Order 42 created",
-    ),
-    (
-        Preset::LogbackBasic,
-        "12:00:00.123 [main] INFO  com.example.App -- Started",
-    ),
-    (
-        Preset::Spring3,
-        "2026-10-07T12:00:00.123+02:00  INFO 12345 --- [myapp] [           main] o.s.b.SpringApplication                  : Started App in 2.1s",
-    ),
-    (
-        Preset::Spring2,
-        "2026-10-07 12:00:00.123  INFO 12345 --- [           main] o.s.b.SpringApplication                  : Started App",
-    ),
-    (
-        Preset::Wildfly,
-        "2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: WildFly Full 33.0.0.Final started",
-    ),
-    (
-        Preset::WildflyConsole,
-        "12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: ...",
-    ),
-];
+/// Every preset but `Raw`, which comes last in [`Preset::ALL`].
+const STRUCTURED: [Preset; 6] = {
+    let [structured @ .., _raw] = Preset::ALL;
+    structured
+};
 
 /// Spring Boot's default correlation group with a trace and a span: `traceId(32)`,
 /// `spanId(16)`.
@@ -253,6 +223,17 @@ fn assert_every_preset_parses(parts: &Parts) {
 }
 
 // --- presets ---
+
+#[test]
+fn raw_comes_last() {
+    assert_eq!(Preset::ALL.last(), Some(&Preset::Raw));
+}
+
+#[test]
+fn all_has_every_preset_once() {
+    let unique: HashSet<Preset> = Preset::ALL.into_iter().collect();
+    assert_eq!(unique, Preset::value_variants().iter().copied().collect());
+}
 
 #[test]
 fn raw_has_no_entry_parser() {

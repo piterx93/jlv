@@ -7,7 +7,7 @@ use jlv::format::{EntryHead, Preset, strip_ansi};
 
 mod common;
 
-use common::{FIXTURES, fixture, lines};
+use common::{fixture, fixtures, lines};
 
 /// The fixture's lines without line endings and ANSI-stripped, as the parser gets
 /// them.
@@ -263,7 +263,7 @@ fn finds_every_entry_of_the_wildfly_console_fixture() {
 
 #[test]
 fn every_fixture_has_at_least_20_entries() {
-    for (preset, name) in FIXTURES {
+    for (preset, name) in fixtures() {
         let entries = stripped_lines(name)
             .iter()
             .filter(|line| parse(preset, line).is_some())
@@ -277,9 +277,9 @@ fn every_fixture_has_at_least_20_entries() {
 #[test]
 fn no_preset_parses_a_line_of_another_presets_fixture() {
     let mut clashes = Vec::new();
-    for (own, name) in FIXTURES {
+    for (own, name) in fixtures() {
         for (n, line) in stripped_lines(name).iter().enumerate() {
-            for (preset, _) in FIXTURES {
+            for (preset, _) in fixtures() {
                 if preset != own && parse(preset, line).is_some() {
                     clashes.push(format!("{name}:{} parses as {preset:?}", n + 1));
                 }
