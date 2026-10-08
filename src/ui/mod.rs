@@ -12,6 +12,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
 
+mod abbrev;
+
+pub use abbrev::abbreviate;
+
 #[cfg(test)]
 mod tests;
 
