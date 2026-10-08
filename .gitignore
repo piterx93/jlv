@@ -1,2 +1,11 @@
 /target
 /dist
+
+# scratch logs for manual testing; test fixtures live under tests/
+/*.log
+/*.log.*
+
+.DS_Store
+.idea/
+.vscode/
+*.swp
