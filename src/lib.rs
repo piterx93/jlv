@@ -10,6 +10,7 @@ use crate::source::Source;
 
 pub mod cli;
 pub mod source;
+pub mod viewport;
 
 #[cfg(test)]
 mod tests;
