@@ -77,11 +77,19 @@ pub fn named_app(path: impl AsRef<Path>, content: &[u8]) -> App {
     let mut app = App::new(
         path.as_ref(),
         source(content),
-        Preset::Raw,
+        Some(Preset::Raw),
         zone(),
         mtime(),
         false,
     );
+    wait_for_index(&mut app);
+    app
+}
+
+/// A viewer over `content` in the preset detected from it, opened at the top as
+/// `/var/log/app.log`, with the whole file indexed.
+pub fn detected_app(content: &[u8]) -> App {
+    let mut app = opened(None, content, false);
     wait_for_index(&mut app);
     app
 }
@@ -97,20 +105,20 @@ pub fn app_in(preset: Preset, content: &[u8]) -> App {
 /// A viewer over `content` in `preset`, opened at the top as `/var/log/app.log`,
 /// that hasn't taken in any entries yet.
 pub fn unindexed_app(preset: Preset, content: &[u8]) -> App {
-    opened(preset, content, false)
+    opened(Some(preset), content, false)
 }
 
 /// A viewer over `content` in `preset`, opened at the end as `/var/log/app.log` to
 /// follow it, that hasn't taken in any entries yet.
 pub fn following_app(preset: Preset, content: &[u8]) -> App {
-    opened(preset, content, true)
+    opened(Some(preset), content, true)
 }
 
-fn opened(preset: Preset, content: &[u8], follow: bool) -> App {
+fn opened(format: Option<Preset>, content: &[u8], follow: bool) -> App {
     App::new(
         Path::new("/var/log/app.log"),
         source(content),
-        preset,
+        format,
         zone(),
         mtime(),
         follow,

@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStringExt;
 
 use insta::assert_snapshot;
@@ -7,13 +8,14 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::style::Color;
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, action};
 use crate::format::Preset;
 use crate::test_support::{
-    app, app_in, char_key, key, named_app, numbered_log, row, unindexed_app,
+    EXAMPLES, app, app_in, char_key, detected_app, key, named_app, numbered_log, row, unindexed_app,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -26,14 +28,27 @@ fn drawn(app: &mut App, width: u16, height: u16, theme: Theme) -> Terminal<TestB
     terminal
 }
 
-/// The 80×24 screen after pressing `keys`, as text.
-fn screen_after(app: &mut App, keys: &[KeyEvent]) -> String {
+/// The 80×24 terminal after pressing `keys`, drawn after each.
+fn terminal_after(app: &mut App, keys: &[KeyEvent]) -> Terminal<TestBackend> {
     let mut terminal = drawn(app, 80, 24, Theme::Styled);
     for &key in keys {
         app.apply(action(key).unwrap());
         draw(&mut terminal, app, Theme::Styled);
     }
-    terminal.backend().to_string()
+    terminal
+}
+
+/// The 80×24 screen after pressing `keys`, as text.
+fn screen_after(app: &mut App, keys: &[KeyEvent]) -> String {
+    terminal_after(app, keys).backend().to_string()
+}
+
+/// Screen lines `lines` of the 80×24 screen after pressing `keys`, as [`row`] shows
+/// them, one per line.
+fn lines_after(app: &mut App, keys: &[KeyEvent], lines: RangeInclusive<u16>) -> String {
+    let terminal = terminal_after(app, keys);
+    let rows: Vec<String> = lines.map(|y| row(&terminal, y)).collect();
+    rows.join("\n")
 }
 
 /// How `numbered_log` shows line `n` (1-based) on screen, `▶` when it is selected.
@@ -220,27 +235,6 @@ fn empty_file_shows_no_indexing_progress() {
 }
 
 #[test]
-fn body_shows_a_row_per_entry() {
-    let log = [
-        "2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
-        "2026-10-07 12:00:01.500 [main] ERROR com.example.App - Failed\n",
-        "java.lang.IllegalStateException: boom\n",
-        "\tat com.example.App.main(App.java:10)\n",
-        "2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done\n",
-    ]
-    .concat();
-    let mut app = app_in(Preset::Logback, log.as_bytes());
-    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
-    let body: Vec<String> = (1..4).map(|y| row(&terminal, y)).collect();
-    assert_snapshot!(body.join("\n"), @r"
-    ▶2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started
-     2026-10-07 12:00:01.500 [main] ERROR com.example.App - Failed
-     2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done
-    ");
-    assert_eq!(row(&terminal, 4), "");
-}
-
-#[test]
 fn too_small_terminal_says_so_instead_of_showing_lines() {
     let terminal = drawn(&mut hundred_lines(), 60, 9, Theme::Styled);
     assert_snapshot!(terminal.backend().to_string(), @r#"
@@ -339,6 +333,375 @@ fn plain_theme_draws_the_screen_without_any_style() {
         ]
     }
     "#);
+}
+
+// --- the table ---
+
+/// An entry of every level, one of them with a stack trace, a thread name longer than
+/// the thread column and a class name that is abbreviated to fit.
+const TABLE_LOG: &str = concat!(
+    "2026-10-07 12:00:00.100 [main] TRACE com.example.App - Tick\n",
+    "2026-10-07 12:00:00.200 [main] DEBUG com.example.App - Config loaded\n",
+    "2026-10-07 12:00:00.300 [http-nio-8080-exec-3] INFO  com.example.order.OrderService - Order 42 created\n",
+    "2026-10-07 12:00:01.000 [main] WARN  com.example.App - Retry 1/3\n",
+    "2026-10-07 12:00:02.000 [main] ERROR com.example.App - Failed\n",
+    "java.lang.IllegalStateException: boom\n",
+    "\tat com.example.App.main(App.java:10)\n",
+    "2026-10-07 12:00:03.000 [main] FATAL com.example.App - Giving up\n",
+);
+
+fn table() -> App {
+    app_in(Preset::Logback, TABLE_LOG.as_bytes())
+}
+
+/// The buffer's debug view lists every change of style; a single entry at 0,0 means
+/// the whole screen is in the terminal's default style.
+#[test]
+fn plain_theme_draws_the_table_without_any_style() {
+    let terminal = drawn(&mut table(), 80, 24, Theme::Plain);
+    assert_snapshot!(format!("{:?}", terminal.backend().buffer()), @r#"
+    Buffer {
+        area: Rect { x: 0, y: 0, width: 80, height: 24 },
+        content: [
+            "jlv ─ app.log ─ 500 B ─ Logback                                                 ",
+            "▶12:00:00.100 TRACE com.example.App          Tick                               ",
+            " 12:00:00.200 DEBUG com.example.App          Config loaded                      ",
+            " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   ",
+            " 12:00:01.000 WARN  com.example.App          Retry 1/3                          ",
+            " 12:00:02.000 ERROR com.example.App          Failed                             ",
+            " 12:00:03.000 FATAL com.example.App          Giving up                          ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "                                                                                ",
+            "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            ",
+        ],
+        styles: [
+            x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        ]
+    }
+    "#);
+}
+
+#[test]
+fn levels_have_the_colours_of_their_severity() {
+    let styles = [
+        (Some(Level::Trace), Style::new().fg(Color::DarkGray)),
+        (Some(Level::Debug), Style::new().fg(Color::Cyan)),
+        (Some(Level::Info), Style::new().fg(Color::Green)),
+        (Some(Level::Warn), Style::new().fg(Color::Yellow)),
+        (Some(Level::Error), Style::new().fg(Color::Red)),
+        (
+            Some(Level::Fatal),
+            Style::new().fg(Color::White).bg(Color::Red).bold(),
+        ),
+        (None, Style::new()),
+    ];
+    for (level, style) in styles {
+        assert_eq!(level_style(level), style, "{level:?}");
+    }
+}
+
+// Where the columns start at 80 columns, after the `▶` gutter.
+const TIMESTAMP_COLUMN: u16 = 1;
+const LEVEL_COLUMN: u16 = 14;
+const MESSAGE_COLUMN: u16 = 45;
+
+#[test]
+fn styled_table_colours_only_the_level_column() {
+    let terminal = drawn(&mut table(), 80, 24, Theme::Styled);
+    let buffer = terminal.backend().buffer();
+    let levels = [
+        Level::Trace,
+        Level::Debug,
+        Level::Info,
+        Level::Warn,
+        Level::Error,
+        Level::Fatal,
+    ];
+    for (y, level) in (1..).zip(levels) {
+        let style = level_style(Some(level));
+        let cell = &buffer[(LEVEL_COLUMN, y)];
+        assert_eq!(
+            (cell.fg, cell.bg),
+            (
+                style.fg.unwrap_or(Color::Reset),
+                style.bg.unwrap_or(Color::Reset)
+            ),
+            "{level:?}"
+        );
+        assert!(cell.modifier.contains(style.add_modifier), "{level:?}");
+        for x in [TIMESTAMP_COLUMN, MESSAGE_COLUMN] {
+            assert_eq!(buffer[(x, y)].fg, Color::Reset, "column {x} of {level:?}");
+        }
+    }
+}
+
+#[test]
+fn capital_t_shows_the_thread_column() {
+    let out = lines_after(&mut table(), &[char_key('T')], 1..=6);
+    assert_snapshot!(out, @r"
+    ▶12:00:00.100 TRACE main            com.example.App          Tick
+     12:00:00.200 DEBUG main            com.example.App          Config loaded
+     12:00:00.300 INFO  …io-8080-exec-3 c.e.order.OrderService   Order 42 created
+     12:00:01.000 WARN  main            com.example.App          Retry 1/3
+     12:00:02.000 ERROR main            com.example.App          Failed
+     12:00:03.000 FATAL main            com.example.App          Giving up
+    ");
+}
+
+#[test]
+fn capital_t_twice_hides_the_thread_column_again() {
+    let toggled = screen_after(&mut table(), &[char_key('T'), char_key('T')]);
+    assert_eq!(toggled, screen_after(&mut table(), &[]));
+}
+
+#[test]
+fn timestamps_show_the_date_from_100_columns() {
+    let terminal = drawn(&mut table(), 100, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "▶2026-10-07 12:00:00.100 TRACE com.example.App                Tick"
+    );
+}
+
+#[test]
+fn class_column_grows_to_at_most_40_columns() {
+    let terminal = drawn(&mut table(), 200, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "▶2026-10-07 12:00:00.100 TRACE com.example.App                          Tick"
+    );
+}
+
+#[test]
+fn level_column_names_the_level_however_the_line_spells_it() {
+    let mut app = app_in(
+        Preset::Logback,
+        b"2026-10-07 12:00:00.100 [main] warning com.example.App - Retry\n",
+    );
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "▶12:00:00.100 WARN  com.example.App          Retry"
+    );
+}
+
+// --- long messages ---
+
+/// A message of 62 columns, longer than the 35 of the message column at 80 columns,
+/// and a short one.
+const LONG_MESSAGE_LOG: &str = concat!(
+    "2026-10-07 12:00:00.100 [main] INFO  com.example.App - ",
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n",
+    "2026-10-07 12:00:00.200 [main] WARN  com.example.App - short message\n",
+);
+
+fn long_messages() -> App {
+    app_in(Preset::Logback, LONG_MESSAGE_LOG.as_bytes())
+}
+
+#[test]
+fn right_arrow_scrolls_the_messages_by_8_columns() {
+    let out = lines_after(&mut long_messages(), &[key(KeyCode::Right)], 1..=2);
+    assert_snapshot!(out, @r"
+    ▶12:00:00.100 INFO  com.example.App          89abcdefghijklmnopqrstuvwxyzABCDEFG
+     12:00:00.200 WARN  com.example.App          ssage
+    ");
+}
+
+#[test]
+fn scrolling_right_stops_once_the_longest_message_on_screen_ends_at_the_edge() {
+    let right = key(KeyCode::Right);
+    let out = lines_after(&mut long_messages(), &[right; 4], 1..=1);
+    assert_eq!(
+        out,
+        "▶12:00:00.100 INFO  com.example.App          rstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    );
+}
+
+#[test]
+fn scrolling_left_after_the_end_moves_back_8_columns_from_there() {
+    let right = key(KeyCode::Right);
+    let keys = [right, right, right, right, key(KeyCode::Left)];
+    let out = lines_after(&mut long_messages(), &keys, 1..=1);
+    assert_eq!(
+        out,
+        "▶12:00:00.100 INFO  com.example.App          jklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR"
+    );
+}
+
+#[test]
+fn raw_lines_scroll_like_messages() {
+    let line = "0123456789".repeat(10);
+    let out = lines_after(&mut app(line.as_bytes()), &[key(KeyCode::Right)], 1..=1);
+    assert_eq!(out, format!("▶{}", &line[8..87]));
+}
+
+#[test]
+fn w_wraps_long_messages_onto_the_next_lines_of_the_message_column() {
+    let out = lines_after(&mut long_messages(), &[char_key('w')], 1..=3);
+    assert_snapshot!(out, @r"
+    ▶12:00:00.100 INFO  com.example.App          0123456789abcdefghijklmnopqrstuvwxy
+                                                 zABCDEFGHIJKLMNOPQRSTUVWXYZ
+     12:00:00.200 WARN  com.example.App          short message
+    ");
+}
+
+#[test]
+fn w_twice_cuts_long_messages_again() {
+    let toggled = screen_after(&mut long_messages(), &[char_key('w'), char_key('w')]);
+    assert_eq!(toggled, screen_after(&mut long_messages(), &[]));
+}
+
+/// 30 entries of two screen lines each at 80 columns, 11 of them on the 22 lines of
+/// the body.
+fn two_line_entries() -> App {
+    let log: String = (1..=30)
+        .map(|i| {
+            let padding = "x".repeat(40);
+            format!(
+                "2026-10-07 12:00:00.{i:03} [main] INFO  com.example.App - step {i:02} {padding}\n"
+            )
+        })
+        .collect();
+    app_in(Preset::Logback, log.as_bytes())
+}
+
+/// The first 13 columns of screen lines `lines` after `w` and then `j` `downs` times.
+fn wrapped_starts_after_moving_down(downs: usize, lines: [u16; 3]) -> [String; 3] {
+    let mut keys = vec![char_key('w')];
+    keys.extend(iter::repeat_n(char_key('j'), downs));
+    let terminal = terminal_after(&mut two_line_entries(), &keys);
+    lines.map(|y| row(&terminal, y).chars().take(13).collect())
+}
+
+#[test]
+fn moving_down_within_a_screen_of_wrapped_entries_does_not_scroll() {
+    assert_eq!(
+        wrapped_starts_after_moving_down(1, [1, 2, 3]),
+        [" 12:00:00.001", " ".repeat(13).as_str(), "▶12:00:00.002"]
+    );
+}
+
+#[test]
+fn moving_down_through_wrapped_entries_keeps_the_selected_one_on_screen() {
+    assert_eq!(
+        wrapped_starts_after_moving_down(11, [1, 21, 22]),
+        [" 12:00:00.002", "▶12:00:00.012", " ".repeat(13).as_str()]
+    );
+}
+
+/// 40 entries, the first 20 of two screen lines at 80 columns and the rest of one,
+/// or the other way round when `two_lines_first` is false.
+fn mixed_height_entries(two_lines_first: bool) -> App {
+    let log: String = (1..=40)
+        .map(|i| {
+            let padding = if (i <= 20) == two_lines_first {
+                "x".repeat(40)
+            } else {
+                String::new()
+            };
+            format!(
+                "2026-10-07 12:00:00.{i:03} [main] INFO  com.example.App - step {i:02} {padding}\n"
+            )
+        })
+        .collect();
+    app_in(Preset::Logback, log.as_bytes())
+}
+
+/// The first 13 columns of screen lines `lines` after pressing `keys`.
+fn starts_after(app: &mut App, keys: &[KeyEvent], lines: [u16; 3]) -> [String; 3] {
+    let terminal = terminal_after(app, keys);
+    lines.map(|y| row(&terminal, y).chars().take(13).collect())
+}
+
+#[test]
+fn bottom_of_wrapped_entries_fills_the_body_up_to_the_last_line() {
+    // The last screen holds the last 20 entries and the two-line one before them.
+    let keys = [char_key('w'), char_key('G')];
+    assert_eq!(
+        starts_after(&mut mixed_height_entries(true), &keys, [1, 3, 22]),
+        [" 12:00:00.020", " 12:00:00.021", "▶12:00:00.040"]
+    );
+}
+
+#[test]
+fn moving_down_through_the_first_screen_of_wrapped_entries_does_not_scroll() {
+    // The first screen holds the 20 one-line entries and the first two-line one.
+    let mut keys = vec![char_key('w')];
+    keys.extend([char_key('j'); 11]);
+    assert_eq!(
+        starts_after(&mut mixed_height_entries(false), &keys, [1, 12, 21]),
+        [" 12:00:00.001", "▶12:00:00.012", " 12:00:00.021"]
+    );
+}
+
+#[test]
+fn wrapped_messages_continue_under_the_message_column_next_to_the_thread() {
+    let keys = [char_key('T'), char_key('w')];
+    let out = lines_after(&mut long_messages(), &keys, 1..=5);
+    assert_snapshot!(out, @r"
+    ▶12:00:00.100 INFO  main            com.example.App          0123456789abcdefghi
+                                                                 jklmnopqrstuvwxyzAB
+                                                                 CDEFGHIJKLMNOPQRSTU
+                                                                 VWXYZ
+     12:00:00.200 WARN  main            com.example.App          short message
+    ");
+}
+
+// --- format detection ---
+
+#[test]
+fn unrecognized_format_is_shown_raw_with_a_notice_in_the_header() {
+    assert_snapshot!(screen_after(&mut detected_app(b"hello\nworld\n"), &[]), @r#"
+    "jlv ─ app.log ─ 12 B ─ Raw ─ format not recognized, showing raw                 "
+    "▶hello                                                                          "
+    " world                                                                          "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn cycled_preset_replaces_the_notice_in_the_header() {
+    let mut app = detected_app(b"hello\nworld\n");
+    let terminal = terminal_after(&mut app, &[char_key('P')]);
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 12 B ─ Logback ─ indexing 0%"
+    );
 }
 
 // --- selection ---
@@ -856,7 +1219,41 @@ fn any_action() -> impl Strategy<Value = Action> {
         Action::HalfPageDown,
         Action::Top,
         Action::Bottom,
+        Action::ScrollLeft,
+        Action::ScrollRight,
+        Action::ToggleThread,
+        Action::ToggleWrap,
+        Action::CyclePreset,
     ])
+}
+
+fn any_preset() -> impl Strategy<Value = Preset> {
+    prop::sample::select(Preset::ALL.to_vec())
+}
+
+/// Lines that start an entry in some preset mixed with arbitrary bytes.
+fn any_log() -> impl Strategy<Value = Vec<u8>> {
+    let line = prop_oneof![
+        prop::sample::select(EXAMPLES.map(|(_, line)| line.as_bytes().to_vec()).to_vec()),
+        prop::collection::vec(any::<u8>(), 0..100),
+    ];
+    prop::collection::vec(line, 0..6).prop_map(|lines| lines.join(&b'\n'))
+}
+
+/// `app` drawn at `width`×`height` in `theme`, then again after each of `actions`.
+fn drawn_after(
+    app: &mut App,
+    width: u16,
+    height: u16,
+    theme: Theme,
+    actions: &[Action],
+) -> Terminal<TestBackend> {
+    let mut terminal = drawn(app, width, height, theme);
+    for &action in actions {
+        app.apply(action);
+        draw(&mut terminal, app, theme);
+    }
+    terminal
 }
 
 proptest! {
@@ -868,18 +1265,15 @@ proptest! {
     })]
 
     #[test]
-    fn any_file_at_any_size_draws_only_printable_cells(
-        bytes in prop::collection::vec(any::<u8>(), 0..512),
-        width in 0u16..120,
+    fn any_file_in_any_preset_at_any_size_draws_only_printable_cells(
+        preset in any_preset(),
+        bytes in any_log(),
+        width in 0u16..140,
         height in 0u16..40,
         actions in prop::collection::vec(any_action(), 0..12),
     ) {
-        let mut app = app(&bytes);
-        let mut terminal = drawn(&mut app, width, height, Theme::Styled);
-        for action in actions {
-            app.apply(action);
-            draw(&mut terminal, &mut app, Theme::Styled);
-        }
+        let mut app = app_in(preset, &bytes);
+        let terminal = drawn_after(&mut app, width, height, Theme::Styled, &actions);
         for cell in &terminal.backend().buffer().content {
             prop_assert!(!cell.symbol().chars().any(char::is_control), "{:?}", cell.symbol());
         }
@@ -887,17 +1281,14 @@ proptest! {
 
     #[test]
     fn plain_theme_never_styles_a_cell(
-        bytes in prop::collection::vec(any::<u8>(), 0..512),
-        width in 0u16..120,
+        preset in any_preset(),
+        bytes in any_log(),
+        width in 0u16..140,
         height in 0u16..40,
         actions in prop::collection::vec(any_action(), 0..12),
     ) {
-        let mut app = app(&bytes);
-        let mut terminal = drawn(&mut app, width, height, Theme::Plain);
-        for action in actions {
-            app.apply(action);
-            draw(&mut terminal, &mut app, Theme::Plain);
-        }
+        let mut app = app_in(preset, &bytes);
+        let terminal = drawn_after(&mut app, width, height, Theme::Plain, &actions);
         for cell in &terminal.backend().buffer().content {
             prop_assert_eq!(cell.style(), Cell::EMPTY.style());
         }

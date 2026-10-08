@@ -10,8 +10,8 @@ use super::*;
 use crate::index::Progress;
 use crate::test_support;
 use crate::test_support::{
-    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, following_app, key,
-    named_app, numbered_log, unindexed_app, wait_for_index, wait_for_index_within,
+    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
+    key, named_app, numbered_log, unindexed_app, wait_for_index, wait_for_index_within,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -99,6 +99,33 @@ fn capital_g_reported_with_shift_goes_to_the_bottom() {
 #[test]
 fn end_goes_to_the_bottom() {
     assert_eq!(action(key(KeyCode::End)), Some(Action::Bottom));
+}
+
+// --- key mapping: the table ---
+
+#[test]
+fn left_arrow_scrolls_left() {
+    assert_eq!(action(key(KeyCode::Left)), Some(Action::ScrollLeft));
+}
+
+#[test]
+fn right_arrow_scrolls_right() {
+    assert_eq!(action(key(KeyCode::Right)), Some(Action::ScrollRight));
+}
+
+#[test]
+fn capital_t_toggles_the_thread_column() {
+    assert_eq!(action(char_key('T')), Some(Action::ToggleThread));
+}
+
+#[test]
+fn w_toggles_wrapping() {
+    assert_eq!(action(char_key('w')), Some(Action::ToggleWrap));
+}
+
+#[test]
+fn capital_p_cycles_the_preset() {
+    assert_eq!(action(char_key('P')), Some(Action::CyclePreset));
 }
 
 // --- key mapping: quitting ---
@@ -291,7 +318,7 @@ fn app_indexes_in_the_preset_zone_and_anchor_it_was_given() {
     let app = App::new(
         Path::new("/var/log/console.log"),
         test_support::source(b"12:00:00,123 INFO  [org.jboss.as] (main) started\n"),
-        Preset::WildflyConsole,
+        Some(Preset::WildflyConsole),
         zone.clone(),
         mtime,
         false,
@@ -310,7 +337,7 @@ fn anchor_comes_from_a_date_in_the_file_name() {
     let app = App::new(
         Path::new("/var/log/server.log.2026-10-06"),
         test_support::source(b"x\n"),
-        Preset::LogbackBasic,
+        Some(Preset::LogbackBasic),
         test_support::zone(),
         test_support::mtime(),
         false,
@@ -319,6 +346,17 @@ fn anchor_comes_from_a_date_in_the_file_name() {
         app.settings().anchor,
         Anchor::Named("2026-10-06".parse().unwrap())
     );
+}
+
+#[test]
+fn app_without_a_format_reads_the_file_in_the_detected_preset() {
+    let app = detected_app(
+        [STARTED, FAILED, EXCEPTION, FRAME, DONE]
+            .concat()
+            .as_bytes(),
+    );
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.viewport().total(), 3);
 }
 
 #[test]
@@ -623,6 +661,59 @@ fn following_a_file_shorter_than_the_screen_selects_its_last_entry() {
     );
     app.resize(10);
     app.poll_index();
+    assert_eq!(pos(&app), (0, Some(2)));
+    assert_eq!(app.line(2), DONE.trim_end());
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(2)));
+}
+
+// --- cycling presets ---
+
+fn cycled(mut app: App) -> App {
+    app.apply(Action::CyclePreset);
+    app
+}
+
+#[test]
+fn cycling_reads_the_file_in_the_next_preset() {
+    let app = cycled(logback(&[STARTED]));
+    assert_eq!(app.settings().preset, Preset::LogbackBasic);
+}
+
+#[test]
+fn cycling_past_raw_starts_again_at_the_first_preset() {
+    let app = cycled(app(STARTED.as_bytes()));
+    assert_eq!(app.settings().preset, Preset::Logback);
+}
+
+#[test]
+fn cycling_indexes_the_file_again_in_the_new_preset() {
+    let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
+    let mut app = cycled(app(log.as_bytes()));
+    wait_for_index(&mut app);
+    assert_eq!(app.viewport().total(), 3);
+    assert_eq!(app.line(2), DONE.trim_end());
+}
+
+#[test]
+fn cycling_a_file_opened_at_the_top_selects_the_first_row_again() {
+    let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
+    let mut app = app(log.as_bytes());
+    app.resize(10);
+    let mut app = cycled(applied(app, &[Action::Down, Action::Down, Action::Down]));
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn cycling_a_followed_file_shows_its_last_entries_in_the_new_preset_at_once() {
+    let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
+    let mut app = following_app(Preset::Raw, log.as_bytes());
+    app.resize(10);
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(4)));
+    let mut app = cycled(app);
+    assert_eq!(app.viewport().total(), 3);
     assert_eq!(pos(&app), (0, Some(2)));
     assert_eq!(app.line(2), DONE.trim_end());
     wait_for_index(&mut app);

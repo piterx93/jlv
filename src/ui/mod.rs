@@ -5,14 +5,16 @@ use std::ffi::OsStr;
 use std::iter;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
+use crate::format::Level;
 
 mod abbrev;
+mod table;
 
 pub use abbrev::abbreviate;
 
@@ -53,9 +55,20 @@ const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/B
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
-/// preset the index reads the file in, followed by ` ─ indexing <percent>%` until the
-/// index is complete), the rows on screen with `▶` in front of the selected one, and
-/// the key hints in the footer.
+/// preset the index reads the file in, then ` ─ format not recognized, showing raw`
+/// while `Raw` is shown because detection found no preset, then
+/// ` ─ indexing <percent>%` until the index is complete), the rows on screen with `▶`
+/// in front of the selected one, and the key hints in the footer.
+///
+/// Under `Raw` a row is the entry's first line. Under the other presets it is a table
+/// row, columns separated by a space: the timestamp in the app's zone
+/// (`%Y-%m-%d %H:%M:%S%.3f`, `%H:%M:%S%.3f` below 100 columns), the level (5 wide,
+/// in [`level_style`]), the thread if shown (15 wide, a longer name keeps its end
+/// after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
+/// cut with `…` if even the abbreviation is too wide) and the message in the rest.
+/// The headless entry has only a message, its first line. Messages are cut at the
+/// right edge, or wrapped onto the following lines of the message column; scrolled
+/// right, they stop once the longest message on screen ends at the right edge.
 /// The lines in between follow the frame's height, so this resizes `app`.
 ///
 /// Below 80×24 the lines are replaced by `terminal too small (80×24 needed)` and `app`
@@ -75,8 +88,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     } else {
         format!(" ─ indexing {}%", progress.percent())
     };
+    let notice = if app.format_unrecognized() {
+        " ─ format not recognized, showing raw"
+    } else {
+        ""
+    };
     let title = format!(
-        "jlv ─ {} ─ {} ─ {}{indexing}",
+        "jlv ─ {} ─ {} ─ {}{notice}{indexing}",
         printable(app.file_name()),
         human_size(app.size()),
         app.settings().preset
@@ -88,26 +106,23 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         frame.render_widget(Line::from(TOO_SMALL), body);
     } else {
-        app.resize(usize::from(body.height));
-        render_lines(frame, app, theme, body);
+        table::render(frame, app, theme, body);
     }
 }
 
-/// Draws the lines on screen into `body`, one per row, reading only those lines.
-fn render_lines(frame: &mut Frame, app: &App, theme: Theme, body: Rect) {
-    let viewport = app.viewport();
-    for (i, row) in (viewport.top()..viewport.total()).zip(body.rows()) {
-        let selected = viewport.selected() == Some(i);
-        let (gutter, style) = if selected {
-            ("▶", theme.paint(Style::new().reversed()))
-        } else {
-            (" ", Style::new())
-        };
-        let text = printable(&app.line(i)).into_owned();
-        frame.render_widget(
-            Line::from(vec![gutter.into(), text.into()]).style(style),
-            row,
-        );
+/// The style of a level in the level column (PRD §6.4): TRACE dark gray, DEBUG cyan,
+/// INFO green, WARN yellow, ERROR red, FATAL bold white on red, and the terminal's
+/// default style for a level jlv doesn't know.
+pub fn level_style(level: Option<Level>) -> Style {
+    let style = Style::new();
+    match level {
+        Some(Level::Trace) => style.fg(Color::DarkGray),
+        Some(Level::Debug) => style.fg(Color::Cyan),
+        Some(Level::Info) => style.fg(Color::Green),
+        Some(Level::Warn) => style.fg(Color::Yellow),
+        Some(Level::Error) => style.fg(Color::Red),
+        Some(Level::Fatal) => style.fg(Color::White).bg(Color::Red).bold(),
+        None => style,
     }
 }
 

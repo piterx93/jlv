@@ -13,7 +13,6 @@ use ratatui::crossterm::event::{self, Event};
 
 use crate::app::{App, action};
 use crate::cli::Args;
-use crate::format::Preset;
 use crate::source::Source;
 use crate::ui::Theme;
 
@@ -80,7 +79,7 @@ where
 /// alternate screen and restores it on return, error or panic.
 ///
 /// It opens at the end of the file, or at the top with `--no-follow`. The file is
-/// read in the preset `--format` names, `Raw` without it. Timestamps without an
+/// read in the preset `--format` names, detected without it. Timestamps without an
 /// offset are local time in the system's time zone, and a time-only log is dated
 /// from the file's modification time. Events are read from the terminal; a wait
 /// with a timeout ends with `None` when nothing came.
@@ -88,12 +87,11 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     let Launch { args, source } = launch;
     // Without an mtime a time-only log is dated from now, the latest its entries can be.
     let mtime = source.modified().unwrap_or_else(Timestamp::now);
-    let preset = args.format.unwrap_or(Preset::Raw);
     let follow = !args.no_follow;
     let mut app = App::new(
         &args.file,
         source,
-        preset,
+        args.format,
         TimeZone::system(),
         mtime,
         follow,

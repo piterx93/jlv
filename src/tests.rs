@@ -668,7 +668,7 @@ mod event_loop {
         assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 2.2 MB ─ Logback basic");
         assert_eq!(
             row(&terminal, 1),
-            "▶12:00:00.001 [main] INFO  com.example.App - step 1"
+            "▶12:00:00.001 INFO  com.example.App          step 1"
         );
     }
 }
