@@ -453,7 +453,7 @@ mod event_loop {
     use crate::event_loop;
     use crate::format::Preset;
     use crate::test_support::{
-        LARGE_INDEX_DEADLINE, app, char_key, numbered_log, row, unindexed_app,
+        LARGE_INDEX_DEADLINE, app, char_key, following_app, numbered_log, row, unindexed_app,
     };
     use crate::ui::Theme;
 
@@ -493,6 +493,22 @@ mod event_loop {
         assert_eq!(
             row(&terminal, 1),
             "▶12:00:00.001 [main] INFO  com.example.App - step 1"
+        );
+    }
+
+    #[test]
+    fn first_screen_of_a_followed_file_shows_its_end() {
+        let mut terminal = terminal();
+        // Several chunks of the index, so it is far from complete at the first screen.
+        let mut app = following_app(Preset::Raw, numbered_log(10_000).as_bytes());
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
+        assert_eq!(
+            row(&terminal, 1),
+            " 12:00:00.9979 [main] INFO  com.example.App - step 9979"
+        );
+        assert_eq!(
+            row(&terminal, 22),
+            "▶12:00:00.10000 [main] INFO  com.example.App - step 10000"
         );
     }
 

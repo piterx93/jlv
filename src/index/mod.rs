@@ -5,7 +5,9 @@
 //! lines that start in one byte range of the file, [`Chunk::join`] puts neighbouring
 //! chunks together, and [`Chunk::finish`] turns the whole file's chunk into records.
 //! Any chunking gives the same records as one chunk over the whole file. [`Indexer`]
-//! runs this on threads and hands the records over as they are found.
+//! runs this on threads and hands the records over as they are found. [`tail`] reads
+//! the last entries from the end of the file, for showing them before the index is
+//! complete.
 
 use std::mem;
 use std::ops::Range;
@@ -22,8 +24,10 @@ use crate::format::{
 use crate::source;
 
 mod indexer;
+mod tail;
 
 pub use indexer::{Indexer, Progress};
+pub use tail::tail;
 
 #[cfg(test)]
 mod tests;

@@ -11,7 +11,7 @@ use jiff::tz::TimeZone;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::format::{Anchor, Preset};
-use crate::index::{Indexer, Progress, Record, Settings};
+use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::source::{self, Source};
 use crate::viewport::Viewport;
 
@@ -62,6 +62,25 @@ pub fn action(key: KeyEvent) -> Option<Action> {
     Some(action)
 }
 
+/// How many bytes [`index::tail`] reads from the end of the file at a time, 64 KiB:
+/// a screen of entries, stack traces included, mostly fits.
+const TAIL_WINDOW: usize = 65_536;
+
+/// How many bytes from the end of the file [`index::tail`] may read, 4 MiB, before
+/// the viewer gives up on the tail and waits for the whole index.
+const TAIL_LIMIT: usize = 4_194_304;
+
+/// Which records the rows are while the viewer opens.
+#[derive(Debug)]
+enum Opening {
+    /// The index, as far as it got.
+    Index,
+    /// The index, until a screen says how many entries to read from the end.
+    AtEnd,
+    /// The file's last entries, until the index is complete.
+    Tail(Vec<Record>),
+}
+
 /// A log file being viewed.
 #[derive(Debug)]
 pub struct App {
@@ -69,6 +88,7 @@ pub struct App {
     source: Arc<Source>,
     indexer: Indexer,
     records: Vec<Record>,
+    opening: Opening,
     progress: Progress,
     settings: Settings,
     viewport: Viewport,
@@ -84,12 +104,21 @@ impl App {
     ///
     /// It has no rows until [`poll_index`](Self::poll_index) takes in the first
     /// entries, and the screen has no lines until the first [`resize`](Self::resize).
+    ///
+    /// With `follow` it opens at the end of the file. As soon as it has a screen, it
+    /// shows the file's last entries, read from the end of the file
+    /// ([`index::tail`](crate::index::tail)), with the last one selected, until the
+    /// index of the whole file is complete and takes over, still with the last entry
+    /// selected. When those entries start too far from the end, it shows no rows
+    /// until then. Without `follow` it opens at the top and shows the first entries
+    /// as soon as the index has them.
     pub fn new(
         path: &Path,
         source: Source,
         preset: Preset,
         zone: TimeZone,
         mtime: Timestamp,
+        follow: bool,
     ) -> Self {
         // A path like `..` has no last component; showing it whole is the next best thing.
         let name = path.file_name().unwrap_or(path.as_os_str());
@@ -109,6 +138,11 @@ impl App {
             indexer: Indexer::spawn(Arc::clone(&source), settings.clone()),
             source,
             records: Vec::new(),
+            opening: if follow {
+                Opening::AtEnd
+            } else {
+                Opening::Index
+            },
             progress,
             settings,
             viewport: Viewport::new(0, 0),
@@ -117,10 +151,16 @@ impl App {
     }
 
     /// Takes in the entries indexed since the last call, one row each. The selection
-    /// stays where it was; with no rows before, the first row is selected.
+    /// stays where it was; with no rows before, the first row is selected. Opened at
+    /// the end, the rows are the last entries until the index is complete, which
+    /// then takes over with its last row selected.
     pub fn poll_index(&mut self) {
         self.progress = self.indexer.poll(&mut self.records);
-        self.viewport.set_total(self.records.len());
+        if self.progress.is_complete() && !matches!(self.opening, Opening::Index) {
+            self.show_last(Opening::Index);
+        } else {
+            self.viewport.set_total(self.rows().len());
+        }
     }
 
     /// How far indexing got as of the last [`poll_index`](Self::poll_index):
@@ -150,7 +190,7 @@ impl App {
     /// Not yet safe to show: it may hold control characters. Panics if `i` is not
     /// below `viewport().total()`.
     pub fn line(&self, i: usize) -> Cow<'_, str> {
-        let bytes = self.records[i].bytes();
+        let bytes = self.rows()[i].bytes();
         // The records index the mapped file, so their offsets fit a `usize`.
         let entry = &self.source.bytes()[bytes.start as usize..bytes.end as usize];
         source::display(source::lines(entry).next().unwrap_or_default())
@@ -164,6 +204,11 @@ impl App {
     /// Sets the number of screen lines the file is shown in.
     pub fn resize(&mut self, height: usize) {
         self.viewport.resize(height);
+        if height > 0 && matches!(self.opening, Opening::AtEnd) {
+            let bytes = self.source.bytes();
+            let tail = index::tail(bytes, height, TAIL_WINDOW, TAIL_LIMIT, &self.settings);
+            self.show_last(Opening::Tail(tail.unwrap_or_default()));
+        }
     }
 
     pub fn apply(&mut self, action: Action) {
@@ -184,5 +229,20 @@ impl App {
     /// Whether [`Action::Quit`] has been applied.
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// Switches to the rows of `opening` with the last one selected.
+    fn show_last(&mut self, opening: Opening) {
+        self.opening = opening;
+        self.viewport.set_total(self.rows().len());
+        self.viewport.go_bottom();
+    }
+
+    /// The records of the rows.
+    fn rows(&self) -> &[Record] {
+        match &self.opening {
+            Opening::Tail(tail) => tail,
+            Opening::Index | Opening::AtEnd => &self.records,
+        }
     }
 }

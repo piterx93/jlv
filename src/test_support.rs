@@ -65,36 +65,55 @@ pub fn mtime() -> Timestamp {
     "2026-10-08T12:00:00Z".parse().unwrap()
 }
 
-/// A viewer over `content` in `Raw`, opened as `/var/log/app.log`, with the whole
-/// file indexed.
+/// A viewer over `content` in `Raw`, opened at the top as `/var/log/app.log`, with
+/// the whole file indexed.
 pub fn app(content: &[u8]) -> App {
     named_app("/var/log/app.log", content)
 }
 
-/// A viewer over `content` in `Raw`, opened as `path`, with the whole file indexed.
+/// A viewer over `content` in `Raw`, opened at the top as `path`, with the whole
+/// file indexed.
 pub fn named_app(path: impl AsRef<Path>, content: &[u8]) -> App {
-    let mut app = App::new(path.as_ref(), source(content), Preset::Raw, zone(), mtime());
+    let mut app = App::new(
+        path.as_ref(),
+        source(content),
+        Preset::Raw,
+        zone(),
+        mtime(),
+        false,
+    );
     wait_for_index(&mut app);
     app
 }
 
-/// A viewer over `content` in `preset`, opened as `/var/log/app.log`, with the whole
-/// file indexed.
+/// A viewer over `content` in `preset`, opened at the top as `/var/log/app.log`,
+/// with the whole file indexed.
 pub fn app_in(preset: Preset, content: &[u8]) -> App {
     let mut app = unindexed_app(preset, content);
     wait_for_index(&mut app);
     app
 }
 
-/// A viewer over `content` in `preset`, opened as `/var/log/app.log`, that hasn't
-/// taken in any entries yet.
+/// A viewer over `content` in `preset`, opened at the top as `/var/log/app.log`,
+/// that hasn't taken in any entries yet.
 pub fn unindexed_app(preset: Preset, content: &[u8]) -> App {
+    opened(preset, content, false)
+}
+
+/// A viewer over `content` in `preset`, opened at the end as `/var/log/app.log` to
+/// follow it, that hasn't taken in any entries yet.
+pub fn following_app(preset: Preset, content: &[u8]) -> App {
+    opened(preset, content, true)
+}
+
+fn opened(preset: Preset, content: &[u8], follow: bool) -> App {
     App::new(
         Path::new("/var/log/app.log"),
         source(content),
         preset,
         zone(),
         mtime(),
+        follow,
     )
 }
 

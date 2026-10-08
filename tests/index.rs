@@ -1,5 +1,6 @@
 //! The entry index against grouping the same lines one by one with `EntryGrouper`,
-//! on the fixture logs and on generated ones, indexed whole and in chunks.
+//! on the fixture logs and on generated ones, indexed whole and in chunks, and the
+//! tail read from the end against the end of the index.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use jlv::format::{Anchor, Entry, EntryGrouper, Level, Preset, resolve_timestamps, strip_ansi};
-use jlv::index::{Chunk, Indexer, Record, Settings};
+use jlv::index::{Chunk, Indexer, Record, Settings, tail};
 use proptest::prelude::*;
 
 mod common;
@@ -375,10 +376,100 @@ proptest! {
     }
 
     #[test]
+    fn tail_is_the_end_of_the_index(
+        bytes in prop_oneof![any_log(), prop::collection::vec(any::<u8>(), 0..300)],
+        count in 0..50usize,
+        window in 1..=256usize,
+        settings in any_settings(),
+    ) {
+        let records = index(&bytes, &settings);
+        let end = &records[records.len().saturating_sub(count)..];
+        prop_assert_eq!(tail(&bytes, count, window, bytes.len(), &settings), Some(end.to_vec()));
+    }
+
+    #[test]
+    fn tail_within_a_limit_is_the_end_of_the_index_or_none(
+        bytes in any_log(),
+        count in 0..50usize,
+        window in 1..=256usize,
+        limit in 0..2000usize,
+        settings in any_settings(),
+    ) {
+        let records = index(&bytes, &settings);
+        let end = &records[records.len().saturating_sub(count)..];
+        match tail(&bytes, count, window, limit, &settings) {
+            Some(tail) => prop_assert_eq!(tail, end),
+            None => prop_assert!(limit < bytes.len(), "None within the whole file"),
+        }
+    }
+
+    #[test]
     fn index_matches_the_lines_grouped_one_by_one(
         bytes in any_log(),
         settings in any_settings(),
     ) {
         prop_assert_eq!(indexed(&index(&bytes, &settings)), line_by_line(&bytes, &settings));
     }
+}
+
+// --- the tail ---
+
+/// An entry whose timestamp can't be read takes the one of the entry before it, even
+/// when that entry lies before the window first read.
+#[test]
+fn tail_reads_back_to_the_timestamp_its_first_entry_takes() {
+    let lines =
+        [(12, 0), (25, 1), (12, 2)].map(|(hour, second)| entry_start(0, hour, 0, second) + "\n");
+    let bytes = lines.concat().into_bytes();
+    let settings = fixture_settings(Preset::Logback);
+    let window = lines[1].len() + lines[2].len();
+    assert_eq!(
+        tail(&bytes, 2, window, bytes.len(), &settings).unwrap(),
+        &index(&bytes, &settings)[1..]
+    );
+}
+
+/// Bytes from the end the tails of large files may read: blank lines this long take
+/// milliseconds to index in a debug build.
+const LIMIT: usize = 64 << 10;
+
+/// 32 MiB of blank lines, which take seconds to index in a debug build.
+fn blank_lines() -> Vec<u8> {
+    vec![b'\n'; 32 << 20]
+}
+
+/// Every entry after 32 MiB of blank lines, under a preset with dates and a time-only
+/// one.
+#[test]
+fn tail_reads_only_the_end_of_the_file() {
+    for (example, preset) in [(0, Preset::Logback), (1, Preset::LogbackBasic)] {
+        let entries: String = (0..3)
+            .map(|second| entry_start(example, 12, 0, second) + "\n")
+            .collect();
+        let len = entries.len() as u64 / 3;
+        let mut bytes = blank_lines();
+        let blank = bytes.len() as u64;
+        bytes.extend_from_slice(entries.as_bytes());
+
+        let started = Instant::now();
+        let records = tail(&bytes, 3, 4096, LIMIT, &fixture_settings(preset)).unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(1), "{preset}: {elapsed:?}");
+        let ranges: Vec<_> = records.iter().map(Record::bytes).collect();
+        let expected: Vec<_> = (0..3)
+            .map(|i| blank + i * len..blank + (i + 1) * len)
+            .collect();
+        assert_eq!(ranges, expected, "{preset}");
+    }
+}
+
+/// The blank lines are one entry without a head, whose start lies far past the limit.
+#[test]
+fn tail_gives_up_at_the_limit() {
+    let bytes = blank_lines();
+    let started = Instant::now();
+    let records = tail(&bytes, 3, 4096, LIMIT, &fixture_settings(Preset::Logback));
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    assert_eq!(records, None);
 }

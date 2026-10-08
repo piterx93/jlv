@@ -79,16 +79,25 @@ where
 /// Shows the file until the user quits. Switches the terminal to raw mode and the
 /// alternate screen and restores it on return, error or panic.
 ///
-/// The file is read in the preset `--format` names, `Raw` without it. Timestamps
-/// without an offset are local time in the system's time zone, and a time-only log
-/// is dated from the file's modification time. Events are read from the terminal;
-/// a wait with a timeout ends with `None` when nothing came.
+/// It opens at the end of the file, or at the top with `--no-follow`. The file is
+/// read in the preset `--format` names, `Raw` without it. Timestamps without an
+/// offset are local time in the system's time zone, and a time-only log is dated
+/// from the file's modification time. Events are read from the terminal; a wait
+/// with a timeout ends with `None` when nothing came.
 pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     let Launch { args, source } = launch;
     // Without an mtime a time-only log is dated from now, the latest its entries can be.
     let mtime = source.modified().unwrap_or_else(Timestamp::now);
     let preset = args.format.unwrap_or(Preset::Raw);
-    let mut app = App::new(&args.file, source, preset, TimeZone::system(), mtime);
+    let follow = !args.no_follow;
+    let mut app = App::new(
+        &args.file,
+        source,
+        preset,
+        TimeZone::system(),
+        mtime,
+        follow,
+    );
     // try_init can fail after raw mode is on; restore ignores what isn't set up.
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     let result = event_loop(&mut terminal, &mut app, theme, |timeout| {

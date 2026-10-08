@@ -10,8 +10,8 @@ use super::*;
 use crate::index::Progress;
 use crate::test_support;
 use crate::test_support::{
-    LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, key, named_app, numbered_log, unindexed_app,
-    wait_for_index, wait_for_index_within,
+    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, following_app, key,
+    named_app, numbered_log, unindexed_app, wait_for_index, wait_for_index_within,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -294,6 +294,7 @@ fn app_indexes_in_the_preset_zone_and_anchor_it_was_given() {
         Preset::WildflyConsole,
         zone.clone(),
         mtime,
+        false,
     );
     let settings = app.settings();
     assert_eq!(settings.preset, Preset::WildflyConsole);
@@ -312,6 +313,7 @@ fn anchor_comes_from_a_date_in_the_file_name() {
         Preset::LogbackBasic,
         test_support::zone(),
         test_support::mtime(),
+        false,
     );
     assert_eq!(
         app.settings().anchor,
@@ -542,4 +544,87 @@ fn page_size_follows_the_new_height() {
     app.resize(20);
     app.apply(Action::PageDown);
     assert_eq!(pos(&app), (20, Some(20)));
+}
+
+// --- following ---
+
+/// The lines of the rows on screen, top to bottom.
+fn screen(app: &App) -> Vec<String> {
+    let viewport = app.viewport();
+    let end = viewport.total().min(viewport.top() + viewport.height());
+    (viewport.top()..end)
+        .map(|i| app.line(i).into_owned())
+        .collect()
+}
+
+#[test]
+fn following_shows_the_last_screen_until_the_whole_index_takes_over() {
+    // Several chunks of the index, so that some come in before it is complete.
+    let log = numbered_log(10_000);
+    let last_screen: Vec<&str> = log.lines().skip(9_990).collect();
+    let mut app = following_app(Preset::Raw, log.as_bytes());
+    app.resize(10);
+    let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        assert_eq!(screen(&app), last_screen, "{:?}", app.progress());
+        assert_eq!(
+            app.viewport().selected(),
+            Some(app.viewport().top() + 9),
+            "{:?}",
+            app.progress()
+        );
+        if app.progress().is_complete() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{:?}", app.progress());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(pos(&app), (9_990, Some(9_999)));
+}
+
+#[test]
+fn following_reads_the_last_entries_once_the_screen_has_lines() {
+    let log = numbered_log(100);
+    let mut app = following_app(Preset::Raw, log.as_bytes());
+    app.resize(0);
+    app.resize(10);
+    assert_eq!(screen(&app), log.lines().skip(90).collect::<Vec<_>>());
+    assert_eq!(app.viewport().selected(), Some(app.viewport().top() + 9));
+}
+
+#[test]
+fn following_a_file_whose_tail_is_too_far_back_waits_for_the_whole_index() {
+    // The last line starts further from the end than the tail may read.
+    let mut log = b"first\nsecond\n".to_vec();
+    log.resize(log.len() + TAIL_LIMIT + 1, b'x');
+    let mut app = following_app(Preset::Raw, &log);
+    app.resize(10);
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        if app.progress().is_complete() {
+            break;
+        }
+        assert_eq!(app.viewport().total(), 0, "{:?}", app.progress());
+        assert!(Instant::now() < deadline, "{:?}", app.progress());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(pos(&app), (0, Some(2)));
+}
+
+#[test]
+fn following_a_file_shorter_than_the_screen_selects_its_last_entry() {
+    let mut app = following_app(
+        Preset::Logback,
+        [STARTED, FAILED, EXCEPTION, FRAME, DONE]
+            .concat()
+            .as_bytes(),
+    );
+    app.resize(10);
+    app.poll_index();
+    assert_eq!(pos(&app), (0, Some(2)));
+    assert_eq!(app.line(2), DONE.trim_end());
+    wait_for_index(&mut app);
+    assert_eq!(pos(&app), (0, Some(2)));
 }
