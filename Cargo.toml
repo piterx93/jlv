@@ -1,0 +1,24 @@
+[package]
+name = "jlv"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Terminal log viewer for Java application logs"
+authors = ["Piotr Owczarek <piter19993@gmail.com>"]
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[package.metadata.deb]
+section = "utils"
+
+[package.metadata.generate-rpm]
+auto-req = "no"
+assets = [
+    { source = "target/release/jlv", dest = "/usr/bin/jlv", mode = "755" },
+]
