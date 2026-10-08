@@ -114,7 +114,12 @@ jobs:
         with:
           name: packages
           path: dist
-      - run: cd dist && sha256sum -- * > SHA256SUMS
+      # GitHub turns "~" in asset names into ".", rename up front so SHA256SUMS matches
+      - run: |
+          cd dist
+          shopt -s nullglob
+          for f in *~*; do mv -- "$f" "${f//\~/.}"; done
+          sha256sum -- * > SHA256SUMS
 
       - name: Publish dev build
         if: github.ref == 'refs/heads/develop'
