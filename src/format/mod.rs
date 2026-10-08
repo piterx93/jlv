@@ -1,9 +1,13 @@
-//! Understanding log lines: severity levels and removing terminal escape codes before
-//! a line is parsed.
+//! Understanding log lines: the format presets, severity levels and removing terminal
+//! escape codes before a line is parsed.
 
 use std::borrow::Cow;
 
 use memchr::{memchr, memchr2};
+
+mod preset;
+
+pub use preset::{EntryHead, EntryParser, Preset};
 
 #[cfg(test)]
 mod tests;

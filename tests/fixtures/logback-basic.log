@@ -1,0 +1,39 @@
+23:58:41.007 [main] INFO  com.example.batch.BatchApp -- Starting nightly import
+23:58:41.093 [main] DEBUG c.e.batch.config.ImportConfig -- Source directory: /data/inbox
+23:58:41.102 [main] DEBUG c.e.batch.config.ImportConfig -- Batch size: 500
+23:58:42.330 [main] INFO  com.example.batch.ImportJob -- Found 3 files to import
+23:58:42.331 [import-1] INFO  com.example.batch.ImportJob -- Importing customers-2026-10-07.csv (14 MB)
+23:59:10.874 [import-1] WARN  c.e.batch.parse.CsvRecordParser -- Line 1207: unknown country code "XX" - using default
+23:59:31.502 [import-1] INFO  com.example.batch.ImportJob -- customers-2026-10-07.csv done: 48211 rows
+23:59:31.510 [import-2] INFO  com.example.batch.ImportJob -- Importing orders-2026-10-07.csv (88 MB)
+23:59:58.996 [import-2] DEBUG c.e.b.parse.CsvRecordParser$Row -- Flushed 500 rows [offset=120000]
+00:00:00.004 [import-2] DEBUG c.e.b.parse.CsvRecordParser$Row -- Flushed 500 rows [offset=120500]
+00:00:02.417 [import-2] ERROR com.example.batch.ImportJob -- orders-2026-10-07.csv failed at line 120731
+java.io.UncheckedIOException: java.nio.charset.MalformedInputException: Input length = 1
+	at java.base/java.io.BufferedReader$1.hasNext(BufferedReader.java:584)
+	at c.e.batch.parse.CsvRecordParser.records(CsvRecordParser.java:47)
+	at com.example.batch.ImportJob.importFile(ImportJob.java:102)
+	at com.example.batch.ImportJob.lambda$run$0(ImportJob.java:66)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.nio.charset.MalformedInputException: Input length = 1
+	at java.base/java.nio.charset.CoderResult.throwException(CoderResult.java:274)
+	at java.base/sun.nio.cs.StreamDecoder.implRead(StreamDecoder.java:405)
+	... 5 more
+00:00:02.420 [import-2] INFO  com.example.batch.ImportJob -- Moved orders-2026-10-07.csv to /data/failed
+00:00:02.421 [import-3] INFO  com.example.batch.ImportJob -- Importing returns-2026-10-07.csv (1 MB)
+00:00:03.008 [import-3] INFO  com.example.batch.ImportJob -- returns-2026-10-07.csv done: 311 rows
+00:00:03.010 [main] INFO  com.example.batch.BatchApp -- Import finished: 2 of 3 files (1 failed)
+00:00:03.011 [main] WARN  com.example.batch.BatchApp -- Summary -- ok: 2, failed: 1 -- see /data/failed
+00:00:03.009 [import-3] DEBUG com.example.batch.ImportJob -- Released worker import-3
+00:00:03.150 [Thread-0] INFO  c.example.batch.mail.Notifier -- Sending report to ops@example.com
+00:00:04.902 [Thread-0] ERROR c.example.batch.mail.Notifier -- Could not send report
+jakarta.mail.MessagingException: Could not connect to SMTP host: mail.example.com, port: 25
+	at org.eclipse.angus.mail.smtp.SMTPTransport.openServer(SMTPTransport.java:2259)
+	at com.example.batch.mail.Notifier.send(Notifier.java:38)
+Caused by: java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.connect0(Native Method)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	... 2 more
+00:00:04.903 [Thread-0] TRACE c.example.batch.mail.Notifier -- 
+00:00:05.000 [main] INFO  com.example.batch.BatchApp -- Exit code 1
+00:00:05.001 [Shutdown hook] DEBUG com.example.batch.BatchApp -- Releasing lock /var/run/batch.lock

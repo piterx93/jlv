@@ -10,7 +10,8 @@ use proptest::prelude::*;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cli::{Args, Format};
+use crate::cli::Args;
+use crate::format::Preset;
 
 #[test]
 fn version_without_commit_is_printed_as_is() {
@@ -236,7 +237,7 @@ fn every_option_is_handed_over() {
         launch.args,
         Args {
             file,
-            format: Some(Format::LogbackBasic),
+            format: Some(Preset::LogbackBasic),
             no_follow: true,
             no_mouse: true,
             config: Some(PathBuf::from("/nonexistent/config.toml")),

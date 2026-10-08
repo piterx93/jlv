@@ -1,0 +1,61 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v3.3.4)
+
+2026-10-07T09:14:02.118+02:00  INFO 48213 --- [shop] [           main] com.example.shop.ShopApplication         : Starting ShopApplication v1.4.2 using Java 21.0.4 with PID 48213 (/opt/shop/shop.jar started by shop in /opt/shop)
+2026-10-07T09:14:02.121+02:00 DEBUG 48213 --- [shop] [           main] com.example.shop.ShopApplication         : Running with Spring Boot v3.3.4, Spring v6.1.13
+2026-10-07T09:14:02.122+02:00  INFO 48213 --- [shop] [           main] com.example.shop.ShopApplication         : The following 1 profile is active: "prod"
+2026-10-07T09:14:03.502+02:00  INFO 48213 --- [shop] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 8080 (http)
+2026-10-07T09:14:03.517+02:00  INFO 48213 --- [shop] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-10-07T09:14:03.518+02:00  INFO 48213 --- [shop] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.30]
+2026-10-07T09:14:03.581+02:00  INFO 48213 --- [shop] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-10-07T09:14:04.877+02:00  INFO 48213 --- [shop] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-10-07T09:14:05.920+02:00  WARN 48213 --- [shop] [           main] JpaBaseConfiguration$JpaWebConfiguration : spring.jpa.open-in-view is enabled by default. Therefore, database queries may be performed during view rendering. Explicitly configure spring.jpa.open-in-view to disable this warning
+2026-10-07T09:14:06.010+02:00  INFO 48213 --- [shop] [           main] com.example.shop.ShopApplication         : Started ShopApplication in 4.213 seconds (process running for 4.9)
+2026-10-07T09:15:11.330+02:00  INFO 48213 --- [shop] [nio-8080-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-07T09:15:11.342+02:00  INFO 48213 --- [shop] [nio-8080-exec-3] com.example.order.OrderService           : Order 42 created : 3 lines
+2026-10-07T09:15:12.004+02:00  WARN 48213 --- [shop] [pool-1-thread-2] com.example.payment.PaymentClient        : Retry 1/3 - gateway answered 503
+2026-10-07T09:15:18.011+02:00 ERROR 48213 --- [shop] [pool-1-thread-2] com.example.payment.PaymentClient        : Payment for order 42 failed
+
+com.example.payment.PaymentException: gateway unavailable after 3 attempts
+	at com.example.payment.PaymentClient.charge(PaymentClient.java:88)
+	at com.example.order.OrderService.lambda$pay$2(OrderService.java:131)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1768)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.SocketTimeoutException: Read timed out
+	at java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)
+	at com.example.payment.PaymentClient.charge(PaymentClient.java:81)
+	... 3 common frames omitted
+
+2026-10-07T09:16:00.000+02:00 TRACE 48213 --- [shop] [   scheduling-1] derCleanupJob$$Lambda/0x000071c4e44c8a40 : Tick
+2026-10-07T09:16:30.517+02:00  INFO 48213 --- [shop] [on(2)-127.0.0.1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 2 ms
+2026-10-07T09:17:45.250+02:00 ERROR 48213 --- [shop] [nio-8080-exec-7] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] in context with path [] threw exception [Request processing failed: java.lang.IllegalStateException: Order 43 is already closed] with root cause
+
+java.lang.IllegalStateException: Order 43 is already closed
+	at com.example.order.Order.close(Order.java:57)
+	at com.example.order.OrderController.close(OrderController.java:64)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+
+2026-10-07T09:18:02.771+02:00  INFO 48213 --- [shop] [onPool-worker-1] c.example.report.ReportService$Exporter  : Report 2026-10 queued [1284 rows]
+2026-10-07T09:20:00.000+02:00  INFO 48213 --- [shop] [           main] com.example.shop.ShopApplication         : 
+2026-10-07T09:21:13.640+02:00  WARN 48213 --- [shop] [l-1 housekeeper] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Thread starvation or clock leap detected (housekeeper delta=1m2s).
+2026-10-07T09:23:59.990+02:00  INFO 48213 --- [shop] [ionShutdownHook] o.s.b.w.e.tomcat.GracefulShutdown        : Commencing graceful shutdown. Waiting for active requests to complete
+2026-10-07T09:23:59.999+02:00  INFO 48213 --- [shop] [ionShutdownHook] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Shutdown completed.
+2026-10-07T09:30:12.004+02:00  INFO 51877 --- [shop] [           main] [                                                 ] com.example.shop.ShopApplication         : Starting ShopApplication v1.4.3 using Java 21.0.4 with PID 51877 (/opt/shop/shop.jar started by shop in /opt/shop)
+2026-10-07T09:30:16.220+02:00  INFO 51877 --- [shop] [           main] [                                                 ] com.example.shop.ShopApplication         : Started ShopApplication in 4.402 seconds (process running for 5.1)
+2026-10-07T09:31:02.401+02:00  INFO 51877 --- [shop] [nio-8080-exec-2] [6bfb3c0e8f1d4a2b9c7e5d3f1a2b4c6d-1a2b4c6d8e0f2a4b] o.s.web.servlet.DispatcherServlet        : Completed initialization in 2 ms
+2026-10-07T09:31:02.415+02:00  INFO 51877 --- [shop] [nio-8080-exec-2] [6bfb3c0e8f1d4a2b9c7e5d3f1a2b4c6d-1a2b4c6d8e0f2a4b] com.example.order.OrderService           : Order 44 created
+2026-10-07T09:31:02.590+02:00 ERROR 51877 --- [shop] [nio-8080-exec-2] [6bfb3c0e8f1d4a2b9c7e5d3f1a2b4c6d-3e5f7a9b1c3d5e7f] com.example.payment.PaymentClient        : Payment for order 44 failed
+
+com.example.payment.PaymentException: card declined
+	at com.example.payment.PaymentClient.charge(PaymentClient.java:92)
+	at com.example.order.OrderService.pay(OrderService.java:140)
+
+2026-10-07T09:32:00.000+02:00 TRACE 51877 --- [shop] [   scheduling-1] [                                                 ] com.example.order.OrderCleanupJob        : Tick
