@@ -1,5 +1,4 @@
 use std::ffi::OsString;
-use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
@@ -7,9 +6,10 @@ use clap::Parser;
 use clap::error::ErrorKind;
 
 use crate::cli::Args;
+use crate::source::Source;
 
 pub mod cli;
-mod source;
+pub mod source;
 
 #[cfg(test)]
 mod tests;
@@ -26,7 +26,7 @@ pub fn version_string(version: &str, commit: Option<&str>) -> String {
 #[derive(Debug)]
 pub struct Launch {
     pub args: Args,
-    pub file: File,
+    pub source: Source,
 }
 
 /// Parses the command line (program name first) and opens the log file. Whatever ends
@@ -52,7 +52,7 @@ where
         return Err(USAGE);
     }
     match source::open(&args.file) {
-        Ok(file) => Ok(Launch { args, file }),
+        Ok(source) => Ok(Launch { args, source }),
         Err(err) => {
             let _ = writeln!(stderr, "jlv: {}: {err}", args.file.display());
             Err(FAILURE)

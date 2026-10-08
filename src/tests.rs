@@ -1,6 +1,5 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
@@ -206,7 +205,7 @@ fn regular_file_is_handed_over_silently() {
     assert_eq!(out.stderr, "");
     let launch = out.launch();
     assert_eq!(launch.args, defaults(&file));
-    assert_eq!(io::read_to_string(launch.file).unwrap(), LOG_LINE);
+    assert_eq!(launch.source.bytes(), LOG_LINE.as_bytes());
 }
 
 #[test]
@@ -216,7 +215,7 @@ fn empty_regular_file_is_handed_over() {
     fs::write(&file, "").unwrap();
     let launch = jlv(&[&file]).launch();
     assert_eq!(launch.args, defaults(&file));
-    assert_eq!(io::read_to_string(launch.file).unwrap(), "");
+    assert_eq!(launch.source.bytes(), b"");
 }
 
 #[test]
@@ -253,7 +252,7 @@ fn symlink_to_a_regular_file_opens_the_target() {
     symlink(&file, &link).unwrap();
     let launch = jlv(&[&link]).launch();
     assert_eq!(launch.args, defaults(&link));
-    assert_eq!(io::read_to_string(launch.file).unwrap(), LOG_LINE);
+    assert_eq!(launch.source.bytes(), LOG_LINE.as_bytes());
 }
 
 #[test]
@@ -263,7 +262,7 @@ fn path_with_spaces_is_handed_over() {
     let file = log_file(&dir, "my app/server log.txt");
     let launch = jlv(&[&file]).launch();
     assert_eq!(launch.args, defaults(&file));
-    assert_eq!(io::read_to_string(launch.file).unwrap(), LOG_LINE);
+    assert_eq!(launch.source.bytes(), LOG_LINE.as_bytes());
 }
 
 #[test]
@@ -272,7 +271,7 @@ fn non_utf8_path_is_handed_over() {
     let file = log_file(&dir, OsString::from_vec(b"caf\xe9.log".to_vec()));
     let launch = jlv(&[&file]).launch();
     assert_eq!(launch.args, defaults(&file));
-    assert_eq!(io::read_to_string(launch.file).unwrap(), LOG_LINE);
+    assert_eq!(launch.source.bytes(), LOG_LINE.as_bytes());
 }
 
 // --- runtime errors: exit 1, `jlv: <path>: <reason>` ---
