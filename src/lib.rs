@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use ratatui::crossterm::event::{self, Event};
 
 use crate::app::{App, action};
 use crate::cli::Args;
+use crate::follow::Options;
 use crate::source::Source;
 use crate::ui::Theme;
 
@@ -80,7 +82,8 @@ where
 /// Shows the file until the user quits. Switches the terminal to raw mode and the
 /// alternate screen and restores it on return, error or panic.
 ///
-/// It opens at the end of the file, or at the top with `--no-follow`. The file is
+/// It opens at the end of the file, or at the top with `--no-follow`, and watches the
+/// file either way, so that `F` can follow it ([`App::watch`]). The file is
 /// read in the preset `--format` names, detected without it. Timestamps without an
 /// offset are local time in the system's time zone, and a time-only log is dated
 /// from the file's modification time. Events are read from the terminal; a wait
@@ -90,6 +93,8 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     // Without an mtime a time-only log is dated from now, the latest its entries can be.
     let mtime = source.modified().unwrap_or_else(Timestamp::now);
     let follow = !args.no_follow;
+    // Opened again for the watcher, as the source doesn't keep its file.
+    let file = File::open(&args.file).map_err(|err| in_file(&args.file, err))?;
     let mut app = App::new(
         &args.file,
         source,
@@ -98,6 +103,8 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         mtime,
         follow,
     );
+    app.watch(&args.file, file, Options::default())
+        .map_err(|err| in_file(&args.file, err))?;
     // try_init can fail after raw mode is on; restore ignores what isn't set up.
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     let result = event_loop(&mut terminal, &mut app, theme, |timeout| {
@@ -113,10 +120,11 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
 /// out, only redraw. Errors from drawing or reading events end the loop.
 ///
 /// Before every drawing the app takes in what its index found since the last one
-/// ([`App::poll_index`]). While indexing goes on, `next_event` is asked to wait at
-/// most 100 ms, so that the screen keeps up with it; `next_event(Some(timeout))`
-/// returns `Ok(None)` when nothing came in time. Once the index is complete it is
-/// asked to wait for as long as it takes (`None`).
+/// ([`App::poll_index`]), and what happened to the file if it watches one. While
+/// indexing goes on, and while the app [watches](App::watch) the file, `next_event`
+/// is asked to wait at most 100 ms, so that the screen keeps up with them;
+/// `next_event(Some(timeout))` returns `Ok(None)` when nothing came in time.
+/// Otherwise it is asked to wait for as long as it takes (`None`).
 pub fn event_loop<B>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -132,7 +140,7 @@ where
         terminal
             .draw(|frame| ui::render(frame, app, theme))
             .map_err(io::Error::other)?;
-        let timeout = (!app.progress().is_complete()).then_some(INDEXING_REDRAW);
+        let timeout = app.expects_updates().then_some(REDRAW);
         if let Some(Event::Key(key)) = next_event(timeout)?
             && let Some(action) = action(key)
         {
@@ -142,9 +150,14 @@ where
     Ok(())
 }
 
-/// How long the event loop waits for an event while indexing goes on, before it
-/// takes in what the index found and redraws.
-const INDEXING_REDRAW: Duration = Duration::from_millis(100);
+/// How long the event loop waits for an event while indexing goes on or the file is
+/// watched, before it takes in what changed and redraws.
+const REDRAW: Duration = Duration::from_millis(100);
+
+/// `err` saying which file it is about, for the one line jlv prints.
+fn in_file(path: &Path, err: io::Error) -> io::Error {
+    io::Error::new(err.kind(), format!("{}: {err}", path.display()))
+}
 
 const SUCCESS: u8 = 0;
 const FAILURE: u8 = 1;

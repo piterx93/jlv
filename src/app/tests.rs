@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use proptest::collection::vec;
+use proptest::prelude::*;
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
@@ -111,6 +113,11 @@ fn left_arrow_scrolls_left() {
 #[test]
 fn right_arrow_scrolls_right() {
     assert_eq!(action(key(KeyCode::Right)), Some(Action::ScrollRight));
+}
+
+#[test]
+fn capital_f_toggles_follow() {
+    assert_eq!(action(char_key('F')), Some(Action::ToggleFollow));
 }
 
 #[test]
@@ -733,4 +740,368 @@ fn cycling_a_followed_file_shows_its_last_entries_in_the_new_preset_at_once() {
     assert_eq!(app.line(2), DONE.trim_end());
     wait_for_index(&mut app);
     assert_eq!(pos(&app), (0, Some(2)));
+}
+
+// --- follow mode ---
+
+/// A viewer over `content` in `preset` on a 10-line screen, opened at the end to
+/// follow it, with the whole file indexed.
+fn followed(preset: Preset, content: &str) -> App {
+    let mut app = following_app(preset, content.as_bytes());
+    app.resize(10);
+    wait_for_index(&mut app);
+    app
+}
+
+/// `app` after the file changed as `change` says, with what changed indexed.
+fn changed(mut app: App, change: FileChange) -> App {
+    app.file_changed(change);
+    wait_for_index(&mut app);
+    app
+}
+
+/// `app` after its file grew to `content`.
+fn grown(app: App, content: &str) -> App {
+    changed(
+        app,
+        FileChange::Grew(test_support::source(content.as_bytes())),
+    )
+}
+
+/// `app` after its file was cut short and holds `content` now.
+fn truncated(app: App, content: &str) -> App {
+    changed(
+        app,
+        FileChange::Truncated(test_support::source(content.as_bytes())),
+    )
+}
+
+/// 20 numbered lines, followed.
+fn twenty_lines_followed() -> App {
+    followed(Preset::Raw, &numbered_log(20))
+}
+
+#[test]
+fn opening_at_the_end_follows_the_file() {
+    assert!(twenty_lines_followed().following());
+}
+
+#[test]
+fn opening_at_the_top_does_not_follow_the_file() {
+    assert!(!hundred_lines().following());
+}
+
+#[test]
+fn appended_entries_are_shown_with_the_last_one_selected_while_following() {
+    let app = grown(twenty_lines_followed(), &numbered_log(25));
+    assert_eq!(pos(&app), (15, Some(24)));
+    assert_eq!(app.line(24), numbered_log(25).lines().last().unwrap());
+    assert!(app.following());
+    assert_eq!(app.new_entries(), 0);
+}
+
+#[test]
+fn every_move_away_from_the_bottom_stops_following() {
+    for action in [Action::Up, Action::PageUp, Action::HalfPageUp, Action::Top] {
+        let app = applied(twenty_lines_followed(), &[action]);
+        assert!(!app.following(), "{action:?}");
+    }
+}
+
+#[test]
+fn actions_that_stay_at_the_bottom_keep_following() {
+    let app = applied(
+        twenty_lines_followed(),
+        &[
+            Action::Down,
+            Action::PageDown,
+            Action::HalfPageDown,
+            Action::Bottom,
+            Action::ScrollRight,
+            Action::ToggleThread,
+        ],
+    );
+    assert!(app.following());
+}
+
+#[test]
+fn appends_while_paused_do_not_move_the_view() {
+    let app = applied(twenty_lines_followed(), &[Action::PageUp]);
+    let before = pos(&app);
+    let app = grown(app, &numbered_log(25));
+    assert_eq!(pos(&app), before);
+    assert_eq!(app.viewport().total(), 25);
+}
+
+#[test]
+fn appends_while_paused_count_as_new_entries() {
+    let app = applied(twenty_lines_followed(), &[Action::Up]);
+    let app = grown(app, &numbered_log(23));
+    assert_eq!(app.new_entries(), 3);
+    let app = grown(app, &numbered_log(25));
+    assert_eq!(app.new_entries(), 5);
+}
+
+#[test]
+fn lines_added_to_the_last_entry_are_not_new_entries() {
+    let app = followed(Preset::Logback, &[STARTED, FAILED].concat());
+    let app = applied(app, &[Action::Up]);
+    let app = grown(app, &[STARTED, FAILED, EXCEPTION, FRAME, DONE].concat());
+    assert_eq!(app.new_entries(), 1);
+}
+
+#[test]
+fn toggling_follow_while_following_stops_following_in_place() {
+    let app = applied(twenty_lines_followed(), &[Action::ToggleFollow]);
+    assert!(!app.following());
+    assert_eq!(pos(&app), (10, Some(19)));
+}
+
+#[test]
+fn toggling_follow_while_paused_follows_again_from_the_bottom() {
+    let app = applied(twenty_lines_followed(), &[Action::PageUp]);
+    let app = applied(grown(app, &numbered_log(25)), &[Action::ToggleFollow]);
+    assert!(app.following());
+    assert_eq!(pos(&app), (15, Some(24)));
+    assert_eq!(app.new_entries(), 0);
+}
+
+#[test]
+fn going_to_the_bottom_follows_again() {
+    let app = applied(twenty_lines_followed(), &[Action::Top]);
+    let app = applied(grown(app, &numbered_log(25)), &[Action::Bottom]);
+    assert!(app.following());
+    assert_eq!(app.new_entries(), 0);
+}
+
+#[test]
+fn moving_down_onto_the_last_row_does_not_follow_again() {
+    let app = applied(twenty_lines_followed(), &[Action::Up, Action::Down]);
+    assert_eq!(pos(&app), (10, Some(19)));
+    assert!(!app.following());
+}
+
+#[test]
+fn growth_with_the_index_complete_is_shown_at_once() {
+    let mut app = twenty_lines_followed();
+    app.file_changed(FileChange::Grew(test_support::source(
+        numbered_log(21).as_bytes(),
+    )));
+    assert_eq!(app.viewport().total(), 21);
+}
+
+#[test]
+fn growth_during_indexing_is_appended_to_the_complete_index() {
+    // Appended entries are dated forward from the file as it was, which is dated back
+    // from its modification time at noon: 11:00 stays on its day and 15:00 follows
+    // it. Indexed at once, 15:00 would be too far past noon for that day.
+    let before = "11:00:00.000 [main] INFO  com.example.App - before\n";
+    let after = "15:00:00.000 [main] INFO  com.example.App - after\n";
+    let mut app = unindexed_app(Preset::LogbackBasic, before.as_bytes());
+    let grown = test_support::source([before, after].concat().as_bytes());
+    app.file_changed(FileChange::Grew(grown));
+    wait_for_index(&mut app);
+    let timestamp = |i| app.row(i).unwrap().record.timestamp().unwrap().to_string();
+    assert_eq!(app.viewport().total(), 2);
+    assert_eq!(timestamp(0), "2026-10-08T11:00:00Z");
+    assert_eq!(timestamp(1), "2026-10-08T15:00:00Z");
+}
+
+#[test]
+fn growth_shorter_than_the_index_changes_nothing() {
+    // The file was cut short between the watcher's look and the mapping.
+    let app = grown(twenty_lines_followed(), &numbered_log(5));
+    assert_eq!(app.viewport().total(), 20);
+    assert_eq!(pos(&app), (10, Some(19)));
+}
+
+#[test]
+fn truncation_while_paused_selects_the_truncation_row() {
+    let app = applied(twenty_lines_followed(), &[Action::Up]);
+    let app = truncated(app, "after 1\nafter 2\n");
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert!(!app.following());
+}
+
+#[test]
+fn truncation_while_paused_counts_the_new_content_as_new_entries() {
+    let app = applied(twenty_lines_followed(), &[Action::Up]);
+    let app = grown(app, &numbered_log(22));
+    let app = truncated(app, "after 1\nafter 2\nafter 3\n");
+    assert_eq!(app.new_entries(), 3);
+}
+
+#[test]
+fn toggling_the_fold_on_the_truncation_row_does_nothing() {
+    let log = [FAILED, EXCEPTION].concat();
+    let app = truncated(followed(Preset::Logback, &log), &log);
+    let app = applied(app, &[Action::Top, Action::ToggleFold]);
+    assert_eq!(app.viewport().total(), 2);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn lines_are_read_from_the_new_content_after_truncation() {
+    let app = applied(logback(&[FAILED, EXCEPTION, FRAME]), &[Action::UnfoldAll]);
+    assert_eq!(app.line(2), FRAME.trim_end());
+    let caused = "Caused by: java.io.IOException: x\n";
+    let app = truncated(app, &[FAILED, caused, FRAME].concat());
+    let app = applied(app, &[Action::UnfoldAll]);
+    assert_eq!(app.line(2), caused.trim_end());
+}
+
+#[test]
+fn folded_entries_stay_folded_as_the_file_grows() {
+    let app = followed(Preset::Logback, &[STARTED, FAILED, EXCEPTION].concat());
+    let app = grown(app, &[STARTED, FAILED, EXCEPTION, DONE].concat());
+    assert_eq!(app.viewport().total(), 3);
+}
+
+#[test]
+fn entry_gaining_lines_after_unfold_all_is_unfolded() {
+    let app = applied(
+        followed(Preset::Logback, &[STARTED, FAILED].concat()),
+        &[Action::UnfoldAll],
+    );
+    let app = grown(app, &[STARTED, FAILED, EXCEPTION, FRAME].concat());
+    assert_eq!(app.viewport().total(), 4);
+}
+
+#[test]
+fn unfolded_last_entry_shows_the_lines_appended_to_it() {
+    let app = followed(Preset::Logback, &[STARTED, FAILED, EXCEPTION].concat());
+    let app = applied(app, &[Action::ToggleFold]);
+    assert_eq!(app.viewport().total(), 3);
+    let app = grown(app, &[STARTED, FAILED, EXCEPTION, FRAME].concat());
+    assert_eq!(app.viewport().total(), 4);
+    assert_eq!(app.line(3), FRAME.trim_end());
+}
+
+#[test]
+fn deleted_file_is_waited_for_with_its_rows_kept() {
+    let app = changed(twenty_lines_followed(), FileChange::Gone);
+    assert!(app.waiting_for_file());
+    assert_eq!(app.viewport().total(), 20);
+    assert_eq!(pos(&app), (10, Some(19)));
+}
+
+#[test]
+fn growth_of_the_deleted_file_keeps_waiting() {
+    // The watcher reads the old file's last bytes after it reported it gone.
+    let app = changed(twenty_lines_followed(), FileChange::Gone);
+    let app = grown(app, &numbered_log(21));
+    assert!(app.waiting_for_file());
+    assert_eq!(app.viewport().total(), 21);
+}
+
+#[test]
+fn file_back_at_the_path_is_shown_from_its_start() {
+    let app = changed(twenty_lines_followed(), FileChange::Gone);
+    let app = changed(
+        app,
+        FileChange::Replaced(test_support::source(b"new 1\nnew 2\n")),
+    );
+    assert!(!app.waiting_for_file());
+    assert_eq!(screen(&app), ["new 1", "new 2"]);
+    assert_eq!(app.viewport().selected(), Some(1));
+    assert!(app.following());
+}
+
+/// Something that happens to a followed Logback file or its viewer.
+#[derive(Debug, Clone)]
+enum Step {
+    Apply(Action),
+    /// The file gets these bytes appended.
+    Append(Vec<u8>),
+    /// The file is cut short and then holds these bytes.
+    Truncate(Vec<u8>),
+    /// Another file holding these bytes takes the file's place.
+    Replace(Vec<u8>),
+    Gone,
+}
+
+/// Logback headers and continuation lines mixed with arbitrary bytes, not always
+/// ending a line. The bytes leave out 0x1f, so that no file starts like a gzip file,
+/// which is opened differently.
+fn some_log() -> impl Strategy<Value = Vec<u8>> {
+    let byte = any::<u8>().prop_map(|b| if b == 0x1f { b'?' } else { b });
+    let part = prop_oneof![
+        prop::sample::select(vec![STARTED, FAILED, EXCEPTION, FRAME, DONE])
+            .prop_map(|line| line.as_bytes().to_vec()),
+        vec(byte, 0..20),
+    ];
+    vec(part, 0..4).prop_map(|parts| parts.concat())
+}
+
+fn step() -> impl Strategy<Value = Step> {
+    let action = prop::sample::select(vec![
+        Action::Up,
+        Action::Down,
+        Action::PageUp,
+        Action::Top,
+        Action::Bottom,
+        Action::ToggleFollow,
+        Action::ToggleFold,
+        Action::FoldAll,
+        Action::UnfoldAll,
+    ]);
+    prop_oneof![
+        4 => action.prop_map(Step::Apply),
+        4 => some_log().prop_map(Step::Append),
+        1 => some_log().prop_map(Step::Truncate),
+        1 => some_log().prop_map(Step::Replace),
+        1 => Just(Step::Gone),
+    ]
+}
+
+/// Every row's line, top to bottom.
+fn all_lines(app: &App) -> Vec<String> {
+    (0..app.viewport().total())
+        .map(|i| app.line(i).into_owned())
+        .collect()
+}
+
+proptest! {
+    #[test]
+    fn followed_file_shows_the_rows_of_its_content_indexed_at_once(
+        start in some_log(),
+        steps in vec(step(), 0..8),
+    ) {
+        let mut app = following_app(Preset::Logback, &start);
+        app.resize(5);
+        wait_for_index(&mut app);
+        let mut content = start;
+        let mut truncation_row = false;
+        for step in steps {
+            match step {
+                Step::Apply(action) => app.apply(action),
+                Step::Append(bytes) => {
+                    content.extend(bytes);
+                    app.file_changed(FileChange::Grew(test_support::source(&content)));
+                }
+                Step::Truncate(bytes) => {
+                    content = bytes;
+                    truncation_row = true;
+                    app.file_changed(FileChange::Truncated(test_support::source(&content)));
+                }
+                Step::Replace(bytes) => {
+                    content = bytes;
+                    truncation_row = false;
+                    app.file_changed(FileChange::Replaced(test_support::source(&content)));
+                }
+                Step::Gone => app.file_changed(FileChange::Gone),
+            }
+            wait_for_index(&mut app);
+            let total = app.viewport().total();
+            prop_assert!(app.viewport().selected().is_none_or(|row| row < total));
+        }
+        app.apply(Action::UnfoldAll);
+        let mut fresh = app_in(Preset::Logback, &content);
+        fresh.apply(Action::UnfoldAll);
+        let mut expected = all_lines(&fresh);
+        if truncation_row {
+            expected.insert(0, "── file truncated ──".to_string());
+        }
+        prop_assert_eq!(all_lines(&app), expected);
+    }
 }

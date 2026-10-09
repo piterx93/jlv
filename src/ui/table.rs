@@ -150,7 +150,9 @@ impl Columns {
 
     /// Row `i` of `app`, its text made safe to show.
     fn row(&self, app: &App, i: usize, theme: Theme) -> Row {
-        let shown = app.row(i);
+        let Some(shown) = app.row(i) else {
+            return Row::new(Vec::new(), app.line(i).into_owned(), 0);
+        };
         // `Raw` doesn't look into lines, so escape codes are shown, made harmless.
         let Some(table) = &self.table else {
             return Row::new(Vec::new(), text(shown.line), shown.hidden);

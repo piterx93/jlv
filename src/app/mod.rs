@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::fs::File;
+use std::io;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use memchr::{memchr, memchr_iter, memrchr};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::fold::Folds;
+use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Preset, detect};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::source::{self, Source};
@@ -32,7 +35,11 @@ pub enum Action {
     HalfPageUp,
     HalfPageDown,
     Top,
+    /// Selects the last row and follows the file.
     Bottom,
+    /// Follows the file from its last row if the viewer doesn't, stops following if
+    /// it does.
+    ToggleFollow,
     /// Shows the message column 8 columns further left.
     ScrollLeft,
     /// Shows the message column 8 columns further right.
@@ -52,9 +59,9 @@ pub enum Action {
 ///
 /// `j k ↑ ↓` move by a line, `PgUp PgDn` by a page, `Ctrl-u Ctrl-d` by half a page,
 /// `g Home` go to the top, `G End` to the bottom, `← →` scroll the message column,
-/// `T` toggles the thread column, `w` wrapping, `P` cycles the preset, `Space` folds
-/// or unfolds the selected entry, `z` folds every entry, `Z` unfolds every entry and
-/// `q F10 Ctrl-c` quit. Characters
+/// `F` toggles follow, `T` toggles the thread column, `w` wrapping, `P` cycles the
+/// preset, `Space` folds or unfolds the selected entry, `z` folds every entry, `Z`
+/// unfolds every entry and `q F10 Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
@@ -76,6 +83,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('G') | KeyCode::End, KeyModifiers::NONE) => Action::Bottom,
         (KeyCode::Left, KeyModifiers::NONE) => Action::ScrollLeft,
         (KeyCode::Right, KeyModifiers::NONE) => Action::ScrollRight,
+        (KeyCode::Char('F'), KeyModifiers::NONE) => Action::ToggleFollow,
         (KeyCode::Char('T'), KeyModifiers::NONE) => Action::ToggleThread,
         (KeyCode::Char('w'), KeyModifiers::NONE) => Action::ToggleWrap,
         (KeyCode::Char('P'), KeyModifiers::NONE) => Action::CyclePreset,
@@ -122,6 +130,23 @@ impl Opening {
     }
 }
 
+/// What happened to the followed file, as the viewer takes it in: a
+/// [`follow::Event`](crate::follow::Event), with the file mapped again where there
+/// is something new to read.
+#[derive(Debug)]
+pub enum FileChange {
+    /// The file grew. The source maps all of it, the part already read included.
+    Grew(Source),
+    /// The file was cut short, and maybe written again since. The source maps what
+    /// it holds now.
+    Truncated(Source),
+    /// Another file is at the path, after a rotation or after the file was gone. The
+    /// source maps it.
+    Replaced(Source),
+    /// Nothing is at the path.
+    Gone,
+}
+
 /// What a row shows.
 #[derive(Debug, Clone, Copy)]
 pub struct ShownLine<'a> {
@@ -135,12 +160,63 @@ pub struct ShownLine<'a> {
     pub hidden: usize,
 }
 
+/// The text of the row that marks a truncation.
+const TRUNCATION_ROW: &str = "── file truncated ──";
+
 /// Where line `line` of the entry starting at byte `entry` starts: byte `at`.
 #[derive(Debug, Clone, Copy, Default)]
 struct LineMark {
     entry: usize,
     line: usize,
     at: usize,
+}
+
+/// The watcher of the followed file, and the file it follows, for mapping it again.
+#[derive(Debug)]
+struct Watch {
+    watcher: Watcher,
+    file: File,
+}
+
+impl Watch {
+    /// What the watcher reported since the last call.
+    fn changes(&mut self) -> Vec<FileChange> {
+        let mut changes = Vec::new();
+        while let Ok(event) = self.watcher.events().try_recv() {
+            changes.extend(self.change(event));
+        }
+        changes
+    }
+
+    /// What `event` means for the viewer, with the file mapped again. `None` if it
+    /// can't be mapped: the next event maps it again.
+    fn change(&mut self, event: Event) -> Option<FileChange> {
+        let change = match event {
+            Event::Grew { .. } => FileChange::Grew(self.map()?),
+            Event::Truncated { .. } => FileChange::Truncated(self.map()?),
+            Event::Replaced { file, .. } | Event::Back { file, .. } => {
+                self.file = file;
+                FileChange::Replaced(self.map()?)
+            }
+            Event::Gone => FileChange::Gone,
+        };
+        Some(change)
+    }
+
+    /// [`FileChange::Truncated`] if the file is now shorter than `mapped` bytes,
+    /// whether or not the watcher has seen it yet.
+    fn truncation(&self, mapped: u64) -> Option<FileChange> {
+        let len = self.file.metadata().ok()?.len();
+        if len < mapped {
+            self.map().map(FileChange::Truncated)
+        } else {
+            None
+        }
+    }
+
+    fn map(&self) -> Option<Source> {
+        self.file.try_clone().and_then(Source::map).ok()
+    }
 }
 
 /// A log file being viewed.
@@ -156,7 +232,19 @@ pub struct App {
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
     opening: Opening,
-    follow: bool,
+    following: bool,
+    /// The entries that came in while not following, see [`App::new_entries`]. Kept
+    /// at 0 while following.
+    unseen: usize,
+    /// Whether the entries the index takes in count as new: they are the content of
+    /// a file that took the place of the one shown.
+    index_brings_new: bool,
+    /// Whether the rows start with the truncation row.
+    truncated: bool,
+    waiting: bool,
+    /// The file grown while the index wasn't complete yet, mapped.
+    grown: Option<Source>,
+    watch: Option<Watch>,
     progress: Progress,
     settings: Settings,
     /// Whether detection found no preset and the file is read in `Raw` for it.
@@ -181,14 +269,16 @@ impl App {
     ///
     /// It has no rows until [`poll_index`](Self::poll_index) takes in the first
     /// entries, and the screen has no lines until the first [`resize`](Self::resize).
+    /// It watches no file until [`watch`](Self::watch).
     ///
     /// With `follow` it opens at the end of the file. As soon as it has a screen, it
     /// shows the file's last entries, read from the end of the file
     /// ([`index::tail`](crate::index::tail)), with the last one selected, until the
     /// index of the whole file is complete and takes over, still with the last entry
     /// selected. When those entries start too far from the end, it shows no rows
-    /// until then. Without `follow` it opens at the top and shows the first entries
-    /// as soon as the index has them.
+    /// until then; it [follows](Self::following) the file from there. Without
+    /// `follow` it opens at the top, not following, and shows the first entries as
+    /// soon as the index has them.
     pub fn new(
         path: &Path,
         source: Source,
@@ -219,7 +309,13 @@ impl App {
             folds: Folds::default(),
             line_mark: Cell::default(),
             opening: Opening::new(follow),
-            follow,
+            following: follow,
+            unseen: 0,
+            index_brings_new: false,
+            truncated: false,
+            waiting: false,
+            grown: None,
+            watch: None,
             progress,
             settings,
             unrecognized: picked.is_none(),
@@ -237,15 +333,39 @@ impl App {
     /// end, the rows are the last entries until the index is complete, which then
     /// takes over with its last row selected. Only folding or unfolding all carries
     /// over from the last entries to the index.
+    ///
+    /// While a file is [watched](Self::watch), it also takes in what happened to the
+    /// file since the last call, as [`file_changed`](Self::file_changed) does.
     pub fn poll_index(&mut self) {
-        let known = self.records.len();
-        self.progress = self.indexer.poll(&mut self.records);
-        push_entries(&mut self.folds, self.source.bytes(), &self.records[known..]);
-        if self.progress.is_complete() && !matches!(self.opening, Opening::Index) {
-            self.show_last(Opening::Index);
-        } else {
-            self.viewport.set_total(self.shown().1.row_count());
+        let changes = self.watch.as_mut().map_or_else(Vec::new, Watch::changes);
+        for change in changes {
+            self.file_changed(change);
         }
+        // Rows past the file's new end would raise SIGBUS at the next draw, and the
+        // watcher may only report the truncation at its next poll.
+        let truncation = self.watch.as_ref().and_then(|w| w.truncation(self.size()));
+        if let Some(change) = truncation {
+            self.file_changed(change);
+        }
+        // Once complete, the index is kept up to date by `grow`, not by the indexer.
+        if !self.progress.is_complete() {
+            let known = self.records.len();
+            self.progress = self.indexer.poll(&mut self.records);
+            let found = &self.records[known..];
+            push_entries(&mut self.folds, self.source.bytes(), found);
+            if self.index_brings_new {
+                self.count_new(found.len());
+            }
+        }
+        if self.progress.is_complete() {
+            if !matches!(self.opening, Opening::Index) {
+                self.show_last(Opening::Index);
+            }
+            if let Some(grown) = self.grown.take() {
+                self.grow(grown);
+            }
+        }
+        self.update_rows();
     }
 
     /// How far indexing got as of the last [`poll_index`](Self::poll_index):
@@ -271,25 +391,100 @@ impl App {
         self.source.bytes().len() as u64
     }
 
-    /// Row `i`'s line as text (see [`crate::source::display`]). Not yet safe to
-    /// show: it may hold control characters. Panics if `i` is not below
-    /// `viewport().total()`.
+    /// Row `i`'s line as text (see [`crate::source::display`]), `── file truncated ──`
+    /// for the row that marks a truncation. Not yet safe to show: it may hold control
+    /// characters. Panics if `i` is not below `viewport().total()`.
     pub fn line(&self, i: usize) -> Cow<'_, str> {
-        source::display(self.row(i).line)
+        match self.row(i) {
+            Some(shown) => source::display(shown.line),
+            None => Cow::Borrowed(TRUNCATION_ROW),
+        }
     }
 
     /// What row `i` shows: the first line of an entry, or a continuation line of an
-    /// unfolded one. Panics if `i` is not below `viewport().total()`.
-    pub fn row(&self, i: usize) -> ShownLine<'_> {
+    /// unfolded one. `None` for the row that marks a truncation (see
+    /// [`FileChange::Truncated`]). Panics if `i` is not below `viewport().total()`.
+    pub fn row(&self, i: usize) -> Option<ShownLine<'_>> {
         let (records, folds) = self.shown();
-        let (entry, line) = folds.line_at(i);
+        let (entry, line) = folds.line_at(self.fold_row(i)?);
         let record = &records[entry];
-        ShownLine {
+        Some(ShownLine {
             line: self.entry_line(record, line),
             record,
             first: line == 0,
             hidden: folds.hidden_lines(entry),
+        })
+    }
+
+    /// Whether the viewer follows the file: keeps its last row selected as entries
+    /// come in.
+    pub fn following(&self) -> bool {
+        self.following
+    }
+
+    /// How many entries came in while the viewer didn't follow the file, since it
+    /// stopped or since it opened at the top; 0 while it follows. Lines added to the
+    /// last entry don't make a new entry.
+    pub fn new_entries(&self) -> usize {
+        self.unseen
+    }
+
+    /// Whether the file is gone from its path ([`FileChange::Gone`]) and no file has
+    /// come back there yet.
+    pub fn waiting_for_file(&self) -> bool {
+        self.waiting
+    }
+
+    /// Takes in what happened to the followed file.
+    ///
+    /// - [`Grew`](FileChange::Grew): the entries appended are taken in as soon as the
+    ///   index of the file is complete, the last one read again
+    ///   ([`index::append`](crate::index::append)), as folded or unfolded as before.
+    ///   A source shorter than what is indexed changes nothing: the file was cut short
+    ///   since, and a `Truncated` follows.
+    /// - [`Truncated`](FileChange::Truncated): the rows so far are dropped, as their
+    ///   bytes are gone, and the file is indexed again from the start. The rows are
+    ///   `── file truncated ──`, then the entries of the new content. Folding or
+    ///   unfolding all carries over to them.
+    /// - [`Replaced`](FileChange::Replaced): the same without the truncation row, and
+    ///   the viewer no longer waits for the file.
+    /// - [`Gone`](FileChange::Gone): the rows stay, and the viewer
+    ///   [waits for the file](Self::waiting_for_file).
+    ///
+    /// While the viewer follows the file, the last row stays selected. While it
+    /// doesn't, every new entry counts in [`new_entries`](Self::new_entries); after
+    /// growth the view stays where it was, after a truncation or another file the
+    /// first row is selected and the count is the new file's entries.
+    pub fn file_changed(&mut self, change: FileChange) {
+        match change {
+            FileChange::Grew(source) if self.progress.is_complete() => self.grow(source),
+            FileChange::Grew(source) => self.grown = Some(source),
+            FileChange::Truncated(source) => self.reopen(source, true),
+            FileChange::Replaced(source) => {
+                self.waiting = false;
+                self.reopen(source, false);
+            }
+            FileChange::Gone => self.waiting = true,
         }
+        self.update_rows();
+    }
+
+    /// Watches the file at `path` from now on, with a [`Watcher`](crate::follow::Watcher)
+    /// set up as `options` say. `file` is the file opened at `path` that the source
+    /// maps. [`poll_index`](Self::poll_index) takes in what the watcher reports,
+    /// mapping the file again, or the file that took its place. Fails if the watcher
+    /// can't start.
+    pub fn watch(&mut self, path: &Path, file: File, options: Options) -> io::Result<()> {
+        let watcher = Watcher::spawn(path.to_owned(), file.try_clone()?, self.size(), options)?;
+        self.watch = Some(Watch { watcher, file });
+        Ok(())
+    }
+
+    /// Whether the app has more to take in at the next [`poll_index`](Self::poll_index)
+    /// without anything happening on screen: the index isn't complete, or a watcher
+    /// may report changes to the file.
+    pub(crate) fn expects_updates(&self) -> bool {
+        !self.progress.is_complete() || self.watch.is_some()
     }
 
     /// Whether the preset was detected, found none fitting and fell back to `Raw`.
@@ -338,11 +533,23 @@ impl App {
     /// last one selected; opened at the top, the first row is selected once the index
     /// has it.
     ///
+    /// While the viewer follows the file, a move away from the last row (up, a page
+    /// or half a page up, the top) stops following; the other actions keep it.
+    /// [`Action::Bottom`] and [`Action::ToggleFollow`] follow it again from the last
+    /// row, and the count of new entries starts again from 0. Moving down onto the
+    /// last row doesn't follow again.
+    ///
     /// Folding and unfolding keep the selected line on its screen line, as far as the
     /// ends allow (in wrap mode, the selected row stays as many rows below the top).
     /// When the selected line gets folded away, its entry's first line takes its
     /// place.
     pub fn apply(&mut self, action: Action) {
+        if matches!(
+            action,
+            Action::Up | Action::PageUp | Action::HalfPageUp | Action::Top
+        ) {
+            self.following = false;
+        }
         let viewport = &mut self.viewport;
         match action {
             Action::Up => viewport.up(1),
@@ -352,7 +559,9 @@ impl App {
             Action::HalfPageUp => viewport.half_page_up(),
             Action::HalfPageDown => viewport.half_page_down(),
             Action::Top => viewport.go_top(),
-            Action::Bottom => viewport.go_bottom(),
+            Action::Bottom => self.follow(),
+            Action::ToggleFollow if self.following => self.following = false,
+            Action::ToggleFollow => self.follow(),
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
@@ -378,14 +587,38 @@ impl App {
         let current = presets.iter().position(|&p| p == self.settings.preset);
         self.settings.preset = presets[current.map_or(0, |i| (i + 1) % presets.len())];
         self.unrecognized = false;
+        self.folds = Folds::default();
+        self.truncated = false;
+        self.index_brings_new = false;
+        self.index_again(Opening::new(self.following));
+        self.read_tail();
+    }
+
+    /// Indexes the source from the start, the rows opening as `opening` says.
+    fn index_again(&mut self, opening: Opening) {
         // Dropping the old indexer stops it.
         self.indexer = Indexer::spawn(Arc::clone(&self.source), self.settings.clone());
         self.records.clear();
-        self.folds = Folds::default();
-        self.progress.indexed = 0;
-        self.opening = Opening::new(self.follow);
+        self.progress = Progress {
+            indexed: 0,
+            total: self.size(),
+        };
+        self.opening = opening;
         self.viewport = Viewport::new(0, self.viewport.height());
-        self.read_tail();
+    }
+
+    /// Selects the last row and follows the file from there.
+    fn follow(&mut self) {
+        self.following = true;
+        self.unseen = 0;
+        self.viewport.go_bottom();
+    }
+
+    /// Counts `entries` new entries unless the viewer follows the file.
+    fn count_new(&mut self, entries: usize) {
+        if !self.following {
+            self.unseen += entries;
+        }
     }
 
     /// Opened at the end and given a screen, shows the file's last entries.
@@ -404,8 +637,66 @@ impl App {
     /// Switches to the rows of `opening` with the last one selected.
     fn show_last(&mut self, opening: Opening) {
         self.opening = opening;
-        self.viewport.set_total(self.shown().1.row_count());
+        self.viewport.set_total(self.row_count());
         self.viewport.go_bottom();
+    }
+
+    /// Tells the viewport how many rows there are, and keeps the last one selected
+    /// while following.
+    fn update_rows(&mut self) {
+        self.viewport.set_total(self.row_count());
+        if self.following {
+            self.viewport.go_bottom();
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        self.lead_rows() + self.shown().1.row_count()
+    }
+
+    /// The rows before the entries: the truncation row, if there is one.
+    fn lead_rows(&self) -> usize {
+        usize::from(self.truncated)
+    }
+
+    /// The row of the fold state that viewport row `row` shows, `None` for the
+    /// truncation row.
+    fn fold_row(&self, row: usize) -> Option<usize> {
+        row.checked_sub(self.lead_rows())
+    }
+
+    fn set_source(&mut self, source: Source) {
+        self.source = Arc::new(source);
+        // The mark points into the old mapping, whose bytes may be gone.
+        self.line_mark.take();
+    }
+
+    /// Takes in `source`, the file grown, unless it is shorter than what is indexed.
+    fn grow(&mut self, source: Source) {
+        if source.bytes().len() <= self.source.bytes().len() {
+            return;
+        }
+        self.set_source(source);
+        let known = self.records.len();
+        index::append(&mut self.records, self.source.bytes(), &self.settings);
+        push_appended(&mut self.folds, self.source.bytes(), &self.records, known);
+        self.count_new(self.records.len().saturating_sub(known));
+        self.progress = Progress {
+            indexed: self.size(),
+            total: self.size(),
+        };
+    }
+
+    /// Shows `source`, the file that took the place of the one shown, from its start,
+    /// after the truncation row if `truncated`.
+    fn reopen(&mut self, source: Source, truncated: bool) {
+        self.set_source(source);
+        self.grown = None;
+        self.truncated = truncated;
+        self.index_brings_new = true;
+        self.unseen = 0;
+        self.folds.truncate(0);
+        self.index_again(Opening::Index);
     }
 
     /// The records of the entries shown and their fold state.
@@ -424,7 +715,7 @@ impl App {
     }
 
     fn toggle_fold(&mut self) {
-        if let Some(row) = self.viewport.selected() {
+        if let Some(row) = self.viewport.selected().and_then(|row| self.fold_row(row)) {
             let (entry, _) = self.shown().1.line_at(row);
             self.refold(|folds| folds.toggle(entry));
         }
@@ -448,18 +739,19 @@ impl App {
     /// screen line, or its entry's first line if it gets folded away.
     fn refold(&mut self, change: impl FnOnce(&mut Folds)) {
         let viewport = &self.viewport;
-        let selected = viewport
-            .selected()
-            .map(|row| (self.shown().1.line_at(row), row - viewport.top()));
+        let selected = viewport.selected().and_then(|row| {
+            let line = self.shown().1.line_at(self.fold_row(row)?);
+            Some((line, row - viewport.top()))
+        });
+        let lead = self.lead_rows();
         let folds = self.shown_folds_mut();
         change(folds);
-        let total = folds.row_count();
         let selected = selected.map(|((entry, line), screen_line)| {
             let folded = folds.hidden_lines(entry) > 0;
             let line = if folded { 0 } else { line };
-            (folds.row_of(entry, line), screen_line)
+            (lead + folds.row_of(entry, line), screen_line)
         });
-        self.viewport.set_total(total);
+        self.viewport.set_total(self.row_count());
         if let Some((row, screen_line)) = selected {
             self.viewport.select_on_line(row, screen_line);
         }
@@ -512,4 +804,27 @@ fn push_entries(folds: &mut Folds, bytes: &[u8], records: &[Record]) {
         let lines = newlines + usize::from(!entry.ends_with(b"\n"));
         folds.push(lines.saturating_sub(1));
     }
+}
+
+/// Brings `folds`, which holds the first `known` entries of `records`, up to date
+/// after [`index::append`] added to `records`. The entries read again keep their
+/// fold state.
+fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usize) {
+    // `append` reads the last entry again, and a partial last line that looked like a
+    // header can turn out to continue the entry before it.
+    let from = known.saturating_sub(2);
+    let was: Vec<_> = (from..known).map(|entry| unfolded(folds, entry)).collect();
+    folds.truncate(from);
+    push_entries(folds, bytes, &records[from..]);
+    for (entry, was) in (from..records.len()).zip(was) {
+        if was.is_some() && unfolded(folds, entry) != was {
+            folds.toggle(entry);
+        }
+    }
+}
+
+/// Whether `entry` shows its continuation lines, `None` if it has none.
+fn unfolded(folds: &Folds, entry: usize) -> Option<bool> {
+    let shown = folds.row_of(entry + 1, 0) - folds.row_of(entry, 0) - 1;
+    (shown + folds.hidden_lines(entry) > 0).then_some(shown > 0)
 }

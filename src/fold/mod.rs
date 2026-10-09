@@ -36,6 +36,18 @@ impl Folds {
         self.line_ends.push(before + continuation_lines);
     }
 
+    /// Keeps the first `entries` entries, folded or unfolded as they are, and drops
+    /// the rest. Entries pushed from now on are folded or unfolded as the last
+    /// [`fold_all`](Self::fold_all) or [`unfold_all`](Self::unfold_all) says, as
+    /// before. Keeps every entry if there are no more than `entries`.
+    pub fn truncate(&mut self, entries: usize) {
+        self.line_ends.truncate(entries);
+        // `exception_ends` sums the exceptions from the first, so its prefix still fits.
+        let kept = self.exceptions.partition_point(|&e| e < entries);
+        self.exceptions.truncate(kept);
+        self.exception_ends.truncate(kept);
+    }
+
     /// How many rows the entries take: one per entry, plus the continuation lines of
     /// the unfolded ones.
     pub fn row_count(&self) -> usize {

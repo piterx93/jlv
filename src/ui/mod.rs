@@ -55,10 +55,18 @@ const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/B
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
-/// preset the index reads the file in, then ` ─ format not recognized, showing raw`
-/// while `Raw` is shown because detection found no preset, then
-/// ` ─ indexing <percent>%` until the index is complete), the rows on screen with `▶`
-/// in front of the selected one, and the key hints in the footer.
+/// preset the index reads the file in, then the follow status, then
+/// ` ─ format not recognized, showing raw` while `Raw` is shown because detection
+/// found no preset, then ` ─ indexing <percent>%` until the index is complete), the
+/// rows on screen with `▶` in front of the selected one, and the key hints in the
+/// footer.
+///
+/// The follow status is ` ─ WAITING FOR FILE` while the file is gone from its path,
+/// otherwise ` ─ FOLLOW ●` while the app follows the file and ` ─ PAUSED +N new`
+/// while it doesn't and N new entries came in ([`App::new_entries`]); nothing while
+/// it doesn't and none came.
+///
+/// The row that marks a truncation shows `── file truncated ──` after the gutter.
 ///
 /// Under `Raw` a row is the entry's first line. Under the other presets it is a table
 /// row, columns separated by a space: the timestamp in the app's zone
@@ -96,10 +104,11 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         ""
     };
     let title = format!(
-        "jlv ─ {} ─ {} ─ {}{notice}{indexing}",
+        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}",
         printable(app.file_name()),
         human_size(app.size()),
-        app.settings().preset
+        app.settings().preset,
+        follow_status(app),
     );
     let bar = Style::new().reversed();
     frame.render_widget(Line::from(title).style(theme.paint(bar.bold())), header);
@@ -109,6 +118,21 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         frame.render_widget(Line::from(TOO_SMALL), body);
     } else {
         table::render(frame, app, theme, body);
+    }
+}
+
+/// The follow status of the header, with the ` ─ ` before it; empty while paused
+/// with no new entries.
+fn follow_status(app: &App) -> Cow<'static, str> {
+    if app.waiting_for_file() {
+        " ─ WAITING FOR FILE".into()
+    } else if app.following() {
+        " ─ FOLLOW ●".into()
+    } else {
+        match app.new_entries() {
+            0 => "".into(),
+            n => format!(" ─ PAUSED +{n} new").into(),
+        }
     }
 }
 

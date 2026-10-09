@@ -12,10 +12,11 @@ use ratatui::style::Color;
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
-use crate::app::{Action, action};
+use crate::app::{Action, FileChange, action};
 use crate::format::Preset;
 use crate::test_support::{
-    EXAMPLES, app, app_in, char_key, detected_app, key, named_app, numbered_log, row, unindexed_app,
+    self, EXAMPLES, app, app_in, char_key, detected_app, following_app, key, named_app,
+    numbered_log, row, unindexed_app, wait_for_index,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -97,7 +98,7 @@ fn first_screen_shows_the_top_of_the_file() {
 fn capital_g_shows_the_last_screen() {
     let out = screen_after(&mut hundred_lines(), &[char_key('G')]);
     assert_snapshot!(out, @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ FOLLOW ●                                         "
     " 12:00:00.079 [main] INFO  com.example.App - step 79                            "
     " 12:00:00.080 [main] INFO  com.example.App - step 80                            "
     " 12:00:00.081 [main] INFO  com.example.App - step 81                            "
@@ -972,6 +973,73 @@ fn control_characters_in_the_file_name_are_replaced() {
     assert_eq!(row(&terminal, 0), "jlv ─ a\u{FFFD}b.log ─ 2 B ─ Raw");
 }
 
+// --- follow mode ---
+
+/// A viewer opened at the end of `numbered_log(3)`, on the 22 lines an 80×24
+/// screen has for rows, with the whole file indexed.
+fn three_lines_followed() -> App {
+    let mut app = following_app(Preset::Raw, numbered_log(3).as_bytes());
+    app.resize(22);
+    wait_for_index(&mut app);
+    app
+}
+
+/// `app` after the file changed as `change` says, with what changed indexed.
+fn changed(mut app: App, change: FileChange) -> App {
+    app.file_changed(change);
+    wait_for_index(&mut app);
+    app
+}
+
+#[test]
+fn following_shows_follow_in_the_header() {
+    let out = lines_after(&mut three_lines_followed(), &[], 0..=3);
+    assert_snapshot!(out, @r"
+    jlv ─ app.log ─ 153 B ─ Raw ─ FOLLOW ●
+     12:00:00.001 [main] INFO  com.example.App - step 1
+     12:00:00.002 [main] INFO  com.example.App - step 2
+    ▶12:00:00.003 [main] INFO  com.example.App - step 3
+    ");
+}
+
+#[test]
+fn paused_shows_the_new_entries_in_the_header() {
+    let mut app = three_lines_followed();
+    app.apply(Action::Up);
+    let grown = FileChange::Grew(test_support::source(numbered_log(5).as_bytes()));
+    let out = lines_after(&mut changed(app, grown), &[], 0..=5);
+    assert_snapshot!(out, @r"
+    jlv ─ app.log ─ 255 B ─ Raw ─ PAUSED +2 new
+     12:00:00.001 [main] INFO  com.example.App - step 1
+    ▶12:00:00.002 [main] INFO  com.example.App - step 2
+     12:00:00.003 [main] INFO  com.example.App - step 3
+     12:00:00.004 [main] INFO  com.example.App - step 4
+     12:00:00.005 [main] INFO  com.example.App - step 5
+    ");
+}
+
+#[test]
+fn truncation_row_starts_the_new_content() {
+    let truncated = FileChange::Truncated(test_support::source(numbered_log(2).as_bytes()));
+    let out = lines_after(&mut changed(three_lines_followed(), truncated), &[], 0..=3);
+    assert_snapshot!(out, @r"
+    jlv ─ app.log ─ 102 B ─ Raw ─ FOLLOW ●
+     ── file truncated ──
+     12:00:00.001 [main] INFO  com.example.App - step 1
+    ▶12:00:00.002 [main] INFO  com.example.App - step 2
+    ");
+}
+
+#[test]
+fn missing_file_shows_waiting_for_file_in_the_header() {
+    let out = lines_after(
+        &mut changed(three_lines_followed(), FileChange::Gone),
+        &[],
+        0..=0,
+    );
+    assert_snapshot!(out, @"jlv ─ app.log ─ 153 B ─ Raw ─ WAITING FOR FILE");
+}
+
 // --- terminal size ---
 
 #[test]
@@ -1385,6 +1453,7 @@ fn any_action() -> impl Strategy<Value = Action> {
         Action::ToggleThread,
         Action::ToggleWrap,
         Action::CyclePreset,
+        Action::ToggleFollow,
     ])
 }
 
