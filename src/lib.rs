@@ -26,6 +26,7 @@ pub mod fold;
 pub mod follow;
 pub mod format;
 pub mod index;
+pub mod matcher;
 pub mod source;
 pub mod ui;
 pub mod viewport;
