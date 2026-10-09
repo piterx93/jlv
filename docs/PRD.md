@@ -151,7 +151,7 @@ Colors are configurable (§11).
 ### 7.1 Layout
 
 ```
-┌ jlv ─ server.log ─ 1.8 GB ─ WildFly ───────── FOLLOW ● +124 ── E:37 W:212 ──┐
+┌ jlv ─ server.log ─ 1.8 GB ─ WildFly ────────────── FOLLOW ● ── E:37 W:212 ──┐
 │ Filters: level[W E F]  class[com.myco.* !org.hibernate]  time[last 10m]      │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ ▁▁▂▁▁▃▁▁▁▁▂▁▁▁▁▁▁▇▅▁▁▁▁▁▂▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁ (errors+warns per minute)            │
@@ -190,14 +190,14 @@ Wheel scrolls; click selects a row; double-click toggles fold; click on a histog
 ## 8. Follow mode
 
 - Starts in follow mode at end of file (override `--no-follow`, which opens at the top).
-- Behaves like `less +F`. Scrolling up **pauses** follow, and the header shows `PAUSED +N new`. `F` or `End` resumes follow and jumps to the bottom.
+- Behaves like `less +F`. Any move away from the bottom **pauses** follow. The header shows `FOLLOW ●` while following and `PAUSED +N new` once entries arrive during a pause (N counts entries, not lines). `F` toggles follow; `End` and `G` jump to the bottom and resume.
 - File watching uses `notify` (inotify/kqueue), with a polling fallback every 250 ms for NFS and similar filesystems.
 - **Rotation handling** (`tail -F` semantics):
-  - inode change (rename+create): finish reading the old file, then reopen the path.
-  - size shrink (copytruncate): reset to start of the new content and insert a visual separator `── file truncated ──`.
+  - inode change (rename+create, or delete and recreate): finish reading the old file, then reopen the path and show the new file from its start.
+  - size shrink (copytruncate): drop the rows of the old content, whose bytes are gone, and show `── file truncated ──` as the first row, followed by the new content.
   - if the file disappears, wait and keep retrying; show `WAITING FOR FILE` in the header.
 - Active filters apply live to new entries.
-- `.gz` files are read-only (no follow).
+- `.gz` files (detected by the gzip magic bytes, not the name) are read-only: never followed, `READ-ONLY` in the header. A damaged file shows what could be decompressed, with `truncated .gz` in the header. Progress is printed on stderr while decompressing, before the TUI starts.
 
 ## 9. Navigation, search & filter
 
