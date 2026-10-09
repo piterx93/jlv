@@ -62,6 +62,10 @@ const TAB_STOP: usize = 4;
 /// rows on screen with `▶` in front of the selected one, and the key hints in the
 /// footer.
 ///
+/// While [`App::shows_line_numbers`], each row starts with its line number in the
+/// file, in dark gray, right-aligned as wide as the last line number of the entries
+/// needs (at least 4) and followed by a space; blank while it isn't known.
+///
 /// The follow status is ` ─ READ-ONLY` for a gzip file, which is never followed,
 /// then ` ─ truncated .gz` if it ended early or was corrupt ([`App::origin`]). For a
 /// plain file it is ` ─ WAITING FOR FILE` while the file is gone from its path,

@@ -7,16 +7,19 @@ use std::iter;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{Theme, abbreviate, level_style, printable};
-use crate::app::App;
+use crate::app::{App, ShownLine};
 use crate::format::{EntryParser, Level, strip_ansi};
 use crate::source;
 
-const GUTTER: usize = 1;
+/// The width of the `▶` marker of the selected row.
+const MARKER: usize = 1;
+/// The narrowest the line numbers are, so that most files never widen them.
+const MIN_NUMBER_WIDTH: usize = 4;
 const LEVEL_WIDTH: usize = 5;
 const THREAD_WIDTH: usize = 15;
 const MIN_CLASS_WIDTH: usize = 24;
@@ -60,7 +63,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect)
         } else {
             Style::new()
         };
-        let lines = row.lines(&columns, app, selected);
+        let lines = row.lines(&columns, app, selected, theme);
         lines.into_iter().map(move |line| line.style(style))
     });
     for (line, area) in lines.zip(body.rows()) {
@@ -98,6 +101,10 @@ fn fit_wrapped(app: &mut App, columns: &Columns, theme: Theme, height: usize) {
 
 /// How wide the columns are on a screen of some width, in terminal columns.
 struct Columns {
+    /// The width of the line numbers, `None` while they are hidden.
+    numbers: Option<usize>,
+    /// The width of the line numbers with the space after them and the marker.
+    gutter: usize,
     /// `None` under `Raw`, which has only the message column.
     table: Option<Table>,
     /// The width of the columns between the gutter and the message.
@@ -141,18 +148,36 @@ impl Columns {
             }
         });
         let lead = table.as_ref().map_or(0, Table::width);
+        // As wide as the file's last line needs, rather than the lines on screen, so
+        // that the columns don't move while scrolling.
+        let numbers = app.shows_line_numbers().then(|| {
+            let digits = app
+                .last_line_number()
+                .map_or(0, |last| last.to_string().len());
+            digits.max(MIN_NUMBER_WIDTH)
+        });
+        let gutter = numbers.map_or(0, |numbers| numbers + 1) + MARKER;
         Columns {
+            numbers,
+            gutter,
             table,
             lead,
-            message: width.saturating_sub(GUTTER + lead),
+            message: width.saturating_sub(gutter + lead),
         }
     }
 
     /// Row `i` of `app`, its text made safe to show.
     fn row(&self, app: &App, i: usize, theme: Theme) -> Row {
-        let Some(shown) = app.row(i) else {
-            return Row::new(Vec::new(), app.line(i).into_owned(), 0);
+        let shown = app.row(i);
+        let mut row = match shown {
+            Some(shown) => self.entry_row(app, shown, theme),
+            None => Row::new(Vec::new(), app.line(i).into_owned(), 0),
         };
+        row.number = shown.and_then(|shown| shown.number);
+        row
+    }
+
+    fn entry_row(&self, app: &App, shown: ShownLine, theme: Theme) -> Row {
         // `Raw` doesn't look into lines, so escape codes are shown, made harmless.
         let Some(table) = &self.table else {
             return Row::new(Vec::new(), text(shown.line), shown.hidden);
@@ -199,6 +224,8 @@ struct Row {
     text: String,
     /// Where the marker starts in `text`.
     marker: usize,
+    /// The line's number in the file, if known.
+    number: Option<u64>,
 }
 
 impl Row {
@@ -214,6 +241,7 @@ impl Row {
             cells,
             text,
             marker,
+            number: None,
         }
     }
 
@@ -224,9 +252,9 @@ impl Row {
 
     /// The row's screen lines: one with the message scrolled as far as the app says
     /// and cut where the marker still fits, or, wrapped, as many as the message and
-    /// the marker need, the cells only on the first. The gutter of the first has `▶`
-    /// if the row is `selected`.
-    fn lines(&self, columns: &Columns, app: &App, selected: bool) -> Vec<Line<'_>> {
+    /// the marker need, the cells only on the first. The gutter of the first has the
+    /// line number, if shown, and `▶` if the row is `selected`.
+    fn lines(&self, columns: &Columns, app: &App, selected: bool, theme: Theme) -> Vec<Line<'_>> {
         let parts = if app.wraps() {
             let parts = wrap(&self.text, columns.message);
             parts.into_iter().map(Cow::Borrowed).collect()
@@ -237,10 +265,21 @@ impl Row {
             vec![Cow::Owned(kept + marker)]
         };
         let mut parts = parts.into_iter().map(Span::raw);
-        let gutter = Span::raw(if selected { "▶" } else { " " });
+        let number = columns.numbers.map(|width| {
+            let number = self
+                .number
+                .map_or_else(String::new, |number| number.to_string());
+            let style = theme.paint(Style::new().fg(Color::DarkGray));
+            Span::styled(format!("{number:>width$} "), style)
+        });
+        let marker = Span::raw(if selected { "▶" } else { " " });
         let cells = self.cells.iter().cloned();
-        let first = iter::once(gutter).chain(cells).chain(parts.next());
-        let indent = " ".repeat(GUTTER + columns.lead);
+        let first = number
+            .into_iter()
+            .chain([marker])
+            .chain(cells)
+            .chain(parts.next());
+        let indent = " ".repeat(columns.gutter + columns.lead);
         let rest = parts.map(|part| Line::from(vec![Span::raw(indent.clone()), part]));
         iter::once(Line::from_iter(first)).chain(rest).collect()
     }

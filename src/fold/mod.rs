@@ -148,7 +148,8 @@ impl Folds {
         entry.checked_sub(1).map_or(0, |last| self.line_ends[last])
     }
 
-    fn continuation_lines(&self, entry: usize) -> usize {
+    /// The lines of `entry` after its first, folded or not.
+    pub fn continuation_lines(&self, entry: usize) -> usize {
         self.lines_before(entry + 1) - self.lines_before(entry)
     }
 }

@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::App;
+use crate::app::{Action, App};
 use crate::format::Preset;
 use crate::source::{self, Source};
 
@@ -185,6 +185,14 @@ pub fn numbered_log(n: usize) -> String {
     (1..=n)
         .map(|i| format!("12:00:00.{i:03} [main] INFO  com.example.App - step {i}\n"))
         .collect()
+}
+
+/// Hides `app`'s line numbers if they are shown, so that rows start with the `▶`
+/// marker.
+pub fn hide_line_numbers(app: &mut App) {
+    if app.shows_line_numbers() {
+        app.apply(Action::ToggleLineNumbers);
+    }
 }
 
 pub fn key(code: KeyCode) -> KeyEvent {

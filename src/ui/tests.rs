@@ -15,15 +15,18 @@ use super::*;
 use crate::app::{Action, FileChange, action};
 use crate::format::Preset;
 use crate::test_support::{
-    self, EXAMPLES, app, app_in, char_key, detected_app, following_app, key, named_app,
-    numbered_log, row, unindexed_app, wait_for_index,
+    self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, detected_app, following_app,
+    hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_index,
+    wait_for_index_within,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
     terminal.draw(|frame| render(frame, app, theme)).unwrap();
 }
 
+/// `app` drawn at `width`×`height` without line numbers; the gutter's tests show them.
 fn drawn(app: &mut App, width: u16, height: u16, theme: Theme) -> Terminal<TestBackend> {
+    hide_line_numbers(app);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     draw(&mut terminal, app, theme);
     terminal
@@ -1469,6 +1472,122 @@ proptest! {
     }
 }
 
+// --- line numbers ---
+
+/// The `width`×24 terminal with line numbers, drawn, then drawn again after each of
+/// `actions`.
+fn numbered_terminal(app: &mut App, width: u16, actions: &[Action]) -> Terminal<TestBackend> {
+    let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+    draw(&mut terminal, app, Theme::Styled);
+    for &action in actions {
+        app.apply(action);
+        draw(&mut terminal, app, Theme::Styled);
+    }
+    terminal
+}
+
+/// Screen lines `lines` of [`numbered_terminal`], as [`row`] shows them, each in
+/// quotes so that the snapshots keep the blanks they start with.
+fn numbered(app: &mut App, width: u16, actions: &[Action], lines: RangeInclusive<u16>) -> String {
+    let terminal = numbered_terminal(app, width, actions);
+    let rows: Vec<String> = lines.map(|y| format!("{:?}", row(&terminal, y))).collect();
+    rows.join("\n")
+}
+
+/// Numbers are right-aligned, at least 4 wide, before the `▶` marker. A folded entry
+/// hides its lines' numbers, so the next entry shows its own.
+#[test]
+fn gutter_shows_the_file_line_of_each_entry() {
+    assert_snapshot!(numbered(&mut table(), 80, &[], 1..=6), @r#"
+    "   1 ▶12:00:00.100 TRACE com.example.App          Tick"
+    "   2  12:00:00.200 DEBUG com.example.App          Config loaded"
+    "   3  12:00:00.300 INFO  c.e.order.OrderService   Order 42 created"
+    "   4  12:00:01.000 WARN  com.example.App          Retry 1/3"
+    "   5  12:00:02.000 ERROR com.example.App          Failed [+2]"
+    "   8  12:00:03.000 FATAL com.example.App          Giving up"
+    "#);
+}
+
+#[test]
+fn hash_hides_the_gutter() {
+    let actions = [action(char_key('#')).unwrap()];
+    assert_snapshot!(numbered(&mut table(), 80, &actions, 1..=2), @r#"
+    "▶12:00:00.100 TRACE com.example.App          Tick"
+    " 12:00:00.200 DEBUG com.example.App          Config loaded"
+    "#);
+}
+
+#[test]
+fn unfolded_stack_trace_lines_have_their_own_line_numbers() {
+    let out = numbered(&mut traces(), 80, &[Action::UnfoldAll], 1..=7);
+    assert_snapshot!(out, @r#"
+    "   1 ▶12:00:00.001 INFO  com.example.App          step 1"
+    "   2  12:00:00.002 INFO  com.example.App          step 2"
+    "   3                                                  at App.step(App.java:1)"
+    "   4                                                  at App.step(App.java:2)"
+    "   5  12:00:00.003 INFO  com.example.App          step 3"
+    "   6                                                  at App.step(App.java:1)"
+    "   7  12:00:00.004 INFO  com.example.App          step 4"
+    "#);
+}
+
+/// At 80 columns, the narrowest screen, 7-digit numbers keep their width and the
+/// message column is left with 27.
+#[test]
+fn seven_digit_line_numbers_take_their_width_from_the_message_column() {
+    let entry = |n: u8, message: &str| {
+        format!("2026-10-07 12:00:00.00{n} [main] INFO  com.example.App - {message}\n")
+    };
+    let log = [
+        entry(1, "the first message, long enough to be cut"),
+        "\n".repeat(999_998),
+        entry(2, "the second message, long enough to be cut"),
+        entry(3, "done"),
+    ]
+    .concat();
+    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    assert_snapshot!(numbered(&mut app, 80, &[], 1..=3), @r#"
+    "      1 ▶12:00:00.001 INFO  com.example.App          the first message [+999998]"
+    "1000000  12:00:00.002 INFO  com.example.App          the second message, long en"
+    "1000001  12:00:00.003 INFO  com.example.App          done"
+    "#);
+}
+
+/// The gutter is as wide as the file's last line number needs, whatever lines are on
+/// screen, so it widens only when the file reaches another power of ten.
+#[test]
+fn gutter_widens_when_the_file_reaches_10000_lines() {
+    let mut app = app("x\n".repeat(9_999).as_bytes());
+    assert_eq!(numbered(&mut app, 80, &[], 1..=1), r#""   1 ▶x""#);
+    let grown = test_support::source("x\n".repeat(10_000).as_bytes());
+    let mut app = changed(app, FileChange::Grew(grown));
+    assert_eq!(numbered(&mut app, 80, &[], 1..=1), r#""    1 ▶x""#);
+}
+
+/// Before the index is complete the rows are the file's last entries, whose line
+/// numbers aren't known yet.
+#[test]
+fn rows_read_from_the_end_of_the_file_have_blank_line_numbers() {
+    let mut app = following_app(Preset::Raw, numbered_log(30).as_bytes());
+    assert_snapshot!(numbered(&mut app, 80, &[], 21..=22), @r#"
+    "      12:00:00.029 [main] INFO  com.example.App - step 29"
+    "     ▶12:00:00.030 [main] INFO  com.example.App - step 30"
+    "#);
+}
+
+/// Every number is dark gray, whatever the level of its row, and the timestamps
+/// after them keep the default colour.
+#[test]
+fn line_numbers_are_dark_gray() {
+    let terminal = numbered_terminal(&mut table(), 80, &[]);
+    let buffer = terminal.backend().buffer();
+    for y in 2..=6 {
+        assert_eq!(buffer[(3, y)].fg, Color::DarkGray, "number on line {y}");
+        assert_eq!(buffer[(6, y)].fg, Color::Reset, "timestamp on line {y}");
+    }
+}
+
 // --- robustness ---
 
 fn any_action() -> impl Strategy<Value = Action> {
@@ -1484,6 +1603,7 @@ fn any_action() -> impl Strategy<Value = Action> {
         Action::ScrollLeft,
         Action::ScrollRight,
         Action::ToggleThread,
+        Action::ToggleLineNumbers,
         Action::ToggleWrap,
         Action::CyclePreset,
         Action::ToggleFollow,

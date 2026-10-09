@@ -46,6 +46,8 @@ pub enum Action {
     /// Shows the message column 8 columns further right.
     ScrollRight,
     ToggleThread,
+    /// Shows or hides the gutter of file line numbers.
+    ToggleLineNumbers,
     ToggleWrap,
     /// Reads the file in the next preset of [`Preset::ALL`].
     CyclePreset,
@@ -60,9 +62,9 @@ pub enum Action {
 ///
 /// `j k ↑ ↓` move by a line, `PgUp PgDn` by a page, `Ctrl-u Ctrl-d` by half a page,
 /// `g Home` go to the top, `G End` to the bottom, `← →` scroll the message column,
-/// `F` toggles follow, `T` toggles the thread column, `w` wrapping, `P` cycles the
-/// preset, `Space` folds or unfolds the selected entry, `z` folds every entry, `Z`
-/// unfolds every entry and `q F10 Ctrl-c` quit. Characters
+/// `F` toggles follow, `T` toggles the thread column, `#` the line numbers, `w`
+/// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
+/// folds every entry, `Z` unfolds every entry and `q F10 Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
@@ -86,6 +88,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Right, KeyModifiers::NONE) => Action::ScrollRight,
         (KeyCode::Char('F'), KeyModifiers::NONE) => Action::ToggleFollow,
         (KeyCode::Char('T'), KeyModifiers::NONE) => Action::ToggleThread,
+        (KeyCode::Char('#'), KeyModifiers::NONE) => Action::ToggleLineNumbers,
         (KeyCode::Char('w'), KeyModifiers::NONE) => Action::ToggleWrap,
         (KeyCode::Char('P'), KeyModifiers::NONE) => Action::CyclePreset,
         (KeyCode::Char(' '), KeyModifiers::NONE) => Action::ToggleFold,
@@ -157,6 +160,9 @@ pub struct ShownLine<'a> {
     pub record: &'a Record,
     /// Whether the line is its entry's first, not a continuation line.
     pub first: bool,
+    /// The line's number in the file, `None` while it isn't known (see
+    /// [`Record::line`]).
+    pub number: Option<u64>,
     /// How many lines of the entry are folded away.
     pub hidden: usize,
 }
@@ -257,6 +263,7 @@ pub struct App {
     /// How many columns the message column is scrolled to the right.
     scroll: usize,
     shows_thread: bool,
+    shows_line_numbers: bool,
     wraps: bool,
     quit: bool,
 }
@@ -328,6 +335,7 @@ impl App {
             viewport: Viewport::new(0, 0),
             scroll: 0,
             shows_thread: false,
+            shows_line_numbers: true,
             wraps: false,
             quit: false,
         }
@@ -418,6 +426,7 @@ impl App {
             line: self.entry_line(record, line),
             record,
             first: line == 0,
+            number: record.line().map(|first| first + line as u64),
             hidden: folds.hidden_lines(entry),
         })
     }
@@ -542,6 +551,21 @@ impl App {
         self.shows_thread
     }
 
+    /// Whether the gutter of file line numbers is shown; it is until
+    /// [`Action::ToggleLineNumbers`] hides it.
+    pub fn shows_line_numbers(&self) -> bool {
+        self.shows_line_numbers
+    }
+
+    /// The number in the file of the last line of the entries the rows show, `None`
+    /// while there are none or their numbers aren't known.
+    pub fn last_line_number(&self) -> Option<u64> {
+        let (records, folds) = self.shown();
+        let last = records.len().checked_sub(1)?;
+        let first = records[last].line()?;
+        Some(first + folds.continuation_lines(last) as u64)
+    }
+
     /// Whether long messages wrap onto the following screen lines instead of being
     /// cut at the right edge.
     pub fn wraps(&self) -> bool {
@@ -591,6 +615,7 @@ impl App {
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
+            Action::ToggleLineNumbers => self.shows_line_numbers = !self.shows_line_numbers,
             Action::ToggleWrap => self.wraps = !self.wraps,
             Action::CyclePreset => self.cycle_preset(),
             Action::ToggleFold => self.toggle_fold(),

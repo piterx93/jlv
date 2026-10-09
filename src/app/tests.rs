@@ -127,6 +127,11 @@ fn capital_t_toggles_the_thread_column() {
 }
 
 #[test]
+fn hash_toggles_the_line_numbers() {
+    assert_eq!(action(char_key('#')), Some(Action::ToggleLineNumbers));
+}
+
+#[test]
 fn w_toggles_wrapping() {
     assert_eq!(action(char_key('w')), Some(Action::ToggleWrap));
 }
@@ -475,6 +480,11 @@ fn empty_file_has_no_selection() {
 }
 
 #[test]
+fn line_numbers_are_shown_from_the_start() {
+    assert!(hundred_lines().shows_line_numbers());
+}
+
+#[test]
 fn resize_sets_the_screen_height() {
     let app = hundred_lines();
     assert_eq!(app.viewport().height(), 10);
@@ -581,6 +591,14 @@ fn moves_in_an_empty_file_keep_it_without_a_selection() {
         ],
     );
     assert_eq!(pos(&app), (0, None));
+}
+
+#[test]
+fn toggling_the_line_numbers_hides_them_and_shows_them_again() {
+    let mut app = applied(hundred_lines(), &[Action::ToggleLineNumbers]);
+    assert!(!app.shows_line_numbers());
+    app.apply(Action::ToggleLineNumbers);
+    assert!(app.shows_line_numbers());
 }
 
 // --- resizing ---

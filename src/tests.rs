@@ -504,7 +504,8 @@ mod event_loop {
     use crate::event_loop;
     use crate::format::Preset;
     use crate::test_support::{
-        LARGE_INDEX_DEADLINE, app, char_key, following_app, numbered_log, row, unindexed_app,
+        LARGE_INDEX_DEADLINE, app, char_key, following_app, hide_line_numbers, numbered_log, row,
+        unindexed_app,
     };
     use crate::ui::Theme;
 
@@ -523,8 +524,11 @@ mod event_loop {
         Terminal::new(TestBackend::new(80, 24)).unwrap()
     }
 
+    /// 100 lines without line numbers.
     fn hundred_lines() -> App {
-        app(numbered_log(100).as_bytes())
+        let mut app = app(numbered_log(100).as_bytes());
+        hide_line_numbers(&mut app);
+        app
     }
 
     #[test]
@@ -552,6 +556,7 @@ mod event_loop {
         let mut terminal = terminal();
         // Several chunks of the index, so it is far from complete at the first screen.
         let mut app = following_app(Preset::Raw, numbered_log(10_000).as_bytes());
+        hide_line_numbers(&mut app);
         event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
         assert_eq!(
             row(&terminal, 1),
@@ -706,6 +711,7 @@ mod event_loop {
     fn entries_are_taken_in_while_waiting_and_drawn() {
         let mut terminal = terminal();
         let mut app = slow_to_index();
+        hide_line_numbers(&mut app);
         let mut waits = Vec::new();
         event_loop(
             &mut terminal,

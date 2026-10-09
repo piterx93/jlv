@@ -28,8 +28,14 @@ use crate::format::DatesForward;
 pub fn append(records: &mut Vec<Record>, bytes: &[u8], settings: &Settings) {
     let reread = records.pop();
     // The record lies within the file, which is mapped, so its offset fits a usize.
-    let start = reread.map_or(0, |last| last.offset as usize);
-    let chunk = Chunk::index(bytes, 0, start..bytes.len(), settings);
+    let start = reread.map_or(0, |last| last.bytes().start as usize);
+    let mut chunk = Chunk::index(bytes, 0, start..bytes.len(), settings);
+    // The lines before the entry read again are those before its first.
+    chunk.shift_lines(
+        reread
+            .and_then(|last| last.line())
+            .map_or(0, |line| line - 1),
+    );
     let leads_in = chunk.leads_in;
     // The entry read again keeps its date, as it may be the only dated one so far.
     let appended = match reread.and_then(|last| last.timestamp()) {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use insta::assert_snapshot;
 use jiff::tz::TimeZone;
-use jlv::app::App;
+use jlv::app::{Action, App};
 use jlv::format::Preset;
 use jlv::source;
 use jlv::ui::{Theme, render};
@@ -14,9 +14,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 /// The `width`×`height` screen of the fixture `name` read in `preset`, opened at the
-/// top with the whole file indexed. Timestamps are shown in Warsaw time, the offset
-/// the Spring Boot 3 fixture writes; time-only logs are dated from a modification
-/// time on the morning of 2026-10-08.
+/// top with the whole file indexed, without line numbers. Timestamps are shown in
+/// Warsaw time, the offset the Spring Boot 3 fixture writes; time-only logs are
+/// dated from a modification time on the morning of 2026-10-08.
 fn screen(preset: Preset, name: &str, width: u16, height: u16) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -29,6 +29,7 @@ fn screen(preset: Preset, name: &str, width: u16, height: u16) -> String {
         "2026-10-08T06:00:00Z".parse().unwrap(),
         false,
     );
+    app.apply(Action::ToggleLineNumbers);
     let deadline = Instant::now() + Duration::from_secs(1);
     app.poll_index();
     while !app.progress().is_complete() {
