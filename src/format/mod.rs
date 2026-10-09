@@ -12,6 +12,7 @@ mod entry;
 mod preset;
 mod time;
 
+pub(crate) use dates::DatesForward;
 pub use dates::{Anchor, DatesBackward, midnights_between, resolve_timestamps};
 pub use detect::detect;
 pub use entry::{Entry, EntryGrouper, is_exception_line};
