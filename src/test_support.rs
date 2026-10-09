@@ -1,10 +1,13 @@
 //! Helpers shared by the unit tests.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
@@ -53,6 +56,27 @@ pub fn source(content: &[u8]) -> Source {
     let path = dir.path().join("app.log");
     fs::write(&path, content).unwrap();
     source::open(&path).unwrap()
+}
+
+/// `bytes` as a gzip file, stored without compression: quick to make, and as big as
+/// its content.
+pub fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::none());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// A viewer in `Raw` over the gzip file `/var/log/app.log.gz` holding `gzip`, opened
+/// as jlv opens a file by default, at the end. It hasn't taken in any entries yet.
+pub fn gzip_app(gzip: &[u8]) -> App {
+    App::new(
+        Path::new("/var/log/app.log.gz"),
+        source(gzip),
+        Some(Preset::Raw),
+        zone(),
+        mtime(),
+        true,
+    )
 }
 
 /// The zone the test viewers read timestamps in.

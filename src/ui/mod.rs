@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
 use crate::format::Level;
+use crate::source::Origin;
 
 mod abbrev;
 mod table;
@@ -61,7 +62,9 @@ const TAB_STOP: usize = 4;
 /// rows on screen with `▶` in front of the selected one, and the key hints in the
 /// footer.
 ///
-/// The follow status is ` ─ WAITING FOR FILE` while the file is gone from its path,
+/// The follow status is ` ─ READ-ONLY` for a gzip file, which is never followed,
+/// then ` ─ truncated .gz` if it ended early or was corrupt ([`App::origin`]). For a
+/// plain file it is ` ─ WAITING FOR FILE` while the file is gone from its path,
 /// otherwise ` ─ FOLLOW ●` while the app follows the file and ` ─ PAUSED +N new`
 /// while it doesn't and N new entries came in ([`App::new_entries`]); nothing while
 /// it doesn't and none came.
@@ -124,6 +127,14 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
 /// The follow status of the header, with the ` ─ ` before it; empty while paused
 /// with no new entries.
 fn follow_status(app: &App) -> Cow<'static, str> {
+    match app.origin() {
+        Origin::Gzip => " ─ READ-ONLY".into(),
+        Origin::TruncatedGzip => " ─ READ-ONLY ─ truncated .gz".into(),
+        Origin::Plain => plain_follow_status(app),
+    }
+}
+
+fn plain_follow_status(app: &App) -> Cow<'static, str> {
     if app.waiting_for_file() {
         " ─ WAITING FOR FILE".into()
     } else if app.following() {

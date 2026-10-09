@@ -19,7 +19,7 @@ use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Preset, detect};
 use crate::index::{self, Indexer, Progress, Record, Settings};
-use crate::source::{self, Source};
+use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
 
 #[cfg(test)]
@@ -35,10 +35,11 @@ pub enum Action {
     HalfPageUp,
     HalfPageDown,
     Top,
-    /// Selects the last row and follows the file.
+    /// Selects the last row and follows the file, if it [can be
+    /// followed](App::origin).
     Bottom,
     /// Follows the file from its last row if the viewer doesn't, stops following if
-    /// it does.
+    /// it does. Does nothing on a file that [can't be followed](App::origin).
     ToggleFollow,
     /// Shows the message column 8 columns further left.
     ScrollLeft,
@@ -232,6 +233,9 @@ pub struct App {
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
     opening: Opening,
+    /// The `follow` given to `new`: where a file that can't be followed opens again
+    /// after a preset change.
+    opens_at_end: bool,
     following: bool,
     /// The entries that came in while not following, see [`App::new_entries`]. Kept
     /// at 0 while following.
@@ -288,6 +292,7 @@ impl App {
         follow: bool,
     ) -> Self {
         let picked = format.or_else(|| detect(source::lines(source.bytes())));
+        let following = follow && source.origin() == Origin::Plain;
         // A path like `..` has no last component; showing it whole is the next best thing.
         let name = path.file_name().unwrap_or(path.as_os_str());
         let anchor = Anchor::for_file(path, mtime, &zone);
@@ -309,7 +314,8 @@ impl App {
             folds: Folds::default(),
             line_mark: Cell::default(),
             opening: Opening::new(follow),
-            following: follow,
+            opens_at_end: follow,
+            following,
             unseen: 0,
             index_brings_new: false,
             truncated: false,
@@ -435,6 +441,18 @@ impl App {
         self.waiting
     }
 
+    /// Whether the file is plain or gzip. A gzip file is read-only: the viewer opens
+    /// it at the end or the top as [`new`](Self::new) says, but never follows it, and
+    /// never [watches](Self::watch) it. [`Action::Bottom`] goes to the last row
+    /// without following, and [`Action::ToggleFollow`] does nothing.
+    pub fn origin(&self) -> Origin {
+        self.source.origin()
+    }
+
+    fn can_follow(&self) -> bool {
+        self.origin() == Origin::Plain
+    }
+
     /// Takes in what happened to the followed file.
     ///
     /// - [`Grew`](FileChange::Grew): the entries appended are taken in as soon as the
@@ -473,8 +491,11 @@ impl App {
     /// set up as `options` say. `file` is the file opened at `path` that the source
     /// maps. [`poll_index`](Self::poll_index) takes in what the watcher reports,
     /// mapping the file again, or the file that took its place. Fails if the watcher
-    /// can't start.
+    /// can't start. A file that can't be followed isn't watched.
     pub fn watch(&mut self, path: &Path, file: File, options: Options) -> io::Result<()> {
+        if !self.can_follow() {
+            return Ok(());
+        }
         let watcher = Watcher::spawn(path.to_owned(), file.try_clone()?, self.size(), options)?;
         self.watch = Some(Watch { watcher, file });
         Ok(())
@@ -537,7 +558,9 @@ impl App {
     /// or half a page up, the top) stops following; the other actions keep it.
     /// [`Action::Bottom`] and [`Action::ToggleFollow`] follow it again from the last
     /// row, and the count of new entries starts again from 0. Moving down onto the
-    /// last row doesn't follow again.
+    /// last row doesn't follow again. A file that [can't be followed](Self::origin)
+    /// never is: [`Action::Bottom`] only selects the last row and
+    /// [`Action::ToggleFollow`] does nothing.
     ///
     /// Folding and unfolding keep the selected line on its screen line, as far as the
     /// ends allow (in wrap mode, the selected row stays as many rows below the top).
@@ -550,6 +573,7 @@ impl App {
         ) {
             self.following = false;
         }
+        let can_follow = self.can_follow();
         let viewport = &mut self.viewport;
         match action {
             Action::Up => viewport.up(1),
@@ -559,7 +583,9 @@ impl App {
             Action::HalfPageUp => viewport.half_page_up(),
             Action::HalfPageDown => viewport.half_page_down(),
             Action::Top => viewport.go_top(),
-            Action::Bottom => self.follow(),
+            Action::Bottom if can_follow => self.follow(),
+            Action::Bottom => viewport.go_bottom(),
+            Action::ToggleFollow if !can_follow => {}
             Action::ToggleFollow if self.following => self.following = false,
             Action::ToggleFollow => self.follow(),
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
@@ -580,7 +606,8 @@ impl App {
     }
 
     /// Indexes the file again in the preset after the current one in
-    /// [`Preset::ALL`], and opens it again as `new` did.
+    /// [`Preset::ALL`]. It opens again at the end while following, at the top
+    /// otherwise; a file that can't be followed opens again as `new` opened it.
     fn cycle_preset(&mut self) {
         let presets = Preset::ALL;
         // `ALL` holds every preset, so the current one is always found.
@@ -590,7 +617,12 @@ impl App {
         self.folds = Folds::default();
         self.truncated = false;
         self.index_brings_new = false;
-        self.index_again(Opening::new(self.following));
+        let at_end = if self.can_follow() {
+            self.following
+        } else {
+            self.opens_at_end
+        };
+        self.index_again(Opening::new(at_end));
         self.read_tail();
     }
 

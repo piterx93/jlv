@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::thread;
@@ -1059,6 +1060,69 @@ fn all_lines(app: &App) -> Vec<String> {
     (0..app.viewport().total())
         .map(|i| app.line(i).into_owned())
         .collect()
+}
+
+// --- gzip files ---
+
+/// 100 numbered lines in a gzip file on a 10-line screen, opened at the end, with
+/// the whole file indexed.
+fn hundred_lines_gzipped() -> App {
+    let mut app = test_support::gzip_app(&test_support::gzip(numbered_log(100).as_bytes()));
+    app.resize(10);
+    wait_for_index(&mut app);
+    app
+}
+
+#[test]
+fn gzip_file_opens_at_the_end_without_following() {
+    let app = hundred_lines_gzipped();
+    assert!(!app.following());
+    assert_eq!(pos(&app), (90, Some(99)));
+}
+
+#[test]
+fn going_to_the_bottom_of_a_gzip_file_does_not_follow() {
+    let app = applied(hundred_lines_gzipped(), &[Action::Top, Action::Bottom]);
+    assert!(!app.following());
+    assert_eq!(pos(&app), (90, Some(99)));
+}
+
+#[test]
+fn toggling_follow_on_a_gzip_file_does_nothing() {
+    let app = applied(
+        hundred_lines_gzipped(),
+        &[Action::Top, Action::ToggleFollow],
+    );
+    assert!(!app.following());
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+/// Cycling the preset opens the file again the way it was opened, at the end, even
+/// though a gzip file is never followed.
+#[test]
+fn cycling_the_preset_of_a_gzip_file_opened_at_the_end_stays_at_the_end() {
+    let log: String = (1..=100)
+        .map(|i| format!("2026-10-07 12:00:00.{i:03} [main] INFO  com.example.App - step {i}\n"))
+        .collect();
+    let mut app = test_support::gzip_app(&test_support::gzip(log.as_bytes()));
+    app.resize(10);
+    wait_for_index(&mut app);
+    let mut app = cycled(app);
+    wait_for_index(&mut app);
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(pos(&app), (90, Some(99)));
+    assert!(!app.following());
+}
+
+#[test]
+fn gzip_file_is_not_watched() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("app.log.gz");
+    fs::write(&path, test_support::gzip(numbered_log(100).as_bytes())).unwrap();
+    let mut app = hundred_lines_gzipped();
+    app.watch(&path, File::open(&path).unwrap(), Options::default())
+        .unwrap();
+    assert!(!app.expects_updates());
 }
 
 proptest! {

@@ -2,13 +2,16 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use tempfile::TempDir;
 
 const NOBODY: u32 = 65534;
@@ -33,7 +36,7 @@ fn expected_version() -> String {
     }
 }
 
-fn log_file(dir: &TempDir, name: &str) -> std::path::PathBuf {
+fn log_file(dir: &TempDir, name: &str) -> PathBuf {
     let path = dir.path().join(name);
     fs::write(
         &path,
@@ -48,8 +51,9 @@ fn mkfifo(path: &Path) {
     assert!(status.success(), "mkfifo {}", path.display());
 }
 
-/// Opening a FIFO for reading blocks until a writer shows up, so a jlv that opens
-/// before checking the file type would hang; fail instead.
+/// The output of jlv, failing instead of hanging when it runs longer than `limit`:
+/// opening a FIFO for reading blocks until a writer shows up, so a jlv that opens
+/// before checking the file type would hang.
 fn output_within(cmd: &mut Command, limit: Duration) -> Output {
     let mut child = cmd
         .stdin(Stdio::null())
@@ -62,7 +66,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Output {
         if start.elapsed() > limit {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("jlv still running after {limit:?}, did it open the FIFO?");
+            panic!("jlv still running after {limit:?}");
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -205,4 +209,66 @@ fn unreadable_file_exits_1_with_permission_denied() {
         stderr(&out),
         format!("jlv: {}: permission denied\n", file.display())
     );
+}
+
+fn gzip_log_file(dir: &TempDir) -> PathBuf {
+    let path = dir.path().join("app.log.gz");
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(b"12:00:00.123 [main] INFO  com.example.App -- Started\n")
+        .unwrap();
+    fs::write(&path, encoder.finish().unwrap()).unwrap();
+    path
+}
+
+/// Starts jlv in a session of its own, without a controlling terminal, so that it
+/// can't take over the terminal the tests run in. Setting up the screen fails, and
+/// jlv exits with 1 once the file is open.
+fn without_terminal(cmd: &mut Command) -> &mut Command {
+    unsafe extern "C" {
+        safe fn setsid() -> i32;
+    }
+    // SAFETY: the closure only calls setsid, which is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            if setsid() == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+#[test]
+fn gzip_file_with_an_unusable_temp_dir_exits_1_naming_the_temp_dir() {
+    let dir = TempDir::new().unwrap();
+    let file = gzip_log_file(&dir);
+    let missing = dir.path().join("missing");
+    let out = output_within(
+        without_terminal(jlv().arg(&file).env("TMPDIR", &missing)),
+        Duration::from_secs(5),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "jlv: {}: cannot decompress into {}: no such file or directory\n",
+            file.display(),
+            missing.display()
+        )
+    );
+}
+
+#[test]
+fn temp_file_of_a_gzip_file_is_gone_after_jlv_exits() {
+    let dir = TempDir::new().unwrap();
+    let file = gzip_log_file(&dir);
+    let temp = TempDir::new().unwrap();
+    let out = output_within(
+        without_terminal(jlv().arg(&file).env("TMPDIR", temp.path())),
+        Duration::from_secs(5),
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
 }

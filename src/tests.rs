@@ -12,6 +12,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::cli::Args;
 use crate::format::Preset;
+use crate::test_support;
 
 #[test]
 fn version_without_commit_is_printed_as_is() {
@@ -396,6 +397,56 @@ fn file_error_wins_over_valid_options() {
 }
 
 // --- robustness ---
+
+// --- gzip files: decompressed with the progress on stderr ---
+
+/// A gzip file `name` in `dir` holding `content`.
+fn gzip_file(dir: &TempDir, name: &str, content: &[u8]) -> PathBuf {
+    let path = dir.path().join(name);
+    fs::write(&path, test_support::gzip(content)).unwrap();
+    path
+}
+
+/// The progress line is drawn over itself and cleared once the file is decompressed,
+/// so the terminal is as before when the viewer starts.
+#[test]
+fn gzip_file_shows_its_decompression_progress_on_stderr() {
+    let dir = TempDir::new().unwrap();
+    let file = gzip_file(&dir, "app.log.gz", LOG_LINE.as_bytes());
+    let out = jlv(&[&file]);
+    assert_eq!(
+        out.stderr,
+        format!("\rjlv: {}: decompressing 100%\r\x1b[2K", file.display())
+    );
+}
+
+/// Each percentage is shown once, as the compressed bytes are read.
+#[test]
+fn decompression_progress_rises_to_100_percent() {
+    let dir = TempDir::new().unwrap();
+    let content = LOG_LINE.repeat(20_000);
+    let file = gzip_file(&dir, "big.log.gz", content.as_bytes());
+    let out = jlv(&[&file]);
+    let shown = out
+        .stderr
+        .strip_suffix("\r\x1b[2K")
+        .unwrap_or_else(|| panic!("not cleared: {:?}", out.stderr));
+    let prefix = format!("jlv: {}: decompressing ", file.display());
+    let mut lines = shown.split('\r');
+    assert_eq!(lines.next(), Some(""), "{shown:?}");
+    let percents: Vec<u64> = lines
+        .map(|line| {
+            let percent = line.strip_prefix(&prefix).and_then(|p| p.strip_suffix('%'));
+            percent
+                .unwrap_or_else(|| panic!("{line:?}"))
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(percents.len() > 1, "{percents:?}");
+    assert!(percents.is_sorted_by(|a, b| a < b), "{percents:?}");
+    assert_eq!(percents.last(), Some(&100));
+}
 
 fn arg_token() -> impl Strategy<Value = String> {
     prop_oneof![

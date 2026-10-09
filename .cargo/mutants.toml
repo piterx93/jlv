@@ -26,4 +26,10 @@ exclude_re = [
     'src/follow/watcher\.rs:\d+:\d+: replace settle -> bool with true$',
     # Reading a regular file isn't interrupted by signals, so no test can make it so.
     'src/follow/watcher\.rs:\d+:\d+: replace match guard err\.kind\(\) == io::ErrorKind::Interrupted with false in snapshot$',
+    # The same goes for decompressing a regular file.
+    'src/source/gzip\.rs:\d+:\d+: replace match guard err\.kind\(\) == io::ErrorKind::Interrupted with false in decompress$',
+    # flate2 reports damaged data as UnexpectedEof, InvalidInput or InvalidData; any
+    # other error would have to come from reading a regular file, which no test can make fail.
+    'src/source/gzip\.rs:\d+:\d+: replace is_damage -> bool with true$',
+    'src/source/gzip\.rs:\d+:\d+: replace match guard is_damage\(&err\) with true in decompress$',
 ]

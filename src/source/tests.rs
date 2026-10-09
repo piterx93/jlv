@@ -1,7 +1,11 @@
 use std::fs;
+use std::io::Write;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use jiff::Timestamp;
 
 use proptest::prelude::*;
@@ -453,5 +457,207 @@ proptest! {
                 "kept {} chars", kept.chars().count()
             );
         }
+    }
+}
+
+// --- gzip ---
+
+fn gzip_at(level: Compression, bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), level);
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    gzip_at(Compression::fast(), bytes)
+}
+
+/// `n` lines of log text, each a little different.
+fn log_text(n: usize) -> Vec<u8> {
+    (0..n)
+        .map(|i| {
+            format!(
+                "12:00:{:02}.{i:03} [main] INFO  com.example.App -- request {i}\n",
+                i % 60
+            )
+        })
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// Opens `path` with `temp` as the temp dir, ignoring the progress.
+fn open_with_temp(path: &Path, temp: &TempDir) -> Source {
+    open_in(path, temp.path(), |_| {}).unwrap()
+}
+
+fn is_empty_dir(dir: &TempDir) -> bool {
+    fs::read_dir(dir.path()).unwrap().next().is_none()
+}
+
+#[test]
+fn gzip_content_is_detected_without_the_extension() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &gzip(&log_text(3)));
+    assert_eq!(open_with_temp(&path, &dir).origin(), Origin::Gzip);
+}
+
+#[test]
+fn plain_file_named_gz_opens_as_plain() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("app.log.gz");
+    fs::write(&path, log_text(3)).unwrap();
+    let source = open_with_temp(&path, &dir);
+    assert_eq!(source.origin(), Origin::Plain);
+    assert_eq!(source.bytes(), log_text(3));
+}
+
+#[test]
+fn members_of_a_multi_member_gzip_follow_each_other() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &[gzip(b"first\n"), gzip(b"second\n")].concat());
+    let source = open_with_temp(&path, &dir);
+    assert_eq!(source.bytes(), b"first\nsecond\n");
+    assert_eq!(source.origin(), Origin::Gzip);
+}
+
+#[test]
+fn gzip_of_nothing_opens_to_no_bytes() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &gzip(b""));
+    let source = open_with_temp(&path, &dir);
+    assert_eq!(source.bytes(), b"");
+    assert_eq!(source.origin(), Origin::Gzip);
+}
+
+#[test]
+fn truncated_gzip_keeps_what_was_decompressed() {
+    let dir = TempDir::new().unwrap();
+    let text = log_text(200);
+    let compressed = gzip(&text);
+    let path = file_with(&dir, &compressed[..compressed.len() - 20]);
+    let source = open_with_temp(&path, &dir);
+    assert_eq!(source.origin(), Origin::TruncatedGzip);
+    assert!(!source.bytes().is_empty());
+    assert!(text.starts_with(source.bytes()));
+}
+
+/// The checksum is only checked at the end, after all the content came out.
+#[test]
+fn gzip_with_a_wrong_checksum_keeps_its_content_and_counts_as_truncated() {
+    let dir = TempDir::new().unwrap();
+    let mut compressed = gzip(&log_text(3));
+    // the trailer is the CRC-32 of the content, then its length, 4 bytes each
+    let crc = compressed.len() - 8;
+    compressed[crc] ^= 0xff;
+    let path = file_with(&dir, &compressed);
+    let source = open_with_temp(&path, &dir);
+    assert_eq!(source.origin(), Origin::TruncatedGzip);
+    assert_eq!(source.bytes(), log_text(3));
+}
+
+/// A time-only log in a gzip file is dated from when the gzip file was written, not
+/// from when it was decompressed.
+#[test]
+fn gzip_source_has_the_modification_time_of_the_compressed_file() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &gzip(&log_text(3)));
+    set_mtime(&path, "2026-10-06T21:15:30Z");
+    assert_eq!(
+        open_with_temp(&path, &dir).modified(),
+        Some("2026-10-06T21:15:30Z".parse().unwrap())
+    );
+}
+
+/// Stored without compression, the file is as big as its content, big enough to be
+/// read in several steps.
+#[test]
+fn progress_counts_the_compressed_bytes_read_up_to_the_whole_file() {
+    let dir = TempDir::new().unwrap();
+    let compressed = gzip_at(Compression::none(), &log_text(16_000));
+    let path = file_with(&dir, &compressed);
+    let mut reports = Vec::new();
+    open_in(&path, dir.path(), |read| reports.push(read)).unwrap();
+    let whole = compressed.len() as u64;
+    assert!(
+        reports.iter().any(|&read| 0 < read && read < whole),
+        "nothing between 0 and {whole}: {reports:?}"
+    );
+    assert!(reports.is_sorted(), "{reports:?}");
+    assert_eq!(reports.last(), Some(&whole));
+}
+
+#[test]
+fn temp_file_is_removed_when_the_source_is_dropped() {
+    let dir = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let path = file_with(&dir, &gzip(&log_text(3)));
+    drop(open_with_temp(&path, &temp));
+    assert!(is_empty_dir(&temp));
+}
+
+#[test]
+fn temp_file_is_removed_when_a_panic_unwinds_through_decompression() {
+    let dir = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let compressed = gzip(&log_text(3));
+    let path = file_with(&dir, &compressed);
+    let whole = compressed.len() as u64;
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        open_in(&path, temp.path(), |read| {
+            if read == whole {
+                panic!("interrupted after reading the whole file");
+            }
+        })
+    }));
+    let payload = result.expect_err("progress never reached the whole file");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"interrupted after reading the whole file")
+    );
+    assert!(is_empty_dir(&temp));
+}
+
+#[test]
+fn unusable_temp_dir_is_an_error_naming_it() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &gzip(&log_text(3)));
+    let missing = dir.path().join("missing");
+    let err = open_in(&path, &missing, |_| {}).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "cannot decompress into {}: no such file or directory",
+            missing.display()
+        )
+    );
+}
+
+#[test]
+fn plain_file_opens_without_the_temp_dir() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &log_text(3));
+    let source = open_in(&path, &dir.path().join("missing"), |_| {}).unwrap();
+    assert_eq!(source.bytes(), log_text(3));
+}
+
+proptest! {
+    #[test]
+    fn any_gzipped_content_opens_as_that_content(
+        content in prop::collection::vec(any::<u8>(), 0..2048)
+    ) {
+        let dir = TempDir::new().unwrap();
+        let path = file_with(&dir, &gzip(&content));
+        let source = open_with_temp(&path, &dir);
+        prop_assert_eq!(source.bytes(), content.as_slice());
+    }
+
+    #[test]
+    fn anything_after_the_gzip_magic_opens_without_an_error(
+        rest in prop::collection::vec(any::<u8>(), 0..512)
+    ) {
+        let dir = TempDir::new().unwrap();
+        let path = file_with(&dir, &[b"\x1f\x8b".as_slice(), &rest].concat());
+        let opened = open_in(&path, dir.path(), |_| ());
+        prop_assert!(opened.is_ok(), "{:?}", opened.err());
     }
 }

@@ -2,16 +2,18 @@
 //! and turning a line into text that is safe to show.
 
 use std::borrow::Cow;
+use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
 use memchr::memchr;
 use memmap2::Mmap;
 
+mod gzip;
 #[cfg(test)]
 mod tests;
 
@@ -20,6 +22,12 @@ pub enum OpenError {
     Io(io::Error),
     Directory,
     NotRegularFile,
+    /// The temporary file for a decompressed gzip file can't be created or written
+    /// in `dir`.
+    TempFile {
+        dir: PathBuf,
+        err: io::Error,
+    },
 }
 
 impl fmt::Display for OpenError {
@@ -28,6 +36,14 @@ impl fmt::Display for OpenError {
             Self::Io(err) => f.write_str(&describe(err)),
             Self::Directory => f.write_str("is a directory"),
             Self::NotRegularFile => f.write_str("not a regular file"),
+            Self::TempFile { dir, err } => {
+                write!(
+                    f,
+                    "cannot decompress into {}: {}",
+                    dir.display(),
+                    describe(err)
+                )
+            }
         }
     }
 }
@@ -40,7 +56,31 @@ impl From<io::Error> for OpenError {
 
 /// Opens a log file, following symlinks, and maps it. The type is checked before
 /// opening because opening a FIFO for reading blocks until something writes to it.
+///
+/// A gzip file is decompressed into the system's temp dir first, as [`open_in`]
+/// does.
 pub fn open(path: &Path) -> Result<Source, OpenError> {
+    open_in(path, &env::temp_dir(), |_| ())
+}
+
+/// Opens a log file like [`open`]. A file that starts with the gzip magic bytes
+/// `1f 8b`, whatever its name, is decompressed once into a temporary file in
+/// `temp_dir`, and that file is mapped. The temporary file lives as long as the
+/// source and is removed when it is dropped, also when a panic unwinds, during
+/// decompression as well.
+///
+/// While decompressing, `progress` is told again and again how many bytes of the
+/// compressed file have been read so far, last of all its whole size.
+///
+/// A truncated or corrupt gzip file is no error: the source holds what could be
+/// decompressed and is marked [`Origin::TruncatedGzip`]. A temporary file that can't
+/// be created or written is [`OpenError::TempFile`]. Plain files never touch
+/// `temp_dir`.
+pub fn open_in(
+    path: &Path,
+    temp_dir: &Path,
+    progress: impl FnMut(u64),
+) -> Result<Source, OpenError> {
     let metadata = fs::metadata(path)?;
     if metadata.is_dir() {
         return Err(OpenError::Directory);
@@ -48,7 +88,27 @@ pub fn open(path: &Path) -> Result<Source, OpenError> {
     if !metadata.is_file() {
         return Err(OpenError::NotRegularFile);
     }
-    Ok(Source::map(File::open(path)?)?)
+    let mut file = File::open(path)?;
+    if !gzip::is_gzip(&mut file)? {
+        return Ok(Source::map(file)?);
+    }
+    let metadata = file.metadata()?;
+    let (temp, origin) = gzip::decompress(file, metadata.len(), temp_dir, progress)?;
+    Ok(Source {
+        origin,
+        modified: modified(&metadata),
+        ..Source::map(temp)?
+    })
+}
+
+/// What the bytes of a [`Source`] were read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Plain,
+    Gzip,
+    /// A gzip file that ended early or was corrupt: the source holds what could be
+    /// decompressed.
+    TruncatedGzip,
 }
 
 /// A log file mapped into memory.
@@ -57,20 +117,19 @@ pub struct Source {
     // `None` for an empty file: a mapping of zero bytes is an error on Linux.
     map: Option<Mmap>,
     modified: Option<Timestamp>,
+    origin: Origin,
 }
 
 impl Source {
     /// Maps the whole file. A zero-length file gives an empty source.
     pub fn map(file: File) -> io::Result<Self> {
         let metadata = file.metadata()?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| Timestamp::try_from(modified).ok());
+        let modified = modified(&metadata);
         if metadata.len() == 0 {
             return Ok(Self {
                 map: None,
                 modified,
+                origin: Origin::Plain,
             });
         }
         // SAFETY: the mapping is only sound while nobody changes the file, and nothing
@@ -83,6 +142,7 @@ impl Source {
         Ok(Self {
             map: Some(map),
             modified,
+            origin: Origin::Plain,
         })
     }
 
@@ -96,6 +156,19 @@ impl Source {
     pub fn modified(&self) -> Option<Timestamp> {
         self.modified
     }
+
+    /// Whether the file was plain or gzip. The bytes are the decompressed content of
+    /// a gzip file, and its modification time is that of the compressed file.
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+}
+
+fn modified(metadata: &fs::Metadata) -> Option<Timestamp> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| Timestamp::try_from(modified).ok())
 }
 
 /// The same as [`Source::bytes`].

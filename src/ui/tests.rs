@@ -1040,6 +1040,39 @@ fn missing_file_shows_waiting_for_file_in_the_header() {
     assert_snapshot!(out, @"jlv ─ app.log ─ 153 B ─ Raw ─ WAITING FOR FILE");
 }
 
+// --- gzip files ---
+
+/// A viewer over the gzip file `gzip` on an 80×24 screen, opened at the end, with the
+/// whole file indexed.
+fn gzipped(gzip: &[u8]) -> App {
+    let mut app = test_support::gzip_app(gzip);
+    app.resize(22);
+    wait_for_index(&mut app);
+    app
+}
+
+/// Going to the bottom doesn't follow a gzip file, so the header doesn't say so.
+#[test]
+fn gzip_file_is_read_only_in_the_header_also_at_the_bottom() {
+    let mut app = gzipped(&test_support::gzip(numbered_log(3).as_bytes()));
+    let out = lines_after(&mut app, &[char_key('G')], 0..=3);
+    assert_snapshot!(out, @r"
+    jlv ─ app.log.gz ─ 153 B ─ Raw ─ READ-ONLY
+     12:00:00.001 [main] INFO  com.example.App - step 1
+     12:00:00.002 [main] INFO  com.example.App - step 2
+    ▶12:00:00.003 [main] INFO  com.example.App - step 3
+    ");
+}
+
+#[test]
+fn truncated_gzip_file_has_a_notice_in_the_header() {
+    let gzip = test_support::gzip(numbered_log(3).as_bytes());
+    // without the trailer: the CRC-32 and the length, 4 bytes each
+    let mut app = gzipped(&gzip[..gzip.len() - 8]);
+    let out = lines_after(&mut app, &[], 0..=0);
+    assert_snapshot!(out, @"jlv ─ app.log.gz ─ 153 B ─ Raw ─ READ-ONLY ─ truncated .gz");
+}
+
 // --- terminal size ---
 
 #[test]
