@@ -12,4 +12,15 @@ exclude_re = [
     # Stepping from the cached line mark or from the entry's start finds the same line;
     # the comparison only picks the shorter walk.
     'src/app/mod\.rs:\d+:\d+: replace > with (==|<|>=) in App::entry_line$',
+    # The settling time only decides how many looks a burst of writes costs; what is
+    # read stays the same, and counting looks would make a test depend on timing.
+    'src/follow/watcher\.rs:\d+:\d+: replace \+ with - in settle$',
+    # notify resolves a relative path against the working directory, so watching the
+    # empty parent of a bare file name watches `.` just the same.
+    'src/follow/watcher\.rs:\d+:\d+: replace match guard !parent\.as_os_str\(\)\.is_empty\(\) with true in watch_parent$',
+    # Missing a stop while settling only matters when the watcher is dropped within
+    # the few milliseconds after a wakeup; a test for that would race.
+    'src/follow/watcher\.rs:\d+:\d+: replace settle -> bool with true$',
+    # Reading a regular file isn't interrupted by signals, so no test can make it so.
+    'src/follow/watcher\.rs:\d+:\d+: replace match guard err\.kind\(\) == io::ErrorKind::Interrupted with false in snapshot$',
 ]

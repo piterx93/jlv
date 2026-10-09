@@ -15,6 +15,7 @@ clap = { version = "4.5", features = ["derive", "wrap_help"] }
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 memchr = "2.8"
 memmap2 = "0.9"
+notify = "8.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 regex = "1.11"
 unicode-width = "0.2"
