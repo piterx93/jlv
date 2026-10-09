@@ -13,6 +13,8 @@ enum Op {
     Toggle(usize),
     FoldAll,
     UnfoldAll,
+    /// Keeps this many entries.
+    Truncate(usize),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -23,6 +25,7 @@ fn op() -> impl Strategy<Value = Op> {
         6 => (0..8usize).prop_map(Op::Toggle),
         1 => Just(Op::FoldAll),
         1 => Just(Op::UnfoldAll),
+        1 => (0..8usize).prop_map(Op::Truncate),
     ]
 }
 
@@ -61,6 +64,10 @@ impl Model {
                 } else {
                     folds.fold_all();
                 }
+            }
+            Op::Truncate(entries) => {
+                self.entries.truncate(entries);
+                folds.truncate(entries);
             }
         }
     }

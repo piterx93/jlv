@@ -7,7 +7,7 @@
 //! Any chunking gives the same records as one chunk over the whole file. [`Indexer`]
 //! runs this on threads and hands the records over as they are found. [`tail`] reads
 //! the last entries from the end of the file, for showing them before the index is
-//! complete.
+//! complete. [`append`] keeps the records up to date as the file grows.
 
 use std::mem;
 use std::ops::Range;
@@ -23,9 +23,11 @@ use crate::format::{
 };
 use crate::source;
 
+mod append;
 mod indexer;
 mod tail;
 
+pub use append::append;
 pub use indexer::{Indexer, Progress};
 pub use tail::tail;
 
@@ -156,27 +158,13 @@ impl Chunk {
 
     /// Appends `next`, the chunk of the range right after this chunk's.
     pub fn join(&mut self, next: Chunk) {
-        let Some(last) = self.records.last_mut() else {
+        if self.records.is_empty() {
             *self = next;
             return;
-        };
-        if next.leads_in
-            && let Some(lead) = next.records.first()
-        {
-            last.end = lead.end;
-            last.has_exception |= lead.has_exception;
         }
-        let previous = last.timestamp;
-        let joined = self.records.len();
         let continued = usize::from(next.leads_in);
-        self.records.extend(next.records.iter().skip(continued));
         self.times.extend(next.times.iter().skip(continued));
-        carry_forward(
-            self.records[joined..]
-                .iter_mut()
-                .map(|record| &mut record.timestamp),
-            previous,
-        );
+        attach(&mut self.records, &next.records, next.leads_in);
     }
 
     /// The records of every entry in the chunk, in file order, once it covers the
@@ -211,6 +199,29 @@ impl Chunk {
             last.has_exception = has_exception;
         }
     }
+}
+
+/// Appends `next`, the records that follow `records` in the file, and carries the
+/// last timestamp of `records` forward into them. With `leads_in`, the first of
+/// `next` is no entry but the end of the last of `records`, if there is one.
+fn attach(records: &mut Vec<Record>, mut next: &[Record], leads_in: bool) {
+    if leads_in
+        && let Some(last) = records.last_mut()
+        && let Some((lead, rest)) = next.split_first()
+    {
+        last.end = lead.end;
+        last.has_exception |= lead.has_exception;
+        next = rest;
+    }
+    let previous = records.last().map_or(NO_TIMESTAMP, |last| last.timestamp);
+    let joined = records.len();
+    records.extend_from_slice(next);
+    carry_forward(
+        records[joined..]
+            .iter_mut()
+            .map(|record| &mut record.timestamp),
+        previous,
+    );
 }
 
 /// Where the first line that starts in `range` starts, `range.end` if none does.

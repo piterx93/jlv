@@ -635,6 +635,168 @@ proptest! {
     }
 }
 
+// --- appends ---
+
+/// The index of `bytes` built as the file grows: its first `cuts[0]` bytes indexed
+/// at once, then the file up to each later cut and finally the whole of it appended.
+/// `cuts` are in order.
+fn grown(bytes: &[u8], cuts: &[usize], settings: &Settings) -> Vec<Record> {
+    let (&first, later) = cuts.split_first().unwrap_or((&bytes.len(), &[]));
+    let mut records = index(&bytes[..first], settings);
+    for &end in later.iter().chain([&bytes.len()]) {
+        append(&mut records, &bytes[..end], settings);
+    }
+    records
+}
+
+#[test]
+fn appending_byte_by_byte_gives_the_index_of_the_file_so_far_in_every_preset() {
+    let bytes = mixed_log();
+    for preset in Preset::ALL {
+        let settings = settings(preset);
+        let mut records = Vec::new();
+        for end in 1..=bytes.len() {
+            append(&mut records, &bytes[..end], &settings);
+            assert_eq!(
+                records,
+                index(&bytes[..end], &settings),
+                "{preset:?}, {end} bytes"
+            );
+        }
+    }
+}
+
+#[test]
+fn appending_only_continuation_lines_extends_the_last_entry() {
+    let settings = settings(Preset::Logback);
+    let mut records = index(&log(&[STARTED, FAILED]), &settings);
+    append(
+        &mut records,
+        &log(&[STARTED, FAILED, EXCEPTION, FRAME]),
+        &settings,
+    );
+    assert_eq!(
+        spans(&records),
+        laid_out(0, &[&[STARTED], &[FAILED, EXCEPTION, FRAME]])
+    );
+    assert!(records[1].has_exception());
+}
+
+/// Before midnight, after it, a late line from before it and after it again: dated
+/// forward from the first entry, which keeps the date the anchor gave it.
+#[test]
+fn time_only_entries_appended_across_midnight_are_dated_forward() {
+    let bytes = log(&[
+        BEFORE_MIDNIGHT,
+        AFTER_MIDNIGHT,
+        BEFORE_MIDNIGHT,
+        AFTER_MIDNIGHT,
+    ]);
+    let settings = settings(Preset::LogbackBasic);
+    let start = BEFORE_MIDNIGHT.len() + 3;
+    let records = grown(&bytes, &(start..bytes.len()).collect::<Vec<_>>(), &settings);
+    let timestamps: Vec<_> = records.iter().map(Record::timestamp).collect();
+    assert_eq!(
+        timestamps,
+        [
+            Some(instant("2026-10-08T23:59:59Z")),
+            Some(instant("2026-10-09T00:00:01Z")),
+            Some(instant("2026-10-08T23:59:59Z")),
+            Some(instant("2026-10-09T00:00:01Z")),
+        ]
+    );
+}
+
+#[test]
+fn time_only_entries_appended_are_dated_forward_in_the_zone() {
+    let early = "01:00:00.000 [main] INFO  com.example.App -- early\n";
+    let late = "21:30:00.000 [main] INFO  com.example.App -- late\n";
+    let warsaw = Settings {
+        zone: zone("Europe/Warsaw"),
+        ..settings(Preset::LogbackBasic)
+    };
+    let records = grown(&log(&[early, late]), &[early.len()], &warsaw);
+    assert_eq!(
+        records[1].timestamp(),
+        Some(instant("2026-10-08T19:30:00Z"))
+    );
+}
+
+#[test]
+fn time_only_entries_appended_after_no_time_are_dated_back_from_the_anchor() {
+    let bytes = log(&[WRAPPED, BEFORE_MIDNIGHT, AFTER_MIDNIGHT]);
+    let settings = settings(Preset::LogbackBasic);
+    assert_eq!(
+        grown(&bytes, &[WRAPPED.len()], &settings),
+        index(&bytes, &settings)
+    );
+}
+
+/// A log of `Logback` and `LogbackBasic` entries, each the other's continuation
+/// lines, with stack traces, wrapped and blank lines, an impossible timestamp, LF and
+/// CRLF endings and maybe no final line ending. The times of day lie between 10:00
+/// and 12:00, so dating them crosses no midnight.
+fn growing_log() -> impl Strategy<Value = Vec<u8>> {
+    let time = (10..12u8, 0..60u8, 0..60u8, 0..1000u16)
+        .prop_map(|(h, m, s, ms)| format!("{h:02}:{m:02}:{s:02}.{ms:03}"));
+    let line = prop_oneof![
+        2 => time
+            .clone()
+            .prop_map(|time| format!("2026-10-07 {time} [main] ERROR com.example.App - m")),
+        2 => time.prop_map(|time| format!("{time} [main] INFO  com.example.App -- m")),
+        1 => Just(EXCEPTION.trim_end().to_owned()),
+        1 => Just(FRAME.trim_end().to_owned()),
+        1 => Just(WRAPPED.trim_end().to_owned()),
+        1 => Just(String::new()),
+        1 => Just(ODD.trim_end().to_owned()),
+    ];
+    let ending = prop_oneof![Just("\n"), Just("\r\n")];
+    (prop::collection::vec((line, ending), 0..30), any::<bool>()).prop_map(|(lines, terminated)| {
+        let mut text: String = lines.iter().map(|(line, end)| line.clone() + end).collect();
+        if !terminated {
+            text.truncate(text.trim_end_matches(['\r', '\n']).len());
+        }
+        text.into_bytes()
+    })
+}
+
+/// `growing_log` and where to cut it, into pieces of at most 16 bytes, down to one.
+fn growing_log_and_cuts() -> impl Strategy<Value = (Vec<u8>, Vec<usize>)> {
+    growing_log().prop_flat_map(|bytes| {
+        let len = bytes.len();
+        let cuts = prop::collection::vec(1..=16usize, 0..200).prop_map(move |sizes| {
+            sizes
+                .iter()
+                .scan(0, |end, size| {
+                    *end += size;
+                    Some(*end)
+                })
+                .take_while(|&end| end < len)
+                .collect()
+        });
+        (Just(bytes), cuts)
+    })
+}
+
+proptest! {
+    #[test]
+    fn appending_in_any_pieces_gives_the_index_of_the_whole_file(
+        (bytes, cuts) in growing_log_and_cuts(),
+        preset in prop::sample::select(vec![Preset::Logback, Preset::LogbackBasic]),
+    ) {
+        let settings = settings(preset);
+        prop_assert_eq!(grown(&bytes, &cuts, &settings), index(&bytes, &settings));
+    }
+
+    #[test]
+    fn appending_never_panics_on_arbitrary_bytes(
+        (bytes, cuts) in bytes_and_cuts(),
+        preset in any_preset(),
+    ) {
+        grown(&bytes, &cuts, &settings(preset));
+    }
+}
+
 // --- progress ---
 
 fn progress(indexed: u64, total: u64) -> Progress {

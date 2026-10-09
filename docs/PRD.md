@@ -151,7 +151,7 @@ Colors are configurable (§11).
 ### 7.1 Layout
 
 ```
-┌ jlv ─ server.log ─ 1.8 GB ─ WildFly ───────── FOLLOW ● +124 ── E:37 W:212 ──┐
+┌ jlv ─ server.log ─ 1.8 GB ─ WildFly ────────────── FOLLOW ● ── E:37 W:212 ──┐
 │ Filters: level[W E F]  class[com.myco.* !org.hibernate]  time[last 10m]      │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ ▁▁▂▁▁▃▁▁▁▁▂▁▁▁▁▁▁▇▅▁▁▁▁▁▂▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁ (errors+warns per minute)            │
@@ -181,6 +181,7 @@ Colors are configurable (§11).
 - Timestamp format in the table is configurable (default `yyyy-MM-dd HH:mm:ss.SSS`, or `HH:mm:ss.SSS` when narrow).
 - Class names are abbreviated Logback-style to fit the column (`com.mycompany.pay.PayClient` → `c.m.pay.PayClient` → `c.m.p.PayClient`). The full name is shown in Details.
 - Long messages are truncated by default with horizontal scroll (`←/→`); a toggle switches to wrapping.
+- A gutter left of the table shows file line numbers in a dim colour (first line of each entry, every line of an unfolded one). Shown by default, `#` hides it.
 
 ### 7.3 Mouse
 
@@ -189,20 +190,20 @@ Wheel scrolls; click selects a row; double-click toggles fold; click on a histog
 ## 8. Follow mode
 
 - Starts in follow mode at end of file (override `--no-follow`, which opens at the top).
-- Behaves like `less +F`. Scrolling up **pauses** follow, and the header shows `PAUSED +N new`. `F` or `End` resumes follow and jumps to the bottom.
+- Behaves like `less +F`. Any move away from the bottom **pauses** follow. The header shows `FOLLOW ●` while following and `PAUSED +N new` once entries arrive during a pause (N counts entries, not lines). `F` toggles follow; `End` and `G` jump to the bottom and resume.
 - File watching uses `notify` (inotify/kqueue), with a polling fallback every 250 ms for NFS and similar filesystems.
 - **Rotation handling** (`tail -F` semantics):
-  - inode change (rename+create): finish reading the old file, then reopen the path.
-  - size shrink (copytruncate): reset to start of the new content and insert a visual separator `── file truncated ──`.
+  - inode change (rename+create, or delete and recreate): finish reading the old file, then reopen the path and show the new file from its start.
+  - size shrink (copytruncate): drop the rows of the old content, whose bytes are gone, and show `── file truncated ──` as the first row, followed by the new content.
   - if the file disappears, wait and keep retrying; show `WAITING FOR FILE` in the header.
 - Active filters apply live to new entries.
-- `.gz` files are read-only (no follow).
+- `.gz` files (detected by the gzip magic bytes, not the name) are read-only: never followed, `READ-ONLY` in the header. A damaged file shows what could be decompressed, with `truncated .gz` in the header. Progress is printed on stderr while decompressing, before the TUI starts.
 
 ## 9. Navigation, search & filter
 
 ### 9.1 Navigation
 
-`j/k`, `↑/↓` move by line; `PgUp/PgDn` move by page, `Ctrl-u/d` by half a page; `g/G` and `Home/End` go to the top or bottom; `:<n>` goes to entry n; `t` jumps to a time (`t 12:30`).
+`j/k`, `↑/↓` move by line; `PgUp/PgDn` move by page, `Ctrl-u/d` by half a page; `g/G` and `Home/End` go to the top or bottom; `:<n>` goes to the entry containing file line n (the numbers in the gutter); `t` jumps to a time (`t 12:30`).
 
 ### 9.2 Search (highlight & jump)
 
@@ -257,6 +258,7 @@ jlv [OPTIONS] <FILE>
 timestamp_format = "%Y-%m-%d %H:%M:%S%.3f"
 show_thread = false
 show_histogram = true
+show_line_numbers = true
 mouse = true
 wrap = false
 
@@ -267,6 +269,7 @@ info  = "green"
 warn  = "yellow"
 error = "red"
 fatal = { fg = "white", bg = "red", bold = true }
+line_number = "darkgray"
 
 [follow]
 poll_interval_ms = 250
@@ -302,6 +305,7 @@ default_class_excludes = []   # e.g. ["org.hibernate.SQL"]
 | `y` | Copy entry |
 | `F8` / `e` | Export filtered |
 | `T` | Toggle thread column |
+| `#` | Toggle line numbers |
 | `H` | Toggle histogram |
 | `w` | Toggle wrap |
 | `← →` | Horizontal scroll |
@@ -362,7 +366,7 @@ default_class_excludes = []   # e.g. ["org.hibernate.SQL"]
 | **M0** Skeleton | **First:** GHA pipeline per §5.1 (tests on every branch, `-dev` packages on `develop`, releases on `main`; merge blocking prepared but disabled). Then: quality gates (§14.1), CLI parsing, raw viewer with scroll |
 | **M1** Parsing | Presets + auto-detection, columns, level colors, multi-line folding, class abbreviation, background index |
 | **M2** Follow | notify + polling, rotation & truncation handling, `less +F` pause/resume, `.gz` read |
-| **M3** Search & filter | Search (plain/regex/icase), level/class/time/text filters, live filtering, filter bar |
+| **M3** Search & filter | Search (plain/regex/icase), level/class/time/text filters, live filtering, filter bar, line numbers |
 | **M4** UX | Details panel, exception jumping, bookmarks, export, clipboard (OSC 52), histogram, mouse, help overlay |
 | **M5** Release 1.0 | Config file, key remapping, docs/README with GIFs, LICENSE files, enable branch protection, make the repo public, Homebrew tap |
 

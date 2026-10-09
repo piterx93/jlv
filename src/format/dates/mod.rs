@@ -119,6 +119,35 @@ impl DatesBackward {
     }
 }
 
+/// Dates the times of day appended to a log forward from an entry already dated, one
+/// entry at a time, so that the dates given before never shift. Entries without a
+/// time of day are not fed to it.
+#[derive(Debug, Clone)]
+pub(crate) struct DatesForward {
+    earlier: DateTime,
+}
+
+impl DatesForward {
+    /// Dating starts after the entry at `earlier`, local date and time.
+    pub(crate) fn new(earlier: DateTime) -> Self {
+        DatesForward { earlier }
+    }
+
+    /// The date of the entry at `time`, which comes just after the one fed last (for
+    /// the first call: the entry dating started after), by [`midnights_between`].
+    fn date(&mut self, time: Time) -> Date {
+        let midnights = midnights_between(self.earlier.time(), time);
+        let date = back_by(self.earlier.date(), -midnights);
+        self.earlier = date.to_datetime(time);
+        date
+    }
+
+    /// The instant of the entry at `time`, as [`DatesBackward::timestamp`] gives it.
+    pub(crate) fn timestamp(&mut self, time: Time, zone: &TimeZone) -> Option<Timestamp> {
+        local_to_instant(self.date(time).to_datetime(time), zone)
+    }
+}
+
 /// `date` moved back by `midnights` as [`midnights_between`] counts them, which is
 /// at most one either way. Where that would leave jiff's range it stays: a log that
 /// far out has no right date anyway.
