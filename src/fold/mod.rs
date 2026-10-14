@@ -48,6 +48,11 @@ impl Folds {
         self.exception_ends.truncate(kept);
     }
 
+    /// How many entries there are.
+    pub fn entries(&self) -> usize {
+        self.line_ends.len()
+    }
+
     /// How many rows the entries take: one per entry, plus the continuation lines of
     /// the unfolded ones.
     pub fn row_count(&self) -> usize {
@@ -126,6 +131,16 @@ impl Folds {
         }
     }
 
+    /// No entries, in the mode of `self`: the entries pushed fold as they would here.
+    pub fn empty_like(&self) -> Folds {
+        Folds {
+            line_ends: Vec::new(),
+            unfolded: self.unfolded,
+            exceptions: Vec::new(),
+            exception_ends: Vec::new(),
+        }
+    }
+
     /// Folds every entry, and the entries pushed from now on.
     pub fn fold_all(&mut self) {
         self.set_mode(false);
@@ -148,7 +163,8 @@ impl Folds {
         entry.checked_sub(1).map_or(0, |last| self.line_ends[last])
     }
 
-    fn continuation_lines(&self, entry: usize) -> usize {
+    /// The lines of `entry` after its first, folded or not.
+    pub fn continuation_lines(&self, entry: usize) -> usize {
         self.lines_before(entry + 1) - self.lines_before(entry)
     }
 }

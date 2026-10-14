@@ -17,7 +17,8 @@ mod common;
 
 use common::{fixture, fixtures, lines};
 
-/// What the index says about an entry.
+/// What the index says about an entry but its line number, which the tail doesn't
+/// know.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Indexed {
     bytes: Range<u64>,
@@ -384,7 +385,8 @@ proptest! {
     ) {
         let records = index(&bytes, &settings);
         let end = &records[records.len().saturating_sub(count)..];
-        prop_assert_eq!(tail(&bytes, count, window, bytes.len(), &settings), Some(end.to_vec()));
+        let tail = tail(&bytes, count, window, bytes.len(), &settings);
+        prop_assert_eq!(tail.as_deref().map(indexed), Some(indexed(end)));
     }
 
     #[test]
@@ -398,8 +400,20 @@ proptest! {
         let records = index(&bytes, &settings);
         let end = &records[records.len().saturating_sub(count)..];
         match tail(&bytes, count, window, limit, &settings) {
-            Some(tail) => prop_assert_eq!(tail, end),
+            Some(tail) => prop_assert_eq!(indexed(&tail), indexed(end)),
             None => prop_assert!(limit < bytes.len(), "None within the whole file"),
+        }
+    }
+
+    #[test]
+    fn entries_are_numbered_by_the_line_they_start_on(
+        bytes in any_log(),
+        settings in any_settings(),
+    ) {
+        for record in index(&bytes, &settings) {
+            let before = &bytes[..record.bytes().start as usize];
+            let newlines = before.iter().filter(|&&byte| byte == b'\n').count() as u64;
+            prop_assert_eq!(record.line(), Some(newlines + 1));
         }
     }
 
@@ -424,9 +438,17 @@ fn tail_reads_back_to_the_timestamp_its_first_entry_takes() {
     let settings = fixture_settings(Preset::Logback);
     let window = lines[1].len() + lines[2].len();
     assert_eq!(
-        tail(&bytes, 2, window, bytes.len(), &settings).unwrap(),
-        &index(&bytes, &settings)[1..]
+        indexed(&tail(&bytes, 2, window, bytes.len(), &settings).unwrap()),
+        indexed(&index(&bytes, &settings)[1..])
     );
+}
+
+/// The lines before the tail aren't read, so their count is unknown.
+#[test]
+fn tail_entries_have_no_line_numbers() {
+    let bytes = b"first\nsecond\nthird\n";
+    let records = tail(bytes, 1, 6, bytes.len(), &fixture_settings(Preset::Raw)).unwrap();
+    assert_eq!(records.iter().map(Record::line).collect::<Vec<_>>(), [None]);
 }
 
 /// Bytes from the end the tails of large files may read: blank lines this long take

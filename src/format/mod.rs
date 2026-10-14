@@ -34,6 +34,28 @@ pub enum Level {
 }
 
 impl Level {
+    /// Every level, from least to most severe.
+    pub const ALL: [Level; 6] = [
+        Level::Trace,
+        Level::Debug,
+        Level::Info,
+        Level::Warn,
+        Level::Error,
+        Level::Fatal,
+    ];
+
+    /// The level's name in capitals, as jlv shows it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Trace => "TRACE",
+            Level::Debug => "DEBUG",
+            Level::Info => "INFO",
+            Level::Warn => "WARN",
+            Level::Error => "ERROR",
+            Level::Fatal => "FATAL",
+        }
+    }
+
     /// Reads a level token as it appears in a log line, e.g. `INFO ` or `warning`.
     /// Surrounding spaces and tabs and letter case don't matter; `WARNING` means
     /// `Warn`. Anything else is `None`.

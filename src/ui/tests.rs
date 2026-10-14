@@ -13,17 +13,22 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, FileChange, action};
+use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::Preset;
+use crate::matcher::{self, Matcher};
 use crate::test_support::{
-    self, EXAMPLES, app, app_in, char_key, detected_app, following_app, key, named_app,
-    numbered_log, row, unindexed_app, wait_for_index,
+    self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
+    hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_filter,
+    wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
     terminal.draw(|frame| render(frame, app, theme)).unwrap();
 }
 
+/// `app` drawn at `width`×`height` without line numbers; the gutter's tests show them.
 fn drawn(app: &mut App, width: u16, height: u16, theme: Theme) -> Terminal<TestBackend> {
+    hide_line_numbers(app);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     draw(&mut terminal, app, theme);
     terminal
@@ -188,6 +193,426 @@ fn empty_file_shows_an_empty_body() {
 }
 
 #[test]
+fn no_matching_entries_shows_a_notice_in_place_of_the_rows() {
+    let mut app = app(numbered_log(3).as_bytes());
+    app.set_filters(Filters {
+        text: Some(Matcher::new("nothing", matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    });
+    wait_for_filter(&mut app);
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 153 B ─ Raw                                                     "
+    "Filters: text[nothing]                                                          "
+    "no entries match the current filters                                            "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn level_panel_shows_a_checkbox_per_level_over_the_rows() {
+    let keys = [
+        key(KeyCode::F(2)),
+        char_key('j'),
+        char_key('j'),
+        char_key('4'),
+    ];
+    assert_snapshot!(screen_after(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.e┌ Levels ──────┐p 8                             "
+    " 12:00:00.009 [main] INFO  com.e│  [x] 1 TRACE │p 9                             "
+    " 12:00:00.010 [main] INFO  com.e│  [x] 2 DEBUG │p 10                            "
+    " 12:00:00.011 [main] INFO  com.e│ ▶[x] 3 INFO  │p 11                            "
+    " 12:00:00.012 [main] INFO  com.e│  [ ] 4 WARN  │p 12                            "
+    " 12:00:00.013 [main] INFO  com.e│  [x] 5 ERROR │p 13                            "
+    " 12:00:00.014 [main] INFO  com.e│  [x] 6 FATAL │p 14                            "
+    " 12:00:00.015 [main] INFO  com.e└──────────────┘p 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel                             "
+    "#);
+}
+
+/// The 80×24 screen after pressing `keys` as the event loop hands them over
+/// ([`App::key`]), drawn after each.
+fn screen_after_pressing(app: &mut App, keys: &[KeyEvent]) -> String {
+    terminal_after_pressing(app, keys).backend().to_string()
+}
+
+/// The 80×24 terminal after pressing `keys` as [`screen_after_pressing`] does.
+fn terminal_after_pressing(app: &mut App, keys: &[KeyEvent]) -> Terminal<TestBackend> {
+    let mut terminal = drawn(app, 80, 24, Theme::Styled);
+    for &key in keys {
+        app.key(key);
+        draw(&mut terminal, app, Theme::Styled);
+    }
+    terminal
+}
+
+/// The keys that open the class panel and type `lines` into it, one per line.
+fn class_panel_keys(lines: &[&str]) -> Vec<KeyEvent> {
+    let mut keys = vec![key(KeyCode::F(6))];
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            keys.push(key(KeyCode::Down));
+        }
+        keys.extend(line.chars().map(char_key));
+    }
+    keys
+}
+
+#[test]
+fn class_panel_shows_one_rule_per_line_over_the_rows() {
+    let keys = class_panel_keys(&["com.myco.*", "!org.hibernate"]);
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [mai┌ Classes ─────────────────────────────────┐                  "
+    " 12:00:00.008 [mai│  com.myco.*                              │                  "
+    " 12:00:00.009 [mai│ ▶!org.hibernate                          │                  "
+    " 12:00:00.010 [mai│                                          │                  "
+    " 12:00:00.011 [mai│                                          │                  "
+    " 12:00:00.012 [mai│                                          │                  "
+    " 12:00:00.013 [mai│                                          │                  "
+    " 12:00:00.014 [mai│                                          │                  "
+    " 12:00:00.015 [mai│                                          │                  "
+    " 12:00:00.016 [mai└──────────────────────────────────────────┘                  "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel                       "
+    "#);
+}
+
+#[test]
+fn class_panel_error_replaces_the_key_hints_in_the_footer() {
+    // The second error is longer than the panel is wide.
+    for rule in ["!", "com.*.Order"] {
+        let mut keys = class_panel_keys(&["Order", rule]);
+        keys.push(key(KeyCode::Enter));
+        let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+        let error = Classes::parse(["Order", rule]).unwrap_err();
+        assert_eq!(row(&terminal, 23), error, "{rule}");
+        assert_eq!(
+            row(&terminal, 16),
+            format!(" 12:00:00.016 [mai└{}┘", "─".repeat(42)),
+            "{rule}"
+        );
+    }
+}
+
+/// The keys that open the time panel and type `spec` into it.
+fn time_panel_keys(spec: &str) -> Vec<KeyEvent> {
+    let mut keys = vec![key(KeyCode::F(5))];
+    keys.extend(spec.chars().map(char_key));
+    keys
+}
+
+#[test]
+fn time_panel_shows_the_spec_and_the_filter_it_makes_over_the_rows() {
+    let mut keys = time_panel_keys("10m");
+    keys.push(key(KeyCode::Tab));
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.example.App - step 8                             "
+    " 12:00:00.009 [main] INFO  com.example.App - step 9                             "
+    " 12:00:00.010 [main]┌ Time ────────────────────────────────┐                    "
+    " 12:00:00.011 [main]│ ▶10m                                 │                    "
+    " 12:00:00.012 [main]│  last 10m (now)                      │                    "
+    " 12:00:00.013 [main]└──────────────────────────────────────┘                    "
+    " 12:00:00.014 [main] INFO  com.example.App - step 14                            "
+    " 12:00:00.015 [main] INFO  com.example.App - step 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel                               "
+    "#);
+}
+
+#[test]
+fn time_panel_error_replaces_the_key_hints_in_the_footer() {
+    let mut keys = time_panel_keys("soon");
+    keys.push(key(KeyCode::Enter));
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+    assert_eq!(row(&terminal, 23), TimeSpec::parse("soon").unwrap_err());
+}
+
+/// The keys that open the text filter prompt, type `pattern` into it and toggle
+/// regex.
+fn regex_prompt_keys(pattern: &str) -> Vec<KeyEvent> {
+    let mut keys = vec![key(KeyCode::F(4))];
+    keys.extend(pattern.chars().map(char_key));
+    keys.push(ctrl('r'));
+    keys
+}
+
+#[test]
+fn text_prompt_shows_the_pattern_and_its_options_over_the_rows() {
+    let keys = regex_prompt_keys("time.*out");
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.example.App - step 8                             "
+    " 12:00:00.009 [main] INFO  com.example.App - step 9                             "
+    " 12:00:00.┌ Text filter ─────────────────────────────────────────────┐          "
+    " 12:00:00.│ ▶time.*out                                               │          "
+    " 12:00:00.│  [x] regex  [ ] ignore case                              │          "
+    " 12:00:00.└──────────────────────────────────────────────────────────┘          "
+    " 12:00:00.014 [main] INFO  com.example.App - step 14                            "
+    " 12:00:00.015 [main] INFO  com.example.App - step 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel                          "
+    "#);
+}
+
+#[test]
+fn text_prompt_error_replaces_the_key_hints_in_the_footer() {
+    let mut keys = regex_prompt_keys("(");
+    keys.push(key(KeyCode::Enter));
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+    let options = matcher::Options {
+        regex: true,
+        ignore_case: false,
+    };
+    assert_eq!(row(&terminal, 23), Matcher::new("(", options).unwrap_err());
+}
+
+// --- level counters and the filter bar ---
+
+/// Entries of four levels and three classes, five minutes apart at most, most of
+/// them about a timeout.
+const FILTER_LOG: &str = concat!(
+    "2026-10-07 12:04:00.000 [main] WARN  com.myco.pay.PayClient - Retry 1/3 after timeout\n",
+    "2026-10-07 12:05:00.000 [main] ERROR com.myco.pay.PayClient - Payment timeout\n",
+    "2026-10-07 12:06:00.000 [main] INFO  com.myco.pay.PayClient - Payment retried after timeout\n",
+    "2026-10-07 12:07:00.000 [main] DEBUG com.myco.db.Sql - select timeout\n",
+    "2026-10-07 12:08:00.000 [main] ERROR com.myco.order.Orders - Order 43 failed\n",
+    "2026-10-07 12:09:00.000 [main] WARN  org.hibernate.SQL - Slow query timeout\n",
+    "2026-10-07 12:10:00.000 [main] WARN  com.myco.pay.PayClient - Retry 2/3 after timeout\n",
+);
+
+#[test]
+fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_bar() {
+    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 565 B ─ Logback                                  E:2 W:3 I:1 D:1"
+    "▶12:04:00.000 WARN  com.myco.pay.PayClient   Retry 1/3 after timeout            "
+    " 12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
+    " 12:06:00.000 INFO  com.myco.pay.PayClient   Payment retried after timeout      "
+    " 12:07:00.000 DEBUG com.myco.db.Sql          select timeout                     "
+    " 12:08:00.000 ERROR com.myco.order.Orders    Order 43 failed                    "
+    " 12:09:00.000 WARN  org.hibernate.SQL        Slow query timeout                 "
+    " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+/// The counters count the INFO entry the level filter hides, but none of the entries
+/// the other filters hide.
+#[test]
+fn filter_bar_shows_every_active_filter_under_the_header() {
+    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    app.set_filters(Filters {
+        levels: Levels::only(&[Level::Warn, Level::Error, Level::Fatal]),
+        classes: Classes::parse(["com.myco.*", "!Sql"]).unwrap(),
+        text: Some(Matcher::new("time", matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    });
+    app.set_time_filter(Some(TimeFilter {
+        spec: TimeSpec::parse("5m").unwrap(),
+        base: Base::File,
+    }));
+    wait_for_filter(&mut app);
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 565 B ─ Logback                                      E:1 W:1 I:1"
+    "Filters: level[W E F]  class[com.myco.* !Sql]  time[last 5m (file)]  text[time] "
+    "▶12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
+    " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn filter_bar_names_the_options_of_the_text_filter() {
+    let mut app = hundred_lines();
+    let options = matcher::Options {
+        regex: true,
+        ignore_case: true,
+    };
+    app.set_filters(Filters {
+        text: Some(Matcher::new("Time.*out", options).unwrap()),
+        ..Filters::default()
+    });
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "Filters: text[Time.*out (regex, ignore case)]"
+    );
+}
+
+#[test]
+fn the_footer_shows_a_jump_prompt_as_typed() {
+    for (opener, footer) in [(':', ":42"), ('t', "t 42")] {
+        let keys = [char_key(opener), char_key('4'), char_key('2')];
+        let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+        assert_eq!(row(&terminal, 23), footer);
+    }
+}
+
+#[test]
+fn a_jump_prompt_error_follows_its_text_in_the_footer() {
+    let keys = [':', 'a', 'b', 'c'].map(char_key);
+    let terminal = terminal_after_pressing(
+        &mut hundred_lines(),
+        &[&keys[..], &[key(KeyCode::Enter)]].concat(),
+    );
+    assert_eq!(row(&terminal, 23), ":abc ─ 'abc' is not a line number");
+}
+
+#[test]
+fn header_ends_with_the_notice_about_the_last_key() {
+    let mut app = hundred_lines();
+    let mut terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    app.key(char_key('c'));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 5.1 KB ─ Raw ─ the selected entry has no class"
+    );
+}
+
+/// A headless entry, selected, then an entry of each level from TRACE to ERROR.
+const HEADLESS_FIRST_LOG: &str = concat!(
+    "starting up\n",
+    "2026-10-07 12:00:00.000 [main] TRACE com.example.App - trace\n",
+    "2026-10-07 12:00:01.000 [main] DEBUG com.example.App - debug\n",
+    "2026-10-07 12:00:02.000 [main] INFO  com.example.App - info\n",
+    "2026-10-07 12:00:03.000 [main] WARN  com.example.App - warn\n",
+    "2026-10-07 12:00:04.000 [main] ERROR com.example.App - error\n",
+);
+
+/// The header at `width` columns after `c` on the headless entry, which has no class.
+fn header_with_a_notice(width: u16) -> String {
+    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    let mut terminal = drawn(&mut app, width, 24, Theme::Styled);
+    app.key(char_key('c'));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    row(&terminal, 0)
+}
+
+#[test]
+fn level_counters_take_the_columns_the_title_leaves_after_a_space() {
+    assert_eq!(
+        header_with_a_notice(85),
+        "jlv ─ app.log ─ 315 B ─ Logback ─ the selected entry has no class E:1 W:1 I:1 D:1 T:1"
+    );
+}
+
+#[test]
+fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
+    assert_eq!(
+        header_with_a_notice(84),
+        "jlv ─ app.log ─ 315 B ─ Logback ─ the selected entry has no class"
+    );
+}
+
+#[test]
 fn header_shows_the_indexing_progress_until_the_index_is_complete() {
     let mut app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
@@ -225,7 +650,10 @@ fn header_names_the_preset_the_file_is_read_in() {
         b"2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
     );
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
-    assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 63 B ─ Logback");
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 63 B ─ Logback                                               I:1"
+    );
 }
 
 #[test]
@@ -249,6 +677,17 @@ fn too_small_terminal_says_so_instead_of_showing_lines() {
     "                                                            "
     "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom"
     "#);
+}
+
+#[test]
+fn too_small_terminal_shows_no_filter_bar() {
+    let mut app = hundred_lines();
+    app.set_filters(Filters {
+        text: Some(Matcher::new("step", matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    });
+    let terminal = drawn(&mut app, 60, 9, Theme::Styled);
+    assert_eq!(row(&terminal, 1), TOO_SMALL);
 }
 
 /// The buffer's debug view lists every change of style: the header in bold reverse
@@ -364,7 +803,7 @@ fn plain_theme_draws_the_table_without_any_style() {
     Buffer {
         area: Rect { x: 0, y: 0, width: 80, height: 24 },
         content: [
-            "jlv ─ app.log ─ 500 B ─ Logback                                                 ",
+            "jlv ─ app.log ─ 500 B ─ Logback                          F:1 E:1 W:1 I:1 D:1 T:1",
             "▶12:00:00.100 TRACE com.example.App          Tick                               ",
             " 12:00:00.200 DEBUG com.example.App          Config loaded                      ",
             " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   ",
@@ -1469,6 +1908,122 @@ proptest! {
     }
 }
 
+// --- line numbers ---
+
+/// The `width`×24 terminal with line numbers, drawn, then drawn again after each of
+/// `actions`.
+fn numbered_terminal(app: &mut App, width: u16, actions: &[Action]) -> Terminal<TestBackend> {
+    let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+    draw(&mut terminal, app, Theme::Styled);
+    for &action in actions {
+        app.apply(action);
+        draw(&mut terminal, app, Theme::Styled);
+    }
+    terminal
+}
+
+/// Screen lines `lines` of [`numbered_terminal`], as [`row`] shows them, each in
+/// quotes so that the snapshots keep the blanks they start with.
+fn numbered(app: &mut App, width: u16, actions: &[Action], lines: RangeInclusive<u16>) -> String {
+    let terminal = numbered_terminal(app, width, actions);
+    let rows: Vec<String> = lines.map(|y| format!("{:?}", row(&terminal, y))).collect();
+    rows.join("\n")
+}
+
+/// Numbers are right-aligned, at least 4 wide, before the `▶` marker. A folded entry
+/// hides its lines' numbers, so the next entry shows its own.
+#[test]
+fn gutter_shows_the_file_line_of_each_entry() {
+    assert_snapshot!(numbered(&mut table(), 80, &[], 1..=6), @r#"
+    "   1 ▶12:00:00.100 TRACE com.example.App          Tick"
+    "   2  12:00:00.200 DEBUG com.example.App          Config loaded"
+    "   3  12:00:00.300 INFO  c.e.order.OrderService   Order 42 created"
+    "   4  12:00:01.000 WARN  com.example.App          Retry 1/3"
+    "   5  12:00:02.000 ERROR com.example.App          Failed [+2]"
+    "   8  12:00:03.000 FATAL com.example.App          Giving up"
+    "#);
+}
+
+#[test]
+fn hash_hides_the_gutter() {
+    let actions = [action(char_key('#')).unwrap()];
+    assert_snapshot!(numbered(&mut table(), 80, &actions, 1..=2), @r#"
+    "▶12:00:00.100 TRACE com.example.App          Tick"
+    " 12:00:00.200 DEBUG com.example.App          Config loaded"
+    "#);
+}
+
+#[test]
+fn unfolded_stack_trace_lines_have_their_own_line_numbers() {
+    let out = numbered(&mut traces(), 80, &[Action::UnfoldAll], 1..=7);
+    assert_snapshot!(out, @r#"
+    "   1 ▶12:00:00.001 INFO  com.example.App          step 1"
+    "   2  12:00:00.002 INFO  com.example.App          step 2"
+    "   3                                                  at App.step(App.java:1)"
+    "   4                                                  at App.step(App.java:2)"
+    "   5  12:00:00.003 INFO  com.example.App          step 3"
+    "   6                                                  at App.step(App.java:1)"
+    "   7  12:00:00.004 INFO  com.example.App          step 4"
+    "#);
+}
+
+/// At 80 columns, the narrowest screen, 7-digit numbers keep their width and the
+/// message column is left with 27.
+#[test]
+fn seven_digit_line_numbers_take_their_width_from_the_message_column() {
+    let entry = |n: u8, message: &str| {
+        format!("2026-10-07 12:00:00.00{n} [main] INFO  com.example.App - {message}\n")
+    };
+    let log = [
+        entry(1, "the first message, long enough to be cut"),
+        "\n".repeat(999_998),
+        entry(2, "the second message, long enough to be cut"),
+        entry(3, "done"),
+    ]
+    .concat();
+    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    assert_snapshot!(numbered(&mut app, 80, &[], 1..=3), @r#"
+    "      1 ▶12:00:00.001 INFO  com.example.App          the first message [+999998]"
+    "1000000  12:00:00.002 INFO  com.example.App          the second message, long en"
+    "1000001  12:00:00.003 INFO  com.example.App          done"
+    "#);
+}
+
+/// The gutter is as wide as the file's last line number needs, whatever lines are on
+/// screen, so it widens only when the file reaches another power of ten.
+#[test]
+fn gutter_widens_when_the_file_reaches_10000_lines() {
+    let mut app = app("x\n".repeat(9_999).as_bytes());
+    assert_eq!(numbered(&mut app, 80, &[], 1..=1), r#""   1 ▶x""#);
+    let grown = test_support::source("x\n".repeat(10_000).as_bytes());
+    let mut app = changed(app, FileChange::Grew(grown));
+    assert_eq!(numbered(&mut app, 80, &[], 1..=1), r#""    1 ▶x""#);
+}
+
+/// Before the index is complete the rows are the file's last entries, whose line
+/// numbers aren't known yet.
+#[test]
+fn rows_read_from_the_end_of_the_file_have_blank_line_numbers() {
+    let mut app = following_app(Preset::Raw, numbered_log(30).as_bytes());
+    assert_snapshot!(numbered(&mut app, 80, &[], 21..=22), @r#"
+    "      12:00:00.029 [main] INFO  com.example.App - step 29"
+    "     ▶12:00:00.030 [main] INFO  com.example.App - step 30"
+    "#);
+}
+
+/// Every number is dark gray, whatever the level of its row, and the timestamps
+/// after them keep the default colour.
+#[test]
+fn line_numbers_are_dark_gray() {
+    let terminal = numbered_terminal(&mut table(), 80, &[]);
+    let buffer = terminal.backend().buffer();
+    for y in 2..=6 {
+        assert_eq!(buffer[(3, y)].fg, Color::DarkGray, "number on line {y}");
+        assert_eq!(buffer[(6, y)].fg, Color::Reset, "timestamp on line {y}");
+    }
+}
+
 // --- robustness ---
 
 fn any_action() -> impl Strategy<Value = Action> {
@@ -1484,6 +2039,7 @@ fn any_action() -> impl Strategy<Value = Action> {
         Action::ScrollLeft,
         Action::ScrollRight,
         Action::ToggleThread,
+        Action::ToggleLineNumbers,
         Action::ToggleWrap,
         Action::CyclePreset,
         Action::ToggleFollow,
@@ -1556,4 +2112,219 @@ proptest! {
             prop_assert_eq!(cell.style(), Cell::EMPTY.style());
         }
     }
+}
+
+// --- search ---
+
+/// The search prompt with the keys that open it, type `pattern` and toggle regex.
+fn regex_search_keys(opener: char, pattern: &str) -> Vec<KeyEvent> {
+    let mut keys = vec![char_key(opener), ctrl('r')];
+    keys.extend(pattern.chars().map(char_key));
+    keys
+}
+
+/// The 80×24 terminal after searching `app` for the regex `pattern` with `/` and
+/// counting its matches, then pressing `keys`; drawn after each key.
+fn searched_terminal(app: &mut App, pattern: &str, keys: &[KeyEvent]) -> Terminal<TestBackend> {
+    let mut search = regex_search_keys('/', pattern);
+    search.push(key(KeyCode::Enter));
+    let mut terminal = terminal_after_pressing(app, &search);
+    wait_for_search(app);
+    draw(&mut terminal, app, Theme::Styled);
+    for &key in keys {
+        app.key(key);
+        draw(&mut terminal, app, Theme::Styled);
+    }
+    terminal
+}
+
+/// Screen lines `lines` as [`row`] shows them, each followed by a line with `^`
+/// under its highlighted cells, those on a yellow background, if it has any.
+fn with_highlights(terminal: &Terminal<TestBackend>, lines: RangeInclusive<u16>) -> String {
+    let buffer = terminal.backend().buffer();
+    let mut out = Vec::new();
+    for y in lines {
+        out.push(row(terminal, y));
+        let marks: String = (0..buffer.area.width)
+            .map(|x| {
+                if buffer[(x, y)].bg == Color::Yellow {
+                    '^'
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        if marks.contains('^') {
+            out.push(marks.trim_end().to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// Four lines, three of them about orders, the third about two.
+const ORDERS: &str = concat!(
+    "order 1 created\n",
+    "payment for order 1 failed\n",
+    "order 2 created, order 1 retried\n",
+    "shipping\n",
+);
+
+#[test]
+fn search_prompt_shows_an_invalid_regex_error_in_the_footer() {
+    let mut keys = regex_search_keys('/', "(");
+    keys.push(key(KeyCode::Enter));
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.example.App - step 8                             "
+    " 12:00:00.009 [main] INFO  com.example.App - step 9                             "
+    " 12:00:00.┌ Search ──────────────────────────────────────────────────┐          "
+    " 12:00:00.│ ▶(                                                       │          "
+    " 12:00:00.│  [x] regex  [ ] ignore case                              │          "
+    " 12:00:00.└──────────────────────────────────────────────────────────┘          "
+    " 12:00:00.014 [main] INFO  com.example.App - step 14                            "
+    " 12:00:00.015 [main] INFO  com.example.App - step 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "invalid regex: unclosed group                                                   "
+    "#);
+}
+
+#[test]
+fn search_prompt_footer_shows_its_keys() {
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &[char_key('/')]);
+    assert_eq!(
+        row(&terminal, 23),
+        "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel"
+    );
+}
+
+#[test]
+fn backward_search_prompt_is_titled_search_backward() {
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &[char_key('?')]);
+    assert!(
+        row(&terminal, 10).contains("┌ Search backward ─"),
+        "{}",
+        row(&terminal, 10)
+    );
+}
+
+#[test]
+fn matches_are_highlighted_in_the_visible_rows() {
+    let terminal = searched_terminal(&mut app(ORDERS.as_bytes()), "order", &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
+     order 1 created
+     ^^^^^
+    ▶payment for order 1 failed
+                 ^^^^^
+     order 2 created, order 1 retried
+     ^^^^^            ^^^^^
+     shipping
+    ");
+}
+
+#[test]
+fn a_match_in_folded_lines_highlights_the_fold_marker() {
+    let terminal = searched_terminal(&mut traces(), r"App\.java:2", &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ▶12:00:00.002 INFO  com.example.App          step 2 [+2]
+                                                        ^^^^
+     12:00:00.003 INFO  com.example.App          step 3 [+1]
+     12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+#[test]
+fn matches_in_unfolded_stack_trace_lines_are_highlighted() {
+    let terminal = searched_terminal(&mut traces(), r"App\.java:2", &[char_key(' ')]);
+    assert_snapshot!(with_highlights(&terminal, 1..=6), @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ▶12:00:00.002 INFO  com.example.App          step 2
+                                                     at App.step(App.java:1)
+                                                     at App.step(App.java:2)
+                                                                 ^^^^^^^^^^
+     12:00:00.003 INFO  com.example.App          step 3 [+1]
+     12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+#[test]
+fn header_shows_the_match_count_before_the_notice() {
+    let keys = [char_key('n'), char_key('n')];
+    let terminal = searched_terminal(&mut app(ORDERS.as_bytes()), "order", &keys);
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 85 B ─ Raw ─ match 1/3 ─ search wrapped"
+    );
+}
+
+/// Three Logback entries: `App - step` runs from the class column into the message,
+/// a tab comes before `done`, and the last message wraps inside `done`.
+const COLUMNS_LOG: &str = concat!(
+    "2026-10-07 12:00:00.001 [main] INFO  com.example.App - step 1\n",
+    "2026-10-07 12:00:00.002 [main] INFO  com.example.App - \tstep 2 done\n",
+    "2026-10-07 12:00:00.003 [main] INFO  com.example.App - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa done\n",
+);
+
+/// Only the message column is highlighted: of `App - step`, the `step` in it. A tab
+/// before a match moves its highlight by the columns the tab takes, and a wrapped
+/// match is highlighted on both screen lines.
+#[test]
+fn highlights_stay_in_the_message_column_and_follow_tabs_and_wrapping() {
+    let mut app = app_in(Preset::Logback, COLUMNS_LOG.as_bytes());
+    let terminal = searched_terminal(&mut app, "App - step|done", &[char_key('w')]);
+    assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
+     12:00:00.001 INFO  com.example.App          step 1
+                                                 ^^^^
+    ▶12:00:00.002 INFO  com.example.App              step 2 done
+                                                            ^^^^
+     12:00:00.003 INFO  com.example.App          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa d
+                                                                                   ^
+                                                 one
+                                                 ^^^
+    ");
+}
+
+/// A match past the 64 KiB a line is shown up to is never on screen, even scrolled
+/// as far right as the line goes.
+#[test]
+fn a_match_past_the_shown_part_of_a_huge_line_is_not_highlighted() {
+    let huge = format!("{} needle\nshort\n", "a".repeat(100_000));
+    let mut app = app(huge.as_bytes());
+    let mut terminal = searched_terminal(&mut app, "needle", &[]);
+    for _ in 0..10_000 {
+        app.apply(Action::ScrollRight);
+    }
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert!(row(&terminal, 1).ends_with('…'), "{}", row(&terminal, 1));
+    assert_eq!(with_highlights(&terminal, 1..=1), row(&terminal, 1));
+}
+
+/// Text between matches keeps its tab stops: the tab after `ab` takes two columns.
+#[test]
+fn a_tab_after_a_match_keeps_its_tab_stop() {
+    let terminal = searched_terminal(&mut app(b"ab\tdone\n"), "b|done", &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=1), @r"
+    ▶ab  done
+      ^  ^^^^
+    ");
+}
+
+/// A regex over bytes can match half of a character, which no cell shows alone.
+#[test]
+fn a_match_of_half_a_character_is_not_highlighted() {
+    let terminal = searched_terminal(&mut app("café\n".as_bytes()), r"(?-u)\xC3", &[]);
+    assert_eq!(with_highlights(&terminal, 1..=1), "▶café");
 }

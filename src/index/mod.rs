@@ -48,8 +48,11 @@ pub struct Settings {
 /// One entry of the index, at most 32 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Record {
-    offset: u64,
-    end: u64,
+    offset: U48,
+    end: U48,
+    /// The line the entry starts on, counted from 1 within its chunk until the chunk
+    /// is joined to the ones before it; [`UNKNOWN_LINE`] in a tail.
+    line: U48,
     /// Microseconds since the Unix epoch, or [`NO_TIMESTAMP`].
     timestamp: i64,
     /// The class span; `0..0` for none, as a class column is never empty.
@@ -63,13 +66,37 @@ pub struct Record {
 /// timestamp is this many microseconds.
 const NO_TIMESTAMP: i64 = i64::MIN;
 
+/// [`Record::line`] when it isn't known, as lines count from 1.
+const UNKNOWN_LINE: U48 = U48([0; 6]);
+
+/// A byte offset or a line number in 6 bytes, which keeps a [`Record`] at 32. No file
+/// is mapped past 2^48 bytes (256 TiB), the most a 64-bit address space maps, so no
+/// offset or line number reaches that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct U48([u8; 6]);
+
+impl U48 {
+    fn new(value: u64) -> Self {
+        debug_assert!(value >> 48 == 0, "{value} doesn't fit 48 bits");
+        let [bytes @ .., _, _] = value.to_le_bytes();
+        U48(bytes)
+    }
+
+    fn get(self) -> u64 {
+        let mut bytes = [0; 8];
+        bytes[..6].copy_from_slice(&self.0);
+        u64::from_le_bytes(bytes)
+    }
+}
+
 impl Record {
     /// The record of an entry that starts at `offset` and has no columns: the
     /// headless entry, or any entry under `Raw`.
     fn new(offset: u64) -> Record {
         Record {
-            offset,
-            end: offset,
+            offset: U48::new(offset),
+            end: U48::new(offset),
+            line: UNKNOWN_LINE,
             timestamp: NO_TIMESTAMP,
             class_start: 0,
             class_end: 0,
@@ -82,7 +109,7 @@ impl Record {
     /// first byte of the next entry, or to the end of the file. The line endings are
     /// part of it, so the entries of a file cover it without gaps.
     pub fn bytes(&self) -> Range<u64> {
-        self.offset..self.end
+        self.offset.get()..self.end.get()
     }
 
     /// The entry's timestamp as [`resolve_timestamps`] resolves it: an entry whose
@@ -121,6 +148,14 @@ impl Record {
         (self.class_start < self.class_end)
             .then(|| usize::from(self.class_start)..usize::from(self.class_end))
     }
+
+    /// The line of the file the entry starts on, counted from 1 as lines are split by
+    /// [`crate::source::lines`]; its continuation lines are the lines after it.
+    /// `None` for the records [`tail`] reads from the end of the file, as the lines
+    /// before them aren't counted.
+    pub fn line(&self) -> Option<u64> {
+        (self.line != UNKNOWN_LINE).then(|| self.line.get())
+    }
 }
 
 /// The entries of a run of whole lines, ready to be joined with the chunks around it.
@@ -133,6 +168,8 @@ pub struct Chunk {
     /// Under a time-only preset, the time of day of each entry, which can only be
     /// dated once the whole file is known. Empty under other presets.
     times: Vec<Option<Time>>,
+    /// How many lines start in the chunk.
+    lines: u64,
 }
 
 impl Chunk {
@@ -157,7 +194,8 @@ impl Chunk {
     }
 
     /// Appends `next`, the chunk of the range right after this chunk's.
-    pub fn join(&mut self, next: Chunk) {
+    pub fn join(&mut self, mut next: Chunk) {
+        next.shift_lines(self.lines);
         if self.records.is_empty() {
             *self = next;
             return;
@@ -165,6 +203,7 @@ impl Chunk {
         let continued = usize::from(next.leads_in);
         self.times.extend(next.times.iter().skip(continued));
         attach(&mut self.records, &next.records, next.leads_in);
+        self.lines = next.lines;
     }
 
     /// The records of every entry in the chunk, in file order, once it covers the
@@ -180,7 +219,16 @@ impl Chunk {
             records: Vec::new(),
             leads_in: false,
             times: Vec::new(),
+            lines: 0,
         }
+    }
+
+    /// Numbers the lines as if `lines` more lines came before the chunk.
+    fn shift_lines(&mut self, lines: u64) {
+        for record in &mut self.records {
+            record.line = U48::new(record.line.get() + lines);
+        }
+        self.lines += lines;
     }
 
     /// Takes out the records that chunks joined later can't change: all but the last,
@@ -195,7 +243,7 @@ impl Chunk {
     /// Ends the last entry at `end`.
     fn close(&mut self, end: u64, has_exception: bool) {
         if let Some(last) = self.records.last_mut() {
-            last.end = end;
+            last.end = U48::new(end);
             last.has_exception = has_exception;
         }
     }
@@ -263,6 +311,7 @@ impl<'a> ChunkReader<'a> {
             Some(_) => strip_ansi_into(line, &mut self.stripped),
             None => line,
         };
+        self.chunk.lines += 1;
         let closed = self.grouper.push_stripped(line);
         // A line that closes an entry opens the next, and the first line opens one.
         let opens = closed.is_some() || self.chunk.records.is_empty();
@@ -272,10 +321,11 @@ impl<'a> ChunkReader<'a> {
         if let Some(open) = self.grouper.open_entry()
             && opens
         {
-            let (record, time) = match self.parser.zip(open.head.as_ref()) {
+            let (mut record, time) = match self.parser.zip(open.head.as_ref()) {
                 Some((parser, head)) => read_head(offset, line, head, parser, self.zone),
                 None => (Record::new(offset), None),
             };
+            record.line = U48::new(self.chunk.lines);
             // The grouper only makes the first lines an entry without a head, unless
             // under `Raw`, where no entry has one.
             self.chunk.leads_in |= open.head.is_none() && self.parser.is_some();

@@ -72,6 +72,10 @@ fn spans(records: &[Record]) -> Vec<Range<u64>> {
     records.iter().map(Record::bytes).collect()
 }
 
+fn lines(records: &[Record]) -> Vec<Option<u64>> {
+    records.iter().map(Record::line).collect()
+}
+
 /// The lines concatenated, as the bytes of a file.
 fn log(lines: &[&str]) -> Vec<u8> {
     lines.concat().into_bytes()
@@ -263,6 +267,12 @@ fn headless_entry_checks_its_first_line_for_an_exception() {
 fn headless_entry_of_plain_lines_has_no_exception() {
     let records = index_in(Preset::Logback, &log(&[WRAPPED, STARTED]));
     assert!(!records[0].has_exception());
+}
+
+#[test]
+fn headless_entry_starts_on_line_1() {
+    let records = index_in(Preset::Logback, &log(&[WRAPPED, WRAPPED, STARTED]));
+    assert_eq!(lines(&records), [Some(1), Some(3)]);
 }
 
 // --- timestamps ---
@@ -622,7 +632,8 @@ proptest! {
     fn base_offset_moves_every_entry_by_as_much(
         bytes in any_bytes(),
         preset in any_preset(),
-        base in 0..u64::MAX / 2,
+        // No file reaches 2^48 bytes (256 TiB), the most a 64-bit address space maps.
+        base in 0..1u64 << 47,
     ) {
         let settings = settings(preset);
         let moved = Chunk::index(&bytes, base, 0..bytes.len(), &settings).finish(&settings);
@@ -680,6 +691,18 @@ fn appending_only_continuation_lines_extends_the_last_entry() {
         laid_out(0, &[&[STARTED], &[FAILED, EXCEPTION, FRAME]])
     );
     assert!(records[1].has_exception());
+}
+
+#[test]
+fn appended_entries_go_on_counting_lines() {
+    let settings = settings(Preset::Logback);
+    let mut records = index(&log(&[STARTED, FAILED]), &settings);
+    append(
+        &mut records,
+        &log(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]),
+        &settings,
+    );
+    assert_eq!(lines(&records), [Some(1), Some(2), Some(5)]);
 }
 
 /// Before midnight, after it, a late line from before it and after it again: dated

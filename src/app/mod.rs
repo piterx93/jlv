@@ -7,7 +7,8 @@ use std::fs::File;
 use std::io;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -15,10 +16,15 @@ use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::filter::{
+    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
+    TimeSpec,
+};
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
-use crate::format::{Anchor, Preset, detect};
+use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::index::{self, Indexer, Progress, Record, Settings};
+use crate::matcher::{self, Matcher};
 use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
 
@@ -46,6 +52,8 @@ pub enum Action {
     /// Shows the message column 8 columns further right.
     ScrollRight,
     ToggleThread,
+    /// Shows or hides the gutter of file line numbers.
+    ToggleLineNumbers,
     ToggleWrap,
     /// Reads the file in the next preset of [`Preset::ALL`].
     CyclePreset,
@@ -53,6 +61,40 @@ pub enum Action {
     ToggleFold,
     FoldAll,
     UnfoldAll,
+    /// Shows the level if the level filter hides it, hides it if it shows it.
+    ToggleLevel(Level),
+    /// Opens the level panel ([`App::panel`]).
+    LevelPanel,
+    /// Shows only the class of the selected entry and the classes below it: the
+    /// class filter's includes become the one rule `<class>.*`.
+    OnlyClass,
+    /// Hides the class of the selected entry and the classes below it: adds the
+    /// exclude `!<class>.*` to the class filter.
+    HideClass,
+    /// Opens the class panel ([`App::panel`]).
+    ClassPanel,
+    /// Opens the time panel ([`App::panel`]).
+    TimePanel,
+    /// Opens the text filter prompt ([`App::panel`]).
+    TextPanel,
+    /// Clears every filter: the level, class, time and text filters.
+    ClearFilters,
+    /// Opens the prompt for a file line number to jump to ([`App::panel`]).
+    LinePrompt,
+    /// Opens the prompt for a time to jump to ([`App::panel`]).
+    TimePrompt,
+    /// Opens the prompt for a search down the rows ([`App::panel`]).
+    SearchForward,
+    /// Opens the prompt for a search up the rows ([`App::panel`]).
+    SearchBackward,
+    /// Selects the next matching entry in the direction of the search ([`App::search`]).
+    NextMatch,
+    /// Selects the next matching entry against the direction of the search.
+    PreviousMatch,
+    /// Applies what the open panel edits and closes it.
+    Confirm,
+    /// Closes the open panel without applying its edits.
+    Cancel,
     Quit,
 }
 
@@ -60,20 +102,19 @@ pub enum Action {
 ///
 /// `j k ↑ ↓` move by a line, `PgUp PgDn` by a page, `Ctrl-u Ctrl-d` by half a page,
 /// `g Home` go to the top, `G End` to the bottom, `← →` scroll the message column,
-/// `F` toggles follow, `T` toggles the thread column, `w` wrapping, `P` cycles the
-/// preset, `Space` folds or unfolds the selected entry, `z` folds every entry, `Z`
-/// unfolds every entry and `q F10 Ctrl-c` quit. Characters
+/// `F` toggles follow, `T` toggles the thread column, `#` the line numbers, `w`
+/// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
+/// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
+/// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
+/// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
+/// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
+/// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
+/// and previous match, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
-/// other keys do nothing with any modifier. Key releases do nothing; held keys repeat.
+/// other keys do nothing with any modifier. Key releases do nothing; held keys
+/// repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
-    if key.kind == KeyEventKind::Release {
-        return None;
-    }
-    let modifiers = match key.code {
-        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
-        _ => key.modifiers,
-    };
-    let action = match (key.code, modifiers) {
+    let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::Down,
         (KeyCode::PageUp, KeyModifiers::NONE) => Action::PageUp,
@@ -86,17 +127,342 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Right, KeyModifiers::NONE) => Action::ScrollRight,
         (KeyCode::Char('F'), KeyModifiers::NONE) => Action::ToggleFollow,
         (KeyCode::Char('T'), KeyModifiers::NONE) => Action::ToggleThread,
+        (KeyCode::Char('#'), KeyModifiers::NONE) => Action::ToggleLineNumbers,
         (KeyCode::Char('w'), KeyModifiers::NONE) => Action::ToggleWrap,
         (KeyCode::Char('P'), KeyModifiers::NONE) => Action::CyclePreset,
         (KeyCode::Char(' '), KeyModifiers::NONE) => Action::ToggleFold,
         (KeyCode::Char('z'), KeyModifiers::NONE) => Action::FoldAll,
         (KeyCode::Char('Z'), KeyModifiers::NONE) => Action::UnfoldAll,
+        (KeyCode::Char(digit @ '1'..='6'), KeyModifiers::NONE) => {
+            Action::ToggleLevel(Level::ALL[usize::from(digit as u8 - b'1')])
+        }
+        (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
+        (KeyCode::Char('c'), KeyModifiers::NONE) => Action::OnlyClass,
+        (KeyCode::Char('C'), KeyModifiers::NONE) => Action::HideClass,
+        (KeyCode::F(4) | KeyCode::Char('&'), KeyModifiers::NONE) => Action::TextPanel,
+        (KeyCode::F(5), KeyModifiers::NONE) => Action::TimePanel,
+        (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
+        (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ClearFilters,
+        (KeyCode::Char(':'), KeyModifiers::NONE) => Action::LinePrompt,
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::TimePrompt,
+        (KeyCode::Char('/'), KeyModifiers::NONE) => Action::SearchForward,
+        (KeyCode::Char('?'), KeyModifiers::NONE) => Action::SearchBackward,
+        (KeyCode::Char('n'), KeyModifiers::NONE) => Action::NextMatch,
+        (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
+        (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
+        (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
         | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
         _ => return None,
     };
     Some(action)
 }
+
+/// The code and modifiers of `key` as the bindings see them, `None` for a release.
+/// A character ignores Shift, as it already says which case it is.
+fn normalized(key: KeyEvent) -> Option<(KeyCode, KeyModifiers)> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let modifiers = match key.code {
+        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
+        _ => key.modifiers,
+    };
+    Some((key.code, modifiers))
+}
+
+/// A key in a panel that is typed into.
+enum Typed {
+    /// `Enter`, `Esc` or `Ctrl-c`: what they stand for.
+    Action(Action),
+    /// A character, with or without Shift.
+    Char(char),
+    Backspace,
+    /// Any other key without modifiers.
+    Other(KeyCode),
+}
+
+/// What `key` is in a panel that is typed into, `None` for a release or a key with
+/// modifiers that means nothing there.
+fn typed(key: KeyEvent) -> Option<Typed> {
+    let typed = match normalized(key)? {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Typed::Action(Action::Quit),
+        (KeyCode::Enter, KeyModifiers::NONE) => Typed::Action(Action::Confirm),
+        (KeyCode::Esc, KeyModifiers::NONE) => Typed::Action(Action::Cancel),
+        (KeyCode::Char(c), KeyModifiers::NONE) => Typed::Char(c),
+        (KeyCode::Backspace, KeyModifiers::NONE) => Typed::Backspace,
+        (code, KeyModifiers::NONE) => Typed::Other(code),
+        _ => return None,
+    };
+    Some(typed)
+}
+
+/// The level panel while it is open: the level filter as edited so far, not applied
+/// yet, and the level its cursor is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelPanel {
+    pub levels: Levels,
+    pub cursor: Level,
+}
+
+impl LevelPanel {
+    fn edit(&mut self, action: Action) {
+        let cursor = self.cursor as usize;
+        match action {
+            Action::Up => self.cursor = Level::ALL[cursor.saturating_sub(1)],
+            Action::Down => self.cursor = Level::ALL[(cursor + 1).min(Level::ALL.len() - 1)],
+            Action::ToggleFold => self.levels.toggle(self.cursor),
+            Action::ToggleLevel(level) => self.levels.toggle(level),
+            _ => {}
+        }
+    }
+}
+
+/// The class panel while it is open: the class rules as edited so far, one per line,
+/// not applied yet, the line its cursor is on, and why the rules last confirmed
+/// don't parse, if they don't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassPanel {
+    pub lines: Vec<String>,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+
+impl ClassPanel {
+    /// Opens on `classes`, one rule per line, with the cursor on an empty line after
+    /// them.
+    fn new(classes: &Classes) -> ClassPanel {
+        let mut lines = classes.rules();
+        lines.push(String::new());
+        ClassPanel {
+            cursor: lines.len() - 1,
+            lines,
+            error: None,
+        }
+    }
+
+    /// Edits the panel as `key` asks, or returns the action it stands for here.
+    /// `lines` is never empty, so the cursor always has a line to be on.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        let typed = typed(key)?;
+        let line = &mut self.lines[self.cursor];
+        match typed {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => line.push(c),
+            Typed::Backspace => {
+                if line.pop().is_none() && self.lines.len() > 1 {
+                    self.lines.remove(self.cursor);
+                    self.cursor = self.cursor.saturating_sub(1);
+                }
+            }
+            Typed::Other(KeyCode::Up) => self.cursor = self.cursor.saturating_sub(1),
+            Typed::Other(KeyCode::Down) => {
+                if !line.is_empty() && self.cursor + 1 == self.lines.len() {
+                    self.lines.push(String::new());
+                }
+                self.cursor = (self.cursor + 1).min(self.lines.len() - 1);
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+/// The time panel while it is open: the time spec as typed so far and the base, not
+/// applied yet, and why the spec last confirmed doesn't parse, if it doesn't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimePanel {
+    pub spec: String,
+    pub base: Base,
+    pub error: Option<String>,
+}
+
+/// What `↓` and `↑` step through in the time panel.
+const TIME_PRESETS: [&str; 6] = ["1m", "5m", "10m", "30m", "60m", "24h"];
+
+impl TimePanel {
+    /// Opens on `filter`, or on an empty spec counted from the file without one.
+    fn new(filter: Option<&TimeFilter>) -> TimePanel {
+        TimePanel {
+            spec: filter.map_or_else(String::new, |filter| filter.spec.to_string()),
+            base: filter.map_or_else(Base::default, |filter| filter.base),
+            error: None,
+        }
+    }
+
+    /// Edits the panel as `key` asks, or returns the action it stands for here.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        let preset = TIME_PRESETS.iter().position(|&preset| preset == self.spec);
+        let last = TIME_PRESETS.len() - 1;
+        match typed(key)? {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.spec.push(c),
+            Typed::Backspace => {
+                self.spec.pop();
+            }
+            Typed::Other(KeyCode::Tab) => self.base = self.base.toggled(),
+            Typed::Other(KeyCode::Down) => {
+                self.spec = TIME_PRESETS[preset.map_or(0, |i| (i + 1).min(last))].to_string();
+            }
+            Typed::Other(KeyCode::Up) => {
+                self.spec = TIME_PRESETS[preset.map_or(last, |i| i.saturating_sub(1))].to_string();
+            }
+            Typed::Other(_) => {}
+        }
+        None
+    }
+
+    /// The time filter the panel sets, `None` for an empty spec.
+    fn filter(&self) -> Result<Option<TimeFilter>, String> {
+        if self.spec.trim().is_empty() {
+            return Ok(None);
+        }
+        let spec = TimeSpec::parse(&self.spec)?;
+        Ok(Some(TimeFilter {
+            spec,
+            base: self.base,
+        }))
+    }
+}
+
+/// A pattern prompt while it is open: the pattern as typed so far and how it is
+/// read, not applied yet, and why the pattern last confirmed doesn't compile, if it
+/// doesn't. The text filter prompt is one; search reads its pattern the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub pattern: String,
+    pub options: matcher::Options,
+    pub error: Option<String>,
+}
+
+impl Prompt {
+    /// Opens on `matcher`'s pattern and options, or on an empty plain,
+    /// case-sensitive pattern without one.
+    fn new(matcher: Option<&Matcher>) -> Prompt {
+        Prompt {
+            pattern: matcher.map_or_else(String::new, |matcher| matcher.pattern().to_owned()),
+            options: matcher.map_or_else(matcher::Options::default, Matcher::options),
+            error: None,
+        }
+    }
+
+    /// Edits the prompt as `key` asks, or returns the action it stands for here.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Before `typed`, which has no use for keys with Ctrl but `Ctrl-c`.
+        match normalized(key) {
+            Some((KeyCode::Char('r'), KeyModifiers::CONTROL)) => {
+                self.options.regex = !self.options.regex;
+                return None;
+            }
+            Some(
+                (KeyCode::Char('i'), KeyModifiers::CONTROL) | (KeyCode::Tab, KeyModifiers::NONE),
+            ) => {
+                self.options.ignore_case = !self.options.ignore_case;
+                return None;
+            }
+            _ => {}
+        }
+        match typed(key)? {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.pattern.push(c),
+            Typed::Backspace => {
+                self.pattern.pop();
+            }
+            Typed::Other(_) => {}
+        }
+        None
+    }
+
+    /// The text filter the prompt sets, `None` for an empty pattern.
+    fn matcher(&self) -> Result<Option<Matcher>, String> {
+        if self.pattern.is_empty() {
+            return Ok(None);
+        }
+        Matcher::new(&self.pattern, self.options).map(Some)
+    }
+}
+
+/// What a jump prompt jumps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    /// The entry holding a file line, by its number in the gutter.
+    Line,
+    /// The first entry at or after a time.
+    Time,
+}
+
+/// A jump prompt while it is open: what it jumps to, the text typed so far, and why
+/// the text last confirmed says nothing to jump to, if it doesn't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JumpPrompt {
+    pub to: Jump,
+    pub text: String,
+    pub error: Option<String>,
+}
+
+impl JumpPrompt {
+    fn new(to: Jump) -> JumpPrompt {
+        JumpPrompt {
+            to,
+            text: String::new(),
+            error: None,
+        }
+    }
+
+    /// Edits the text as `key` asks, or returns the action it stands for here.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        match typed(key)? {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.text.push(c),
+            Typed::Backspace => {
+                self.text.pop();
+            }
+            Typed::Other(_) => {}
+        }
+        None
+    }
+}
+
+/// The panel open over the rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Panel {
+    Levels(LevelPanel),
+    Classes(ClassPanel),
+    Time(TimePanel),
+    /// The text filter prompt.
+    Text(Prompt),
+    Jump(JumpPrompt),
+    /// The search prompt, for a search up the rows if `backward`.
+    Search {
+        prompt: Prompt,
+        backward: bool,
+    },
+}
+
+/// A search: what it looks for and which way [`Action::NextMatch`] goes, up the rows
+/// if `backward`.
+#[derive(Debug, Clone)]
+pub struct Search {
+    pub matcher: Matcher,
+    pub backward: bool,
+}
+
+impl Panel {
+    fn edit(&mut self, action: Action) {
+        match self {
+            Panel::Levels(panel) => panel.edit(action),
+            // Their text is edited through `App::key`, not actions.
+            Panel::Classes(_)
+            | Panel::Time(_)
+            | Panel::Text(_)
+            | Panel::Jump(_)
+            | Panel::Search { .. } => {}
+        }
+    }
+}
+
+/// What [`App::notice`] says after `c` or `C` on an entry without a class.
+const NO_CLASS: &str = "the selected entry has no class";
 
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
 /// message column by.
@@ -109,6 +475,130 @@ const TAIL_WINDOW: usize = 65_536;
 /// How many bytes from the end of the file [`index::tail`] may read, 4 MiB, before
 /// the viewer gives up on the tail and waits for the whole index.
 const TAIL_LIMIT: usize = 4_194_304;
+
+/// How many entries the filter engine evaluates per chunk. It holds the index for a
+/// chunk at a time, and taking in what the followed file appends has to wait for it.
+const FILTER_CHUNK: usize = 1024;
+
+/// How long the viewer waits for the filter engine to evaluate the few entries that
+/// changed with the index, so that the matches among them don't leave the rows until
+/// the next poll: the last rows would flicker, and a selection on them would move.
+const CATCH_UP: Duration = Duration::from_millis(10);
+
+/// The time range of a time filter while there is no entry with a timestamp: none.
+const NO_TIME: TimeRange = TimeRange {
+    start: Timestamp::MAX,
+    end: Some(Timestamp::MAX),
+};
+
+/// How the range of the time filter changed.
+enum Slide {
+    None,
+    /// Its start moved to this later time and its end stayed.
+    Later(Timestamp),
+    Restart,
+}
+
+/// How an engine evaluates again after the index or the time range changed.
+enum Rerun {
+    /// From the first entry.
+    Restart,
+    /// From this entry, which the index read again or dropped.
+    Reread(usize),
+    /// From this entry, with filters that only drop entries from there on.
+    Drop(usize),
+}
+
+impl Rerun {
+    /// What the engine has to do for `slide`, the entries from `from` on being new or
+    /// read again. Only the matches dated before a later start drop out.
+    fn after(slide: &Slide, engine: &Engine, records: &[Record], from: usize) -> Rerun {
+        match *slide {
+            Slide::Restart => Rerun::Restart,
+            Slide::Later(start) => {
+                let dropped = first_dropped(engine, records, start);
+                Rerun::Drop(dropped.map_or(from, |entry| entry.min(from)))
+            }
+            Slide::None => Rerun::Reread(from),
+        }
+    }
+
+    fn apply(&self, engine: &mut Engine, filters: &Filters) {
+        match *self {
+            Rerun::Restart => engine.set_filters(filters.clone()),
+            Rerun::Reread(from) => engine.reread(from),
+            Rerun::Drop(from) => engine.set_filters_from(filters.clone(), from),
+        }
+    }
+}
+
+/// The index, shared with the filter engine. Only `App` writes it.
+type SharedIndex = Arc<RwLock<Indexed<Source>>>;
+
+/// The filters at work on the index: their engine, and the fold state of the entries
+/// that pass, entry `i` being the engine's `i`th match. Each match folds as the
+/// index's fold state says when it comes in; after that, folding changes both.
+#[derive(Debug)]
+struct Filter {
+    engine: Engine,
+    folds: Folds,
+}
+
+impl Filter {
+    /// The filter of `index`, read in `preset`, whose matches fold as `all`, the
+    /// index's fold state, folds them.
+    fn spawn(index: &SharedIndex, preset: Preset, filters: Filters, all: &Folds) -> Self {
+        let options = filter::Options {
+            chunk: FILTER_CHUNK,
+        };
+        Filter {
+            engine: Engine::spawn(Arc::clone(index), preset, filters, options),
+            // In the index's mode, only the matches it excepts are exceptions here.
+            folds: all.empty_like(),
+        }
+    }
+
+    /// The index entry that is match `i`.
+    fn entry(&self, i: usize) -> usize {
+        self.engine.filtered().entries[i] as usize
+    }
+
+    /// Takes in the matches the engine found since the last call, folded as `all`,
+    /// the index's fold state, folds them.
+    fn take_in(&mut self, all: &Folds) {
+        self.catch_up(all, 0, Instant::now());
+    }
+
+    /// [`take_in`](Self::take_in), but waiting for the engine until it evaluated the
+    /// first `evaluated` entries or `deadline` passed.
+    fn catch_up(&mut self, all: &Folds, evaluated: usize, deadline: Instant) {
+        let known = self.engine.filtered().entries.len();
+        let entries = &self.engine.poll_until(evaluated, deadline).entries[known..];
+        for (i, &entry) in (known..).zip(entries) {
+            let entry = entry as usize;
+            self.folds.push(all.continuation_lines(entry));
+            if self.folds.hidden_lines(i) != all.hidden_lines(entry) {
+                self.folds.toggle(i);
+            }
+        }
+    }
+
+    /// Has the engine evaluate again as `rerun` says, dropping the fold state of the
+    /// matches it drops.
+    fn rerun(&mut self, rerun: &Rerun, filters: &Filters) {
+        let kept = match *rerun {
+            Rerun::Restart => 0,
+            Rerun::Reread(from) | Rerun::Drop(from) => self.matches_before(from),
+        };
+        rerun.apply(&mut self.engine, filters);
+        self.folds.truncate(kept);
+    }
+
+    fn matches_before(&self, entry: usize) -> usize {
+        let entries = &self.engine.filtered().entries;
+        entries.partition_point(|&match_| (match_ as usize) < entry)
+    }
+}
 
 /// Which records the rows are while the viewer opens.
 #[derive(Debug)]
@@ -154,9 +644,12 @@ pub struct ShownLine<'a> {
     /// The line as in the file, without its line ending.
     pub line: &'a [u8],
     /// The record of the line's entry.
-    pub record: &'a Record,
+    pub record: Record,
     /// Whether the line is its entry's first, not a continuation line.
     pub first: bool,
+    /// The line's number in the file, `None` while it isn't known (see
+    /// [`Record::line`]).
+    pub number: Option<u64>,
     /// How many lines of the entry are folded away.
     pub hidden: usize,
 }
@@ -226,9 +719,27 @@ pub struct App {
     name: String,
     source: Arc<Source>,
     indexer: Indexer,
-    records: Vec<Record>,
-    /// The fold state of `records`.
+    /// The records of the file's entries, and `source` again for the filter engine.
+    index: SharedIndex,
+    /// The fold state of the index's entries.
     folds: Folds,
+    /// Per level, the entries of the index, as of the last change to it.
+    level_counts: [u32; 6],
+    filters: Filters,
+    /// What `filters.time` is made of while set.
+    time_filter: Option<TimeFilter>,
+    /// The last entry of the index with a timestamp, and that timestamp, kept while
+    /// there is a time filter.
+    last_dated: Option<(usize, Timestamp)>,
+    clock: fn() -> Timestamp,
+    /// At work since the first [`set_filters`](Self::set_filters).
+    filter: Option<Filter>,
+    search: Option<Search>,
+    /// Counts the entries the filters show that match `search`; at work while there
+    /// is one.
+    matches: Option<Engine>,
+    /// The way a move to a match is waiting to go, for matches not yet counted.
+    pending_step: Option<bool>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
@@ -257,7 +768,10 @@ pub struct App {
     /// How many columns the message column is scrolled to the right.
     scroll: usize,
     shows_thread: bool,
+    shows_line_numbers: bool,
     wraps: bool,
+    panel: Option<Panel>,
+    notice: Option<&'static str>,
     quit: bool,
 }
 
@@ -306,12 +820,25 @@ impl App {
             indexed: 0,
             total: source.bytes().len() as u64,
         };
+        let index = Indexed {
+            records: Vec::new(),
+            bytes: Arc::clone(&source),
+        };
         Self {
             name: name.to_string_lossy().into_owned(),
             indexer: Indexer::spawn(Arc::clone(&source), settings.clone()),
             source,
-            records: Vec::new(),
+            index: Arc::new(RwLock::new(index)),
             folds: Folds::default(),
+            level_counts: [0; 6],
+            filters: Filters::default(),
+            time_filter: None,
+            last_dated: None,
+            clock: Timestamp::now,
+            filter: None,
+            search: None,
+            matches: None,
+            pending_step: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
             opens_at_end: follow,
@@ -328,7 +855,10 @@ impl App {
             viewport: Viewport::new(0, 0),
             scroll: 0,
             shows_thread: false,
+            shows_line_numbers: true,
             wraps: false,
+            panel: None,
+            notice: None,
             quit: false,
         }
     }
@@ -343,6 +873,14 @@ impl App {
     /// While a file is [watched](Self::watch), it also takes in what happened to the
     /// file since the last call, as [`file_changed`](Self::file_changed) does.
     pub fn poll_index(&mut self) {
+        // Before the index changes, which starts the engines over from the first entry
+        // it changes and drops what they found past it.
+        if let Some(filter) = &mut self.filter {
+            filter.take_in(&self.folds);
+        }
+        if let Some(matches) = &mut self.matches {
+            matches.poll();
+        }
         let changes = self.watch.as_mut().map_or_else(Vec::new, Watch::changes);
         for change in changes {
             self.file_changed(change);
@@ -355,12 +893,29 @@ impl App {
         }
         // Once complete, the index is kept up to date by `grow`, not by the indexer.
         if !self.progress.is_complete() {
-            let known = self.records.len();
-            self.progress = self.indexer.poll(&mut self.records);
-            let found = &self.records[known..];
+            let mut index = write(&self.index);
+            let known = index.records.len();
+            self.progress = self.indexer.poll(&mut index.records);
+            let found = &index.records[known..];
             push_entries(&mut self.folds, self.source.bytes(), found);
+            count_levels(&mut self.level_counts, found, Count::Add);
+            let found = found.len();
+            drop(index);
             if self.index_brings_new {
-                self.count_new(found.len());
+                self.count_new(found);
+            }
+            // A time-only preset's entries get their timestamps once the index is
+            // complete, all of them at once.
+            let dated = self.progress.is_complete()
+                && self
+                    .settings
+                    .preset
+                    .entry_parser()
+                    .is_some_and(|parser| !parser.has_date());
+            if dated {
+                self.reread(0);
+            } else if found > 0 {
+                self.reread(known);
             }
         }
         if self.progress.is_complete() {
@@ -372,6 +927,9 @@ impl App {
             }
         }
         self.update_rows();
+        if let Some(backward) = self.pending_step.take() {
+            self.step(backward);
+        }
     }
 
     /// How far indexing got as of the last [`poll_index`](Self::poll_index):
@@ -411,13 +969,14 @@ impl App {
     /// unfolded one. `None` for the row that marks a truncation (see
     /// [`FileChange::Truncated`]). Panics if `i` is not below `viewport().total()`.
     pub fn row(&self, i: usize) -> Option<ShownLine<'_>> {
-        let (records, folds) = self.shown();
+        let folds = self.shown_folds();
         let (entry, line) = folds.line_at(self.fold_row(i)?);
-        let record = &records[entry];
+        let record = self.shown_record(entry);
         Some(ShownLine {
-            line: self.entry_line(record, line),
+            line: self.entry_line(&record, line),
             record,
             first: line == 0,
+            number: record.line().map(|first| first + line as u64),
             hidden: folds.hidden_lines(entry),
         })
     }
@@ -502,10 +1061,10 @@ impl App {
     }
 
     /// Whether the app has more to take in at the next [`poll_index`](Self::poll_index)
-    /// without anything happening on screen: the index isn't complete, or a watcher
-    /// may report changes to the file.
+    /// without anything happening on screen: the index isn't complete, a watcher may
+    /// report changes to the file, or the filters' results are still coming in.
     pub(crate) fn expects_updates(&self) -> bool {
-        !self.progress.is_complete() || self.watch.is_some()
+        !self.progress.is_complete() || self.watch.is_some() || self.filtering() || self.searching()
     }
 
     /// Whether the preset was detected, found none fitting and fell back to `Raw`.
@@ -542,6 +1101,197 @@ impl App {
         self.shows_thread
     }
 
+    /// Whether the gutter of file line numbers is shown; it is until
+    /// [`Action::ToggleLineNumbers`] hides it.
+    pub fn shows_line_numbers(&self) -> bool {
+        self.shows_line_numbers
+    }
+
+    /// The number in the file of the last line of the last entry: of the index, or
+    /// of the file's last entries while they are shown. `None` while there are none
+    /// or their numbers aren't known. Entries the filters hide count too, so that the
+    /// gutter keeps its width while the filters change.
+    pub fn last_line_number(&self) -> Option<u64> {
+        let index;
+        let (records, folds) = match &self.opening {
+            Opening::Tail(records, folds) => (records, folds),
+            Opening::Index | Opening::AtEnd => {
+                index = read(&self.index);
+                (&index.records, &self.folds)
+            }
+        };
+        let last = records.len().checked_sub(1)?;
+        let first = records[last].line()?;
+        Some(first + folds.continuation_lines(last) as u64)
+    }
+
+    /// Shows only the entries that pass `filters` (see [`crate::filter`]), as their
+    /// results come in from the background at each [`poll_index`](Self::poll_index):
+    /// entries appended to the file are filtered as they come, and an entry read
+    /// again is filtered again. The rows are the matching entries, folded or unfolded
+    /// as before, with the truncation row still first. The first row is selected, the
+    /// last one while following.
+    ///
+    /// Opened at the end, the file's last entries are shown unfiltered until the
+    /// index is complete and takes over, filtered.
+    pub fn set_filters(&mut self, filters: Filters) {
+        self.filters = filters;
+        // The index shows as it is, which is cheaper than an engine passing every entry.
+        if hides_nothing(&self.filters) {
+            self.filter = None;
+        } else {
+            self.start_filter();
+        }
+        if let Some(matches) = &mut self.matches {
+            matches.set_filters(self.filters.clone());
+        }
+        self.viewport = Viewport::new(0, self.viewport.height());
+        self.update_rows();
+    }
+
+    /// Sets the time filter, keeping the other filters, or clears it with `None`.
+    /// It covers what [`TimeFilter::range`] says for the last entry with a timestamp
+    /// and the [clock](Self::set_clock), in the app's zone; while there is no such
+    /// entry, it lets none through. As entries come in, or get their dates once a
+    /// time-only log is indexed, it covers what it says for the new last entry: the
+    /// last N slides along, and the entries that fall out of it are no longer shown.
+    /// Entries without a timestamp are hidden while it is set.
+    pub fn set_time_filter(&mut self, filter: Option<TimeFilter>) {
+        self.time_filter = filter;
+        self.filters.time = None;
+        self.last_dated = None;
+        self.slide_time_filter(0);
+        let filters = std::mem::take(&mut self.filters);
+        self.set_filters(filters);
+    }
+
+    /// The time filter [`set_time_filter`](Self::set_time_filter) set; none at first.
+    pub fn time_filter(&self) -> Option<&TimeFilter> {
+        self.time_filter.as_ref()
+    }
+
+    /// Reads the wall clock from `now` from here on, for a time filter on
+    /// [`Base::Now`](crate::filter::Base::Now). It is the system clock at first.
+    pub fn set_clock(&mut self, now: fn() -> Timestamp) {
+        self.clock = now;
+    }
+
+    /// The filters [`set_filters`](Self::set_filters) set; none at first.
+    pub fn filters(&self) -> &Filters {
+        &self.filters
+    }
+
+    /// Whether the filters' results aren't complete yet: entries the index has are
+    /// still to be evaluated.
+    pub fn filtering(&self) -> bool {
+        self.filter.as_ref().is_some_and(|filter| {
+            filter.engine.filtered().evaluated < read(&self.index).records.len()
+        })
+    }
+
+    /// Whether the rows would be the entries that pass the filters, but none does:
+    /// the index is complete and has entries, and the filters' results are in.
+    pub fn nothing_matches(&self) -> bool {
+        self.progress.is_complete()
+            && !self.filtering()
+            && self.filter.as_ref().is_some_and(|filter| {
+                filter.engine.filtered().entries.is_empty() && !read(&self.index).records.is_empty()
+            })
+    }
+
+    /// The header's level counters, indexed by `Level as usize`: per level, the
+    /// entries of that level that pass every filter but the level filter, so that a
+    /// hidden level doesn't drop to zero. Entries without a level aren't counted.
+    ///
+    /// Without a class, time or text filter they are the index's entries per level
+    /// as of the last [`poll_index`](Self::poll_index), counted as the index takes
+    /// them in. With one, they come in with the filters' results, as
+    /// [`filtering`](Self::filtering) says.
+    pub fn level_counts(&self) -> [u32; 6] {
+        match &self.filter {
+            Some(filter) if narrows_beyond_levels(&self.filters) => filter.engine.filtered().counts,
+            _ => self.level_counts,
+        }
+    }
+
+    /// The open panel, if any: [`Panel::Levels`] while the level panel is open,
+    /// [`Panel::Classes`] while the class panel is, [`Panel::Time`] while the time
+    /// panel is, [`Panel::Text`] while the text filter prompt is.
+    ///
+    /// [`Action::LevelPanel`] opens the level panel with the
+    /// current level filter and the cursor on TRACE. While it is open, up and down
+    /// (`Action::Up`, `Action::Down`) move its cursor, stopping at TRACE and FATAL,
+    /// [`Action::ToggleFold`] toggles the level under the cursor and
+    /// [`Action::ToggleLevel`] the level it names, in the panel only.
+    /// [`Action::Confirm`] sets the level filter to the panel's, keeping the other
+    /// filters, and closes it; [`Action::Cancel`] closes it and keeps the filters as
+    /// they were. [`Action::Quit`] still quits; every other action does nothing.
+    ///
+    /// [`Action::ClassPanel`] opens the class panel with the current class rules, one
+    /// per line ([`Classes::rules`](crate::filter::Classes::rules)), and an empty line
+    /// after them with the cursor on it. [`App::key`] edits it.
+    ///
+    /// [`Action::TimePanel`] opens the time panel with the current time filter's spec
+    /// and base, or an empty spec counted from the file without one. [`App::key`]
+    /// edits it.
+    ///
+    /// [`Action::TextPanel`] opens the text filter prompt with the current text
+    /// filter's pattern and options ([`Matcher::pattern`](crate::matcher::Matcher::pattern),
+    /// [`Matcher::options`](crate::matcher::Matcher::options)), or an empty plain,
+    /// case-sensitive pattern without one. [`App::key`] edits it.
+    ///
+    /// [`Action::LinePrompt`] and [`Action::TimePrompt`] open an empty jump prompt
+    /// for a line or a time. [`App::key`] edits it.
+    ///
+    /// [`Action::SearchForward`] and [`Action::SearchBackward`] open the search
+    /// prompt, empty and with the options of the last search. [`App::key`] edits it
+    /// like the text filter prompt.
+    pub fn panel(&self) -> Option<&Panel> {
+        self.panel.as_ref()
+    }
+
+    /// The search set in the search prompt, if any; none at first.
+    pub fn search(&self) -> Option<&Search> {
+        self.search.as_ref()
+    }
+
+    /// `(position, total)` of the search's matches, `None` without a search: `total`
+    /// is how many entries the filters show match the search, `position` how many of
+    /// them are at or before the selected row's entry.
+    pub fn match_count(&self) -> Option<(usize, usize)> {
+        let entries = &self.matches.as_ref()?.filtered().entries;
+        let position = self.selected_entry().map_or(0, |selected| {
+            entries.partition_point(|&entry| entry as usize <= selected)
+        });
+        Some((position, entries.len()))
+    }
+
+    /// Whether the search's matches aren't all counted yet: entries the filters show
+    /// are still to be searched.
+    pub fn searching(&self) -> bool {
+        self.matches
+            .as_ref()
+            .is_some_and(|matches| matches.filtered().evaluated < read(&self.index).records.len())
+    }
+
+    /// Whether a line that folding hides from row `i`'s entry matches the search.
+    pub fn hides_match(&self, i: usize) -> bool {
+        let (Some(search), Some(shown)) = (&self.search, self.row(i)) else {
+            return false;
+        };
+        // The engine already knows which entries have a match; most folded ones don't.
+        let counted = self
+            .index_entry(i)
+            .is_some_and(|entry| self.is_match(entry));
+        if shown.hidden == 0 || !counted {
+            return false;
+        }
+        let entry = &self.source.bytes()[file_range(&shown.record)];
+        source::lines(entry)
+            .skip(1)
+            .any(|line| search.matcher.is_match(&strip_ansi(line)))
+    }
+
     /// Whether long messages wrap onto the following screen lines instead of being
     /// cut at the right edge.
     pub fn wraps(&self) -> bool {
@@ -567,6 +1317,11 @@ impl App {
     /// When the selected line gets folded away, its entry's first line takes its
     /// place.
     pub fn apply(&mut self, action: Action) {
+        self.pending_step = None;
+        if let Some(panel) = self.panel.take() {
+            self.apply_in_panel(panel, action);
+            return;
+        }
         if matches!(
             action,
             Action::Up | Action::PageUp | Action::HalfPageUp | Action::Top
@@ -591,13 +1346,135 @@ impl App {
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
+            Action::ToggleLineNumbers => self.shows_line_numbers = !self.shows_line_numbers,
             Action::ToggleWrap => self.wraps = !self.wraps,
             Action::CyclePreset => self.cycle_preset(),
             Action::ToggleFold => self.toggle_fold(),
             Action::FoldAll => self.set_all_folded(true),
             Action::UnfoldAll => self.set_all_folded(false),
+            Action::ToggleLevel(level) => {
+                let mut levels = self.filters.levels;
+                levels.toggle(level);
+                self.set_levels(levels);
+            }
+            Action::LevelPanel => {
+                self.panel = Some(Panel::Levels(LevelPanel {
+                    levels: self.filters.levels,
+                    cursor: Level::Trace,
+                }));
+            }
+            Action::OnlyClass => self.change_classes(|classes, class| {
+                classes.include = vec![Rule::Prefix(class)];
+            }),
+            Action::HideClass => self.change_classes(|classes, class| {
+                classes.exclude.push(Rule::Prefix(class));
+            }),
+            Action::ClassPanel => {
+                self.panel = Some(Panel::Classes(ClassPanel::new(&self.filters.classes)));
+            }
+            Action::TimePanel => {
+                self.panel = Some(Panel::Time(TimePanel::new(self.time_filter.as_ref())));
+            }
+            Action::TextPanel => {
+                let prompt = Prompt::new(self.filters.text.as_ref());
+                self.panel = Some(Panel::Text(prompt));
+            }
+            Action::ClearFilters => {
+                self.time_filter = None;
+                self.last_dated = None;
+                self.set_filters(Filters::default());
+            }
+            Action::LinePrompt => self.panel = Some(Panel::Jump(JumpPrompt::new(Jump::Line))),
+            Action::TimePrompt => self.panel = Some(Panel::Jump(JumpPrompt::new(Jump::Time))),
+            Action::SearchForward => self.open_search(false),
+            Action::SearchBackward => self.open_search(true),
+            Action::NextMatch => self.step_search(false),
+            Action::PreviousMatch => self.step_search(true),
+            Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
+    }
+
+    /// Does what `key` asks. While the class panel is open, the key edits it: a
+    /// character, with or without Shift, is typed at the end of the cursor's line,
+    /// `Backspace` deletes the line's last character, or the line itself if it is
+    /// empty and not the only one (the cursor going to the line above), `↑ ↓` move the
+    /// cursor between the lines, stopping at the ends, and `↓` on the last line adds
+    /// an empty line after it unless it is empty itself. `Enter` sets the class filter
+    /// to the rules of the lines ([`Classes::parse`](crate::filter::Classes::parse)),
+    /// keeping the other filters, and closes the panel; if they don't parse, the
+    /// panel stays open with the [error](ClassPanel::error) and the filters stay as
+    /// they were. `Esc` closes the panel without applying it, `Ctrl-c` quits, and
+    /// other keys do nothing.
+    ///
+    /// The time panel is edited the same way, its one line being the spec, except
+    /// that `Backspace` only deletes, `↓ ↑` step through the presets `1m 5m 10m 30m
+    /// 60m 24h`, stopping at the ends (from a spec that is none of them, `↓` goes to
+    /// the first and `↑` to the last), and `Tab` toggles the base. `Enter` sets the
+    /// time filter ([`set_time_filter`](Self::set_time_filter)) to the spec and base,
+    /// or clears it for a blank spec; one that doesn't parse keeps the panel open with
+    /// the [error](TimePanel::error).
+    ///
+    /// The text filter prompt is edited like the time panel, except that `Ctrl-r`
+    /// toggles [regex](crate::matcher::Options::regex) and `Tab` or `Ctrl-i`
+    /// [ignore case](crate::matcher::Options::ignore_case). `Enter` sets the text
+    /// filter to the pattern read as the options say, keeping the other filters, or
+    /// clears it for an empty pattern; an invalid regex keeps the prompt open with
+    /// the [error](Prompt::error).
+    ///
+    /// The search prompt is edited the same way. `Enter` sets the [search](Self::search)
+    /// to the pattern, or clears it for an empty pattern, and selects the first
+    /// matching entry after the selected one (before it, searching backward), as
+    /// [`Action::NextMatch`] does; `Esc` keeps the last search. The matches are all
+    /// the lines of an entry, folded away or not, with ANSI escape codes stripped.
+    /// [`Action::NextMatch`] and [`Action::PreviousMatch`] stop following and select the
+    /// next and previous matching entry among those the filters show, wrapping around
+    /// with the [notice](Self::notice) `search wrapped`, or say `pattern not found`.
+    /// Matches are counted in the background; a move that needs matches not counted
+    /// yet is made at the [`poll_index`](Self::poll_index) that has them.
+    ///
+    /// A jump prompt is edited like the time panel, without `Tab` and the presets.
+    /// `Enter` closes it and jumps, or only closes it while its text is blank; text
+    /// that says nothing to jump to keeps it open with the [error](JumpPrompt::error).
+    /// Either jump stops following and selects the first line of the entry it lands
+    /// on, folding nothing and unfolding nothing; in a file without rows it selects
+    /// nothing.
+    ///
+    /// - [`Jump::Line`]: a whole number `n`, the gutter's line numbers, lands on the
+    ///   entry holding file line `n`, or on the line itself while that entry is
+    ///   unfolded. If the filters hide that entry, it lands on the next entry they
+    ///   show; past the last one, on the last one. `0` lands on the first row, a
+    ///   number past the end on the last. Anything else is the error `'<text>' is not
+    ///   a line number`.
+    /// - [`Jump::Time`]: a [`TimeSpec`] lands on the first entry the filters show,
+    ///   in file order, whose timestamp is at or after the spec's
+    ///   [start](TimeSpec::start), dated by the last entry with a timestamp. Past the
+    ///   last such entry it lands on the last row. With no entry with a timestamp it
+    ///   stays where it is, and the [notice](Self::notice) says `no entry has a
+    ///   timestamp`.
+    ///
+    /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
+    pub fn key(&mut self, key: KeyEvent) {
+        self.notice = None;
+        let action = match &mut self.panel {
+            Some(Panel::Classes(panel)) => panel.key(key),
+            Some(Panel::Time(panel)) => panel.key(key),
+            Some(Panel::Text(prompt)) => prompt.key(key),
+            Some(Panel::Jump(prompt)) => prompt.key(key),
+            Some(Panel::Search { prompt, .. }) => prompt.key(key),
+            _ => action(key),
+        };
+        if let Some(action) = action {
+            self.apply(action);
+        }
+    }
+
+    /// What the viewer has to tell about the last key, until the next one: `the
+    /// selected entry has no class` after [`Action::OnlyClass`] or
+    /// [`Action::HideClass`] on an entry without a class (or with no row selected),
+    /// which then change nothing.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice
     }
 
     /// Whether [`Action::Quit`] has been applied.
@@ -623,20 +1500,182 @@ impl App {
             self.opens_at_end
         };
         self.index_again(Opening::new(at_end));
+        // The engine reads the entries in the preset it started with.
+        if self.filter.is_some() {
+            self.start_filter();
+        }
+        self.start_search();
         self.read_tail();
+    }
+
+    /// Opens the search prompt, empty and reading its pattern as the last search did.
+    fn open_search(&mut self, backward: bool) {
+        let options = self
+            .search
+            .as_ref()
+            .map_or_else(matcher::Options::default, |search| search.matcher.options());
+        let prompt = Prompt {
+            options,
+            ..Prompt::new(None)
+        };
+        self.panel = Some(Panel::Search { prompt, backward });
+    }
+
+    /// Makes `search` the search and selects its first match from the selected entry,
+    /// or drops the search for `None`.
+    fn set_search(&mut self, search: Option<Search>) {
+        self.search = search;
+        self.start_search();
+        self.step_search(false);
+    }
+
+    /// Starts counting the matches of the search, in place of any engine at work.
+    fn start_search(&mut self) {
+        self.matches = self.search.as_ref().map(|search| {
+            let options = filter::Options {
+                chunk: FILTER_CHUNK,
+            };
+            Engine::spawn_search(
+                Arc::clone(&self.index),
+                self.settings.preset,
+                self.filters.clone(),
+                search.matcher.clone(),
+                options,
+            )
+        });
+    }
+
+    /// [`step`](Self::step) in the direction of the search, or against it if `reverse`.
+    fn step_search(&mut self, reverse: bool) {
+        if let Some(search) = &self.search {
+            self.step(search.backward != reverse);
+        }
+    }
+
+    /// Selects the next entry that matches the search, up the rows if `backward`. When
+    /// the matches that tell aren't counted yet, it is done as soon as they are.
+    fn step(&mut self, backward: bool) {
+        let Some(matches) = &self.matches else {
+            return;
+        };
+        let counted = self.progress.is_complete() && !self.searching();
+        let next = find_match(matches.filtered(), self.selected_entry(), backward, counted);
+        match next {
+            Next::Wait => self.pending_step = Some(backward),
+            Next::Nothing => self.notice = Some("pattern not found"),
+            Next::Match { entry, wrapped } => match self.entry_row(entry) {
+                // The filters' results haven't caught up with the entry yet.
+                None => self.pending_step = Some(backward),
+                Some(row) => {
+                    self.following = false;
+                    self.viewport.goto(row);
+                    self.notice = wrapped.then_some("search wrapped");
+                }
+            },
+        }
+    }
+
+    /// The index entry that viewport row `row` shows, `None` for the truncation row and
+    /// while the rows are the file's last entries, which the index doesn't number.
+    fn index_entry(&self, row: usize) -> Option<usize> {
+        let (shown, _) = self.shown_folds().line_at(self.fold_row(row)?);
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(..), _) => None,
+            (_, Some(filter)) => Some(filter.entry(shown)),
+            (_, None) => Some(shown),
+        }
+    }
+
+    fn selected_entry(&self) -> Option<usize> {
+        self.index_entry(self.viewport.selected()?)
+    }
+
+    /// The viewport row of the first line of index entry `entry`, `None` while the
+    /// rows don't show it.
+    fn entry_row(&self, entry: usize) -> Option<usize> {
+        let shown = match (&self.opening, &self.filter) {
+            (Opening::Tail(..), _) => return None,
+            (_, Some(filter)) => filter
+                .engine
+                .filtered()
+                .entries
+                .binary_search(&(entry as u32))
+                .ok()?,
+            (_, None) => entry,
+        };
+        let folds = self.shown_folds();
+        (shown < folds.entries()).then(|| self.lead_rows() + folds.row_of(shown, 0))
+    }
+
+    /// Whether the search's matches counted so far include index entry `entry`.
+    fn is_match(&self, entry: usize) -> bool {
+        self.matches.as_ref().is_some_and(|matches| {
+            let entries = &matches.filtered().entries;
+            entries.binary_search(&(entry as u32)).is_ok()
+        })
+    }
+
+    /// Starts evaluating the filters over the index, in place of any engine at work.
+    fn start_filter(&mut self) {
+        let filters = self.filters.clone();
+        let preset = self.settings.preset;
+        self.filter = Some(Filter::spawn(&self.index, preset, filters, &self.folds));
     }
 
     /// Indexes the source from the start, the rows opening as `opening` says.
     fn index_again(&mut self, opening: Opening) {
         // Dropping the old indexer stops it.
         self.indexer = Indexer::spawn(Arc::clone(&self.source), self.settings.clone());
-        self.records.clear();
+        write(&self.index).records.clear();
+        self.level_counts = [0; 6];
+        self.reread(0);
         self.progress = Progress {
             indexed: 0,
             total: self.size(),
         };
         self.opening = opening;
         self.viewport = Viewport::new(0, self.viewport.height());
+    }
+
+    /// Has the filters evaluate the index's entries from `from` on again, after they
+    /// changed, and waits for them when there are only a few left to evaluate.
+    fn reread(&mut self, from: usize) {
+        let slide = self.slide_time_filter(from);
+        let index = read(&self.index);
+        if let Some(matches) = &mut self.matches {
+            Rerun::after(&slide, matches, &index.records, from).apply(matches, &self.filters);
+        }
+        let Some(filter) = &mut self.filter else {
+            return;
+        };
+        let rerun = Rerun::after(&slide, &filter.engine, &index.records, from);
+        drop(index);
+        filter.rerun(&rerun, &self.filters);
+        let total = read(&self.index).records.len();
+        if total.saturating_sub(filter.engine.filtered().evaluated) <= FILTER_CHUNK {
+            filter.catch_up(&self.folds, total, Instant::now() + CATCH_UP);
+        }
+    }
+
+    /// Brings the time range of the time filter, if any, up to date with the index,
+    /// whose entries from `from` on are new or read again. How it changed.
+    fn slide_time_filter(&mut self, from: usize) -> Slide {
+        let Some(time_filter) = &self.time_filter else {
+            return Slide::None;
+        };
+        self.last_dated = last_dated(&read(&self.index).records, from, self.last_dated);
+        let range = match self.last_dated {
+            Some((_, last)) => time_filter.range(last, (self.clock)(), &self.settings.zone),
+            None => NO_TIME,
+        };
+        let old = self.filters.time.replace(range);
+        match old {
+            Some(old) if old == range => Slide::None,
+            Some(old) if old.end == range.end && old.start <= range.start => {
+                Slide::Later(range.start)
+            }
+            _ => Slide::Restart,
+        }
     }
 
     /// Selects the last row and follows the file from there.
@@ -683,7 +1722,7 @@ impl App {
     }
 
     fn row_count(&self) -> usize {
-        self.lead_rows() + self.shown().1.row_count()
+        self.lead_rows() + self.shown_folds().row_count()
     }
 
     /// The rows before the entries: the truncation row, if there is one.
@@ -699,6 +1738,7 @@ impl App {
 
     fn set_source(&mut self, source: Source) {
         self.source = Arc::new(source);
+        write(&self.index).bytes = Arc::clone(&self.source);
         // The mark points into the old mapping, whose bytes may be gone.
         self.line_mark.take();
     }
@@ -709,10 +1749,24 @@ impl App {
             return;
         }
         self.set_source(source);
-        let known = self.records.len();
-        index::append(&mut self.records, self.source.bytes(), &self.settings);
-        push_appended(&mut self.folds, self.source.bytes(), &self.records, known);
-        self.count_new(self.records.len().saturating_sub(known));
+        let mut index = write(&self.index);
+        let known = index.records.len();
+        count_levels(
+            &mut self.level_counts,
+            &index.records[appended_from(known)..],
+            Count::Remove,
+        );
+        index::append(&mut index.records, self.source.bytes(), &self.settings);
+        count_levels(
+            &mut self.level_counts,
+            &index.records[appended_from(known)..],
+            Count::Add,
+        );
+        push_appended(&mut self.folds, self.source.bytes(), &index.records, known);
+        let found = index.records.len().saturating_sub(known);
+        drop(index);
+        self.count_new(found);
+        self.reread(appended_from(known));
         self.progress = Progress {
             indexed: self.size(),
             total: self.size(),
@@ -731,26 +1785,234 @@ impl App {
         self.index_again(Opening::Index);
     }
 
-    /// The records of the entries shown and their fold state.
-    fn shown(&self) -> (&[Record], &Folds) {
-        match &self.opening {
-            Opening::Tail(tail, folds) => (tail, folds),
-            Opening::Index | Opening::AtEnd => (&self.records, &self.folds),
+    /// The fold state of the entries the rows show: the file's last entries, the
+    /// matches of the filters or the index.
+    fn shown_folds(&self) -> &Folds {
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(_, folds), _) => folds,
+            (_, Some(filter)) => &filter.folds,
+            (_, None) => &self.folds,
         }
     }
 
     fn shown_folds_mut(&mut self) -> &mut Folds {
-        match &mut self.opening {
-            Opening::Tail(_, folds) => folds,
-            Opening::Index | Opening::AtEnd => &mut self.folds,
+        match (&mut self.opening, &mut self.filter) {
+            (Opening::Tail(_, folds), _) => folds,
+            (_, Some(filter)) => &mut filter.folds,
+            (_, None) => &mut self.folds,
+        }
+    }
+
+    /// The record of the rows' `entry`th entry.
+    fn shown_record(&self, entry: usize) -> Record {
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(records, _), _) => records[entry],
+            (_, Some(filter)) => read(&self.index).records[filter.entry(entry)],
+            (_, None) => read(&self.index).records[entry],
         }
     }
 
     fn toggle_fold(&mut self) {
         if let Some(row) = self.viewport.selected().and_then(|row| self.fold_row(row)) {
-            let (entry, _) = self.shown().1.line_at(row);
+            let (entry, _) = self.shown_folds().line_at(row);
             self.refold(|folds| folds.toggle(entry));
+            // The index keeps the fold state of a match for when the filters change.
+            if let (Opening::Index | Opening::AtEnd, Some(filter)) = (&self.opening, &self.filter) {
+                let entry = filter.entry(entry);
+                self.folds.toggle(entry);
+            }
         }
+    }
+
+    /// `action` while `panel` is open, taken out of `self.panel`: Confirm applies it,
+    /// Cancel leaves it closed, Quit quits with it open, anything else edits it and puts
+    /// it back.
+    fn apply_in_panel(&mut self, mut panel: Panel, action: Action) {
+        match action {
+            Action::Confirm => match panel {
+                Panel::Levels(panel) => self.set_levels(panel.levels),
+                Panel::Classes(mut panel) => {
+                    match Classes::parse(panel.lines.iter().map(String::as_str)) {
+                        Ok(classes) => self.set_classes(classes),
+                        Err(error) => {
+                            panel.error = Some(error);
+                            self.panel = Some(Panel::Classes(panel));
+                        }
+                    }
+                }
+                Panel::Time(mut panel) => match panel.filter() {
+                    Ok(filter) => self.set_time_filter(filter),
+                    Err(error) => {
+                        panel.error = Some(error);
+                        self.panel = Some(Panel::Time(panel));
+                    }
+                },
+                Panel::Text(mut prompt) => match prompt.matcher() {
+                    Ok(text) => self.set_text(text),
+                    Err(error) => {
+                        prompt.error = Some(error);
+                        self.panel = Some(Panel::Text(prompt));
+                    }
+                },
+                Panel::Jump(mut prompt) => {
+                    if let Err(error) = self.jump(prompt.to, &prompt.text) {
+                        prompt.error = Some(error);
+                        self.panel = Some(Panel::Jump(prompt));
+                    }
+                }
+                Panel::Search {
+                    mut prompt,
+                    backward,
+                } => match prompt.matcher() {
+                    Ok(matcher) => {
+                        self.set_search(matcher.map(|matcher| Search { matcher, backward }))
+                    }
+                    Err(error) => {
+                        prompt.error = Some(error);
+                        self.panel = Some(Panel::Search { prompt, backward });
+                    }
+                },
+            },
+            Action::Cancel => {}
+            Action::Quit => {
+                self.quit = true;
+                self.panel = Some(panel);
+            }
+            _ => {
+                panel.edit(action);
+                self.panel = Some(panel);
+            }
+        }
+    }
+
+    /// Jumps as a prompt for `to` asks with `text` typed into it. A blank text jumps
+    /// nowhere; an error says why `text` names nothing to jump to.
+    fn jump(&mut self, to: Jump, text: &str) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        let row = match to {
+            Jump::Line => self.line_row(text)?,
+            Jump::Time => self.time_row(text)?,
+        };
+        if let Some(row) = row {
+            self.following = false;
+            self.viewport.goto(row);
+        }
+        Ok(())
+    }
+
+    /// The row of file line `text`, `None` to stay where the viewer is.
+    fn line_row(&mut self, text: &str) -> Result<Option<usize>, String> {
+        let text = text.trim();
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("'{text}' is not a line number"));
+        }
+        // Too many digits for a `u64` is a line past the end of any file.
+        let line: u64 = text.parse().unwrap_or(u64::MAX);
+        if matches!(self.opening, Opening::Tail(..)) {
+            self.notice = Some("line numbers are not known until the file is indexed");
+            return Ok(None);
+        }
+        let folds = self.shown_folds();
+        let entries = folds.entries();
+        if entries == 0 {
+            return Ok(None);
+        }
+        if line == 0 {
+            return Ok(Some(0));
+        }
+        let first = |entry: usize| self.shown_record(entry).line().unwrap_or(0);
+        // The first entry that has the line or comes after it; the last one past the end.
+        let ends_before = |entry: usize| {
+            let last = first(entry) + folds.continuation_lines(entry) as u64;
+            last < line
+        };
+        let entry = partition_point(entries, ends_before).min(entries - 1);
+        let inside = if folds.hidden_lines(entry) > 0 {
+            0
+        } else {
+            let last = folds.continuation_lines(entry) as u64;
+            line.saturating_sub(first(entry)).min(last) as usize
+        };
+        Ok(Some(self.lead_rows() + folds.row_of(entry, inside)))
+    }
+
+    /// The row of the first entry shown at or after the time `text` says, `None` to
+    /// stay where the viewer is.
+    fn time_row(&mut self, text: &str) -> Result<Option<usize>, String> {
+        let spec = TimeSpec::parse(text)?;
+        let entries = self.shown_folds().entries();
+        if entries == 0 {
+            return Ok(None);
+        }
+        // One guard for the whole scan: taking it per entry would stall the UI behind
+        // a pending writer.
+        let index = read(&self.index);
+        let (records, filtered) = match (&self.opening, &self.filter) {
+            (Opening::Tail(records, _), _) => (records.as_slice(), None),
+            (_, filter) => (index.records.as_slice(), filter.as_ref()),
+        };
+        let Some((_, last)) = last_dated(records, 0, None) else {
+            self.notice = Some("no entry has a timestamp");
+            return Ok(None);
+        };
+        let start = spec.start(last, &self.settings.zone);
+        let at_or_after = |record: &Record| record.timestamp().is_some_and(|at| at >= start);
+        // The engine may know of matches the fold state doesn't yet.
+        let found = match filtered {
+            Some(filter) => filter
+                .engine
+                .filtered()
+                .entries
+                .iter()
+                .take(entries)
+                .position(|&entry| at_or_after(&records[entry as usize])),
+            None => records.iter().take(entries).position(at_or_after),
+        };
+        Ok(Some(found.map_or(self.row_count() - 1, |entry| {
+            self.lead_rows() + self.shown_folds().row_of(entry, 0)
+        })))
+    }
+
+    /// Sets the level filter to `levels`, keeping the other filters.
+    fn set_levels(&mut self, levels: Levels) {
+        let others = std::mem::take(&mut self.filters);
+        self.set_filters(Filters { levels, ..others });
+    }
+
+    /// Sets the class filter to `classes`, keeping the other filters.
+    fn set_classes(&mut self, classes: Classes) {
+        let others = std::mem::take(&mut self.filters);
+        self.set_filters(Filters { classes, ..others });
+    }
+
+    /// Sets the text filter to `text`, keeping the other filters.
+    fn set_text(&mut self, text: Option<Matcher>) {
+        let others = std::mem::take(&mut self.filters);
+        self.set_filters(Filters { text, ..others });
+    }
+
+    /// Lets `change` change the class filter with the selected entry's class, or
+    /// says that it has none.
+    fn change_classes(&mut self, change: impl FnOnce(&mut Classes, String)) {
+        let Some(class) = self.selected_class() else {
+            self.notice = Some(NO_CLASS);
+            return;
+        };
+        let mut classes = self.filters.classes.clone();
+        change(&mut classes, class);
+        self.set_classes(classes);
+    }
+
+    /// The full class name of the selected row's entry, as its first line has it.
+    fn selected_class(&self) -> Option<String> {
+        let row = self.fold_row(self.viewport.selected()?)?;
+        let (entry, _) = self.shown_folds().line_at(row);
+        let record = self.shown_record(entry);
+        let first = strip_ansi(self.entry_line(&record, 0));
+        let class = first.get(record.class()?)?;
+        Some(String::from_utf8_lossy(class).into_owned())
     }
 
     fn set_all_folded(&mut self, folded: bool) {
@@ -759,12 +2021,13 @@ impl App {
         } else {
             Folds::unfold_all
         };
-        // The index behind the last entries takes the mode too, so that it holds
-        // once the index takes over.
-        if matches!(self.opening, Opening::Tail(..)) {
-            set(&mut self.folds);
-        }
         self.refold(set);
+        // The fold states not shown take the mode too, so that it holds once they
+        // are. Setting it again on the one shown changes nothing.
+        set(&mut self.folds);
+        if let Some(filter) = &mut self.filter {
+            set(&mut filter.folds);
+        }
     }
 
     /// Changes the fold state of the entries shown, keeping the selected line on its
@@ -772,7 +2035,7 @@ impl App {
     fn refold(&mut self, change: impl FnOnce(&mut Folds)) {
         let viewport = &self.viewport;
         let selected = viewport.selected().and_then(|row| {
-            let line = self.shown().1.line_at(self.fold_row(row)?);
+            let line = self.shown_folds().line_at(self.fold_row(row)?);
             Some((line, row - viewport.top()))
         });
         let lead = self.lead_rows();
@@ -842,9 +2105,7 @@ fn push_entries(folds: &mut Folds, bytes: &[u8], records: &[Record]) {
 /// after [`index::append`] added to `records`. The entries read again keep their
 /// fold state.
 fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usize) {
-    // `append` reads the last entry again, and a partial last line that looked like a
-    // header can turn out to continue the entry before it.
-    let from = known.saturating_sub(2);
+    let from = appended_from(known);
     let was: Vec<_> = (from..known).map(|entry| unfolded(folds, entry)).collect();
     folds.truncate(from);
     push_entries(folds, bytes, &records[from..]);
@@ -853,6 +2114,146 @@ fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usi
             folds.toggle(entry);
         }
     }
+}
+
+/// The first of `known` records that [`index::append`] may have changed.
+fn appended_from(known: usize) -> usize {
+    // `append` reads the last entry again, and a partial last line that looked like a
+    // header can turn out to continue the entry before it.
+    known.saturating_sub(2)
+}
+
+// Only `App` writes the index, so only a panic of its own can poison it, and that
+// ends the viewer.
+fn read(index: &SharedIndex) -> RwLockReadGuard<'_, Indexed<Source>> {
+    index.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write(index: &SharedIndex) -> RwLockWriteGuard<'_, Indexed<Source>> {
+    index.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The first of the engine's matches dated before `start`.
+fn first_dropped(engine: &Engine, records: &[Record], start: Timestamp) -> Option<usize> {
+    let mut entries = engine
+        .filtered()
+        .entries
+        .iter()
+        .map(|&entry| entry as usize);
+    entries.find(|&entry| {
+        let dated = records.get(entry).and_then(Record::timestamp);
+        dated.is_some_and(|at| at < start)
+    })
+}
+
+/// The last of `records` with a timestamp, and that timestamp. `known` is what this
+/// was before the records from `from` on changed, so only those are looked at again
+/// unless it was among them.
+fn last_dated(
+    records: &[Record],
+    from: usize,
+    known: Option<(usize, Timestamp)>,
+) -> Option<(usize, Timestamp)> {
+    let from = from.min(records.len());
+    let dated = |entries: Range<usize>| {
+        entries
+            .rev()
+            .find_map(|entry| Some((entry, records[entry].timestamp()?)))
+    };
+    dated(from..records.len()).or_else(|| match known {
+        Some((entry, _)) if entry < from => known,
+        Some(_) => dated(0..from),
+        None => None,
+    })
+}
+
+/// Where a move to a match goes.
+enum Next {
+    /// The matches that tell aren't counted yet.
+    Wait,
+    Nothing,
+    Match {
+        entry: usize,
+        wrapped: bool,
+    },
+}
+
+/// The match `matches`, the counted entries that match, has after index entry
+/// `selected` or, `backward`, before it. Past the last one it wraps to the first, once
+/// `counted` says there are no more to come.
+fn find_match(matches: &Filtered, selected: Option<usize>, backward: bool, counted: bool) -> Next {
+    let entries = &matches.entries;
+    let (near, far) = if backward {
+        // Matches before the selected entry are all in only once it is evaluated.
+        if !counted && selected.is_none_or(|selected| matches.evaluated <= selected) {
+            return Next::Wait;
+        }
+        let before = selected.map_or(entries.len(), |selected| {
+            entries.partition_point(|&entry| (entry as usize) < selected)
+        });
+        (
+            before.checked_sub(1).and_then(|i| entries.get(i)),
+            entries.last(),
+        )
+    } else {
+        let after = selected.map_or(0, |selected| {
+            entries.partition_point(|&entry| entry as usize <= selected)
+        });
+        (entries.get(after), entries.first())
+    };
+    match (near, far) {
+        (Some(&entry), _) => Next::Match {
+            entry: entry as usize,
+            wrapped: false,
+        },
+        _ if !counted => Next::Wait,
+        (None, Some(&entry)) => Next::Match {
+            entry: entry as usize,
+            wrapped: true,
+        },
+        (None, None) => Next::Nothing,
+    }
+}
+
+/// Whether `filters` let every entry through.
+fn hides_nothing(filters: &Filters) -> bool {
+    filters.levels == Levels::default() && !narrows_beyond_levels(filters)
+}
+
+/// Whether `filters` hide entries by their class, time or text.
+fn narrows_beyond_levels(filters: &Filters) -> bool {
+    filters.classes != Classes::default() || filters.time.is_some() || filters.text.is_some()
+}
+
+enum Count {
+    Add,
+    Remove,
+}
+
+/// Adds the levels of `records` to `counts`, or takes them out.
+fn count_levels(counts: &mut [u32; 6], records: &[Record], count: Count) {
+    for level in records.iter().filter_map(Record::level) {
+        let n = &mut counts[level as usize];
+        *n = match count {
+            Count::Add => *n + 1,
+            Count::Remove => n.saturating_sub(1),
+        };
+    }
+}
+
+/// The first of `0..len` that `before` is false for, `before` being true for a
+/// prefix of them: what `slice::partition_point` is for a range.
+fn partition_point(len: usize, before: impl Fn(usize) -> bool) -> usize {
+    let (mut low, mut high) = (0, len);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if before(middle) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
 }
 
 /// Whether `entry` shows its continuation lines, `None` if it has none.

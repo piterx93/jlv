@@ -11,7 +11,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::Args;
-use crate::format::Preset;
+use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
+use crate::format::{Level, Preset};
 use crate::test_support;
 
 #[test]
@@ -76,6 +77,9 @@ fn defaults(file: impl Into<PathBuf>) -> Args {
         file: file.into(),
         format: None,
         no_follow: false,
+        level: None,
+        class: None,
+        since: None,
         no_mouse: false,
         config: None,
     }
@@ -178,6 +182,21 @@ fn unknown_format_exits_with_2() {
 }
 
 #[test]
+fn unknown_level_exits_with_2() {
+    let dir = TempDir::new().unwrap();
+    let file = log_file(&dir, "app.log");
+    let out = jlv(&[OsStr::new("-l"), OsStr::new("VERBOSE"), file.as_os_str()]);
+    assert_eq!(out.exit_code(), Some(2));
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr
+            .contains("TRACE, DEBUG, INFO, WARN, ERROR, FATAL"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
 fn usage_errors_are_printed_as_the_parser_words_them() {
     let argv = ["jlv", "--format", "log4j", "app.log"];
     let expected = Args::try_parse_from(argv).unwrap_err().to_string();
@@ -220,6 +239,80 @@ fn empty_regular_file_is_handed_over() {
     assert_eq!(launch.source.bytes(), b"");
 }
 
+/// `initial_filters` for `-l` and `-c` as given, the rest of the command line at its
+/// defaults.
+fn initial(level: Option<&[Level]>, class: Option<&[&str]>) -> Option<Filters> {
+    let args = Args {
+        level: level.map(Levels::only),
+        class: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
+        ..defaults("app.log")
+    };
+    initial_filters(&args)
+}
+
+/// The levels and class rules of `filters`, failing the test if any other filter is on.
+fn levels_and_classes(filters: Filters) -> (Levels, Classes) {
+    assert!(filters.time.is_none(), "{filters:?}");
+    assert!(filters.text.is_none(), "{filters:?}");
+    (filters.levels, filters.classes)
+}
+
+#[test]
+fn without_level_or_class_there_are_no_initial_filters() {
+    assert!(initial(None, None).is_none());
+}
+
+#[test]
+fn level_alone_sets_the_initial_levels_and_no_class_rules() {
+    let filters = initial(Some(&[Level::Warn]), None).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (Levels::only(&[Level::Warn]), Classes::default())
+    );
+}
+
+#[test]
+fn class_alone_sets_the_initial_class_rules_and_every_level() {
+    let filters = initial(None, Some(&["com.myco.*"])).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (Levels::default(), Classes::parse(["com.myco.*"]).unwrap())
+    );
+}
+
+#[test]
+fn level_and_class_together_set_both() {
+    let filters = initial(Some(&[Level::Error]), Some(&["!org.hibernate"])).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (
+            Levels::only(&[Level::Error]),
+            Classes::parse(["!org.hibernate"]).unwrap()
+        )
+    );
+}
+
+#[test]
+fn since_sets_the_initial_time_filter_counted_from_the_file() {
+    let spec = TimeSpec::parse("10m").unwrap();
+    let args = Args {
+        since: Some(spec.clone()),
+        ..defaults("app.log")
+    };
+    assert_eq!(
+        initial_time_filter(&args),
+        Some(TimeFilter {
+            spec,
+            base: Base::File
+        })
+    );
+}
+
+#[test]
+fn without_since_there_is_no_initial_time_filter() {
+    assert_eq!(initial_time_filter(&defaults("app.log")), None);
+}
+
 #[test]
 fn every_option_is_handed_over() {
     let dir = TempDir::new().unwrap();
@@ -229,6 +322,12 @@ fn every_option_is_handed_over() {
         OsStr::new("logback-basic"),
         OsStr::new("--no-follow"),
         OsStr::new("--no-mouse"),
+        OsStr::new("-l"),
+        OsStr::new("warn,error"),
+        OsStr::new("-c"),
+        OsStr::new("com.myco.*,!org.hibernate"),
+        OsStr::new("-s"),
+        OsStr::new("10m"),
         OsStr::new("--config"),
         OsStr::new("/nonexistent/config.toml"),
         file.as_os_str(),
@@ -240,6 +339,9 @@ fn every_option_is_handed_over() {
             file,
             format: Some(Preset::LogbackBasic),
             no_follow: true,
+            level: Some(Levels::only(&[Level::Warn, Level::Error])),
+            class: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
+            since: Some(TimeSpec::parse("10m").unwrap()),
             no_mouse: true,
             config: Some(PathBuf::from("/nonexistent/config.toml")),
         }
@@ -268,6 +370,10 @@ fn path_with_spaces_is_handed_over() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "APFS refuses file names that aren't UTF-8"
+)]
 fn non_utf8_path_is_handed_over() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, OsString::from_vec(b"caf\xe9.log".to_vec()));
@@ -500,11 +606,12 @@ mod event_loop {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
     };
 
-    use crate::app::App;
+    use crate::app::{App, Panel};
     use crate::event_loop;
     use crate::format::Preset;
     use crate::test_support::{
-        LARGE_INDEX_DEADLINE, app, char_key, following_app, numbered_log, row, unindexed_app,
+        LARGE_INDEX_DEADLINE, app, char_key, following_app, hide_line_numbers, numbered_log, row,
+        unindexed_app,
     };
     use crate::ui::Theme;
 
@@ -523,8 +630,11 @@ mod event_loop {
         Terminal::new(TestBackend::new(80, 24)).unwrap()
     }
 
+    /// 100 lines without line numbers.
     fn hundred_lines() -> App {
-        app(numbered_log(100).as_bytes())
+        let mut app = app(numbered_log(100).as_bytes());
+        hide_line_numbers(&mut app);
+        app
     }
 
     #[test]
@@ -552,6 +662,7 @@ mod event_loop {
         let mut terminal = terminal();
         // Several chunks of the index, so it is far from complete at the first screen.
         let mut app = following_app(Preset::Raw, numbered_log(10_000).as_bytes());
+        hide_line_numbers(&mut app);
         event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
         assert_eq!(
             row(&terminal, 1),
@@ -573,6 +684,22 @@ mod event_loop {
             row(&terminal, 22),
             "▶12:00:00.100 [main] INFO  com.example.App - step 100"
         );
+    }
+
+    #[test]
+    fn typed_characters_go_into_an_open_class_panel() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(char_key('q')),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ];
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        match app.panel() {
+            Some(Panel::Classes(panel)) => assert_eq!(panel.lines, ["q"]),
+            other => panic!("the class panel is not open: {other:?}"),
+        }
     }
 
     #[test]
@@ -706,6 +833,7 @@ mod event_loop {
     fn entries_are_taken_in_while_waiting_and_drawn() {
         let mut terminal = terminal();
         let mut app = slow_to_index();
+        hide_line_numbers(&mut app);
         let mut waits = Vec::new();
         event_loop(
             &mut terminal,
@@ -716,7 +844,10 @@ mod event_loop {
         .unwrap();
         assert!(app.progress().is_complete());
         assert_eq!(app.viewport().total(), 40_000);
-        assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 2.2 MB ─ Logback basic");
+        assert_eq!(
+            row(&terminal, 0),
+            "jlv ─ app.log ─ 2.2 MB ─ Logback basic                                   I:40000"
+        );
         assert_eq!(
             row(&terminal, 1),
             "▶12:00:00.001 INFO  com.example.App          step 1"

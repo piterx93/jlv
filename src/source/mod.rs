@@ -219,7 +219,7 @@ impl<'a> Iterator for Lines<'a> {
 }
 
 /// Bytes of a line that [`display`] decodes; the rest is cut off.
-const DISPLAY_CAP: usize = 64 * 1024;
+pub(crate) const DISPLAY_CAP: usize = 64 * 1024;
 
 /// A line as text: invalid UTF-8 becomes U+FFFD, and a line longer than 64 KiB is cut
 /// before the first character that does not fit and ends with `…`.

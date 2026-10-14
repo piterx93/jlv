@@ -1,10 +1,11 @@
 //! Reading a file's last entries from its end, long before the whole file is indexed.
 
-use super::{Chunk, NO_TIMESTAMP, Record, Settings};
+use super::{Chunk, NO_TIMESTAMP, Record, Settings, UNKNOWN_LINE};
 
 /// The records of the last `count` entries of `bytes`, the whole file, or of all its
 /// entries if it has fewer: the same records, timestamps included, that end the
-/// index of the whole file ([`Chunk::finish`](super::Chunk::finish)).
+/// index of the whole file ([`Chunk::finish`](super::Chunk::finish)), but without
+/// line numbers, as the lines before them aren't counted.
 ///
 /// It reads the file backwards from its end, `window` bytes at first (at least 1),
 /// and further back only as far as it has to: to the first line of the earliest of
@@ -37,7 +38,11 @@ pub fn tail(
         tail = chunk;
     }
     let mut records = tail.finish(settings);
-    Some(records.split_off(records.len().saturating_sub(count)))
+    let mut last = records.split_off(records.len().saturating_sub(count));
+    for record in &mut last {
+        record.line = UNKNOWN_LINE;
+    }
+    Some(last)
 }
 
 /// Whether `tail`, a chunk that runs to the end of the file, holds the file's last
