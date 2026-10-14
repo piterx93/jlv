@@ -4078,3 +4078,279 @@ fn confirm_with_the_histogram_focused_sets_the_time_filter_to_the_selected_bucke
 fn confirming_a_bucket_selects_the_first_bucket_again() {
     assert_eq!(third_bucket_confirmed().histogram_bucket(), 0);
 }
+
+// --- export ---
+
+#[test]
+fn e_opens_the_export_prompt() {
+    assert_eq!(action(char_key('e')), Some(Action::Export));
+}
+
+#[test]
+fn f8_opens_the_export_prompt() {
+    assert_eq!(action(key(KeyCode::F(8))), Some(Action::Export));
+}
+
+/// A viewer over `content` in `preset`, opened from `app.log` in `dir`, where it is
+/// written, with `dir` as its current directory. Its index isn't complete yet.
+fn exporting(dir: &tempfile::TempDir, preset: Preset, content: &str) -> App {
+    let path = dir.path().join("app.log");
+    fs::write(&path, content).unwrap();
+    let mut app = App::new(
+        &path,
+        source::open(&path).unwrap(),
+        Some(preset),
+        test_support::zone(),
+        test_support::mtime(),
+        false,
+    );
+    app.set_current_dir(dir.path());
+    app
+}
+
+/// [`TWO_TRACES`] in Logback, exporting to `dir`, with the whole file indexed.
+fn exporting_traces(dir: &tempfile::TempDir) -> App {
+    let mut app = exporting(dir, Preset::Logback, &TWO_TRACES.concat());
+    wait_for_index(&mut app);
+    app
+}
+
+/// `app` after opening the export prompt, typing `path` over its suggestion and
+/// confirming.
+fn exported_to(mut app: App, path: &str) -> App {
+    app.key(char_key('e'));
+    let suggested = match app.panel() {
+        Some(Panel::Export(prompt)) => prompt.text.chars().count(),
+        other => panic!("expected the export prompt, got {other:?}"),
+    };
+    let keys = [
+        vec![key(KeyCode::Backspace); suggested],
+        typing(path),
+        vec![key(KeyCode::Enter)],
+    ]
+    .concat();
+    pressed(app, &keys)
+}
+
+fn export_prompt(text: &str, error: Option<&str>, overwrite: bool) -> Panel {
+    Panel::Export(ExportPrompt {
+        text: text.to_owned(),
+        error: error.map(str::to_owned),
+        overwrite,
+    })
+}
+
+#[test]
+fn export_prompt_suggests_the_file_name_without_gz() {
+    let app = pressed(
+        test_support::gzip_app(&test_support::gzip(b"line\n")),
+        &[char_key('e')],
+    );
+    assert_eq!(
+        app.panel(),
+        Some(&export_prompt("app.log.filtered.log", None, false))
+    );
+}
+
+#[test]
+fn export_writes_every_entry_the_filters_show_with_all_its_lines() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = filtered(exporting_traces(&dir), without_info());
+    let app = exported_to(applied(app, &[Action::FoldAll]), "out.log");
+    assert_eq!(app.panel(), None);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        [FAILED, EXCEPTION, FRAME, DONE, FRAME].concat()
+    );
+}
+
+/// What [`App::notice`] says while an export waits for the index and the filters.
+const EXPORT_WAITS: &str = "export waits for the filters";
+
+/// Polls `app` until its pending export is done. Fails the test after
+/// [`INDEX_DEADLINE`].
+fn wait_for_export(app: &mut App) {
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        if app.notice() != Some(EXPORT_WAITS) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exporting took longer than {INDEX_DEADLINE:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// [`TWO_TRACES`] without INFO, exported to `out.log` in `dir` before the index and
+/// the filter are polled even once.
+fn export_before_polling(dir: &tempfile::TempDir) -> App {
+    let mut app = exporting(dir, Preset::Logback, &TWO_TRACES.concat());
+    app.set_filters(without_info());
+    exported_to(app, "out.log")
+}
+
+#[test]
+fn export_waits_for_the_index_and_the_filters() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = export_before_polling(&dir);
+    assert_eq!(app.notice(), Some(EXPORT_WAITS));
+    assert_eq!(app.panel(), None);
+    assert!(!dir.path().join("out.log").exists());
+    wait_for_export(&mut app);
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        [FAILED, EXCEPTION, FRAME, DONE, FRAME].concat()
+    );
+}
+
+#[test]
+fn esc_cancels_a_waiting_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = pressed(export_before_polling(&dir), &[key(KeyCode::Esc)]);
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    app.poll_index();
+    assert!(!dir.path().join("out.log").exists());
+}
+
+#[test]
+fn changing_the_filters_cancels_a_waiting_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = pressed(export_before_polling(&dir), &[char_key('x')]);
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    app.poll_index();
+    assert!(!dir.path().join("out.log").exists());
+}
+
+#[test]
+fn export_says_how_many_entries_it_wrote() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exported_to(filtered(exporting_traces(&dir), without_info()), "out.log");
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+}
+
+#[test]
+fn export_of_no_entries_says_nothing_to_export_and_writes_no_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = filtered(exporting_traces(&dir), text_filter("nowhere"));
+    let app = exported_to(app, "out.log");
+    assert_eq!(app.notice(), Some("nothing to export"));
+    assert_eq!(app.panel(), None);
+    assert!(!dir.path().join("out.log").exists());
+}
+
+/// [`TWO_TRACES`] exporting to `out.log` in `dir`, which already holds `old`.
+fn exported_over_a_file(dir: &tempfile::TempDir) -> App {
+    let app = exporting_traces(dir);
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    exported_to(app, "out.log")
+}
+
+#[test]
+fn export_asks_before_overwriting_a_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exported_over_a_file(&dir);
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, true)));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn y_overwrites_the_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(exported_over_a_file(&dir), &[char_key('y')]);
+    assert_eq!(app.panel(), None);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        TWO_TRACES.concat()
+    );
+}
+
+#[test]
+fn ctrl_c_quits_while_asking_to_overwrite() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(exported_over_a_file(&dir), &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn another_key_than_y_keeps_the_file_and_goes_back_to_the_path() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(exported_over_a_file(&dir), &[char_key('n')]);
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, false)));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn export_refuses_the_viewed_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exported_to(exporting_traces(&dir), "./app.log");
+    let error = "cannot export to the file being viewed";
+    assert_eq!(
+        app.panel(),
+        Some(&export_prompt("./app.log", Some(error), false))
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("app.log")).unwrap(),
+        TWO_TRACES.concat()
+    );
+}
+
+#[test]
+fn export_to_a_directory_fails_without_asking_to_overwrite() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("logs")).unwrap();
+    // A blank path is the current directory.
+    for path in ["logs", ""] {
+        let app = exported_to(exporting_traces(&dir), path);
+        assert_eq!(
+            app.notice(),
+            Some("export failed: Is a directory (os error 21)"),
+            "{path:?}"
+        );
+        assert_eq!(app.panel(), None, "{path:?}");
+    }
+}
+
+#[test]
+fn export_refuses_a_hard_link_to_the_viewed_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exporting_traces(&dir);
+    fs::hard_link(dir.path().join("app.log"), dir.path().join("link.log")).unwrap();
+    let app = exported_to(app, "link.log");
+    let error = "cannot export to the file being viewed";
+    assert_eq!(
+        app.panel(),
+        Some(&export_prompt("link.log", Some(error), false))
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("app.log")).unwrap(),
+        TWO_TRACES.concat()
+    );
+}
+
+#[test]
+fn export_failure_shows_in_the_notice() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let locked = dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let app = exported_to(exporting_traces(&dir), "locked/out.log");
+    assert_eq!(
+        app.notice(),
+        Some("export failed: Permission denied (os error 13)")
+    );
+    assert_eq!(app.panel(), None);
+}

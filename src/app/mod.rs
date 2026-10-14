@@ -4,10 +4,11 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::mem;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::export;
 use crate::filter::{
     self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
     TimeSpec,
@@ -109,10 +111,14 @@ pub enum Action {
     /// Selects the previous bookmarked entry the rows show, wrapping around to the
     /// last with the notice `bookmarks wrapped`, or says `no bookmarks`.
     PreviousBookmark,
+    /// Opens the export prompt ([`App::panel`]), which suggests the file name
+    /// `<name>.filtered.log`, `<name>` being the viewed file's name without `.gz`.
+    Export,
     /// Applies what the open panel edits and closes it. With no panel open, opens
     /// the details pane ([`App::shows_details`]), or closes it.
     Confirm,
-    /// Closes the open panel without applying its edits.
+    /// Closes the open panel without applying its edits. With no panel open, drops an
+    /// export that waits for the filters.
     Cancel,
     Quit,
 }
@@ -129,11 +135,11 @@ pub enum Action {
 /// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
 /// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
 /// and previous match, `]` and `[` the next and previous entry with an exception, `m`
-/// toggles a bookmark, `'` and `"` select the next and previous bookmark, `Tab`
-/// cycles the focus, `H` toggles the histogram, `Enter` confirms, `Esc` cancels and
-/// `q F10 Ctrl-c` quit. Characters ignore Shift (the character already says which
-/// case it is) but not Ctrl or Alt; other keys do nothing with any modifier. Key
-/// releases do nothing; held keys repeat.
+/// toggles a bookmark, `'` and `"` select the next and previous bookmark, `e F8`
+/// open the export prompt, `Tab` cycles the focus, `H` toggles the histogram, `Enter`
+/// confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters ignore Shift (the
+/// character already says which case it is) but not Ctrl or Alt; other keys do
+/// nothing with any modifier. Key releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -174,6 +180,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char(']'), KeyModifiers::NONE) => Action::NextException,
         (KeyCode::Char('['), KeyModifiers::NONE) => Action::PreviousException,
         (KeyCode::Char('m'), KeyModifiers::NONE) => Action::ToggleBookmark,
+        (KeyCode::Char('e') | KeyCode::F(8), KeyModifiers::NONE) => Action::Export,
         (KeyCode::Char('\''), KeyModifiers::NONE) => Action::NextBookmark,
         (KeyCode::Char('"'), KeyModifiers::NONE) => Action::PreviousBookmark,
         (KeyCode::Tab, KeyModifiers::NONE) => Action::CycleFocus,
@@ -478,6 +485,53 @@ impl JumpPrompt {
     }
 }
 
+/// The export prompt while it is open: the path to export to as typed so far, read
+/// from the [current directory](App::set_current_dir) when relative; why it can't be
+/// exported to, if the path last confirmed can't; and whether the prompt asks to
+/// overwrite the existing file the path names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportPrompt {
+    pub text: String,
+    pub error: Option<String>,
+    pub overwrite: bool,
+}
+
+impl ExportPrompt {
+    /// Edits the path as `key` asks, or returns the action it stands for here. While
+    /// asking to overwrite, `y` confirms and any other key goes back to the path.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        let typed = typed(key)?;
+        if self.overwrite {
+            return match typed {
+                Typed::Action(Action::Quit) => Some(Action::Quit),
+                Typed::Char('y') => Some(Action::Confirm),
+                _ => {
+                    self.overwrite = false;
+                    None
+                }
+            };
+        }
+        match typed {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.text.push(c),
+            Typed::Backspace => {
+                self.text.pop();
+            }
+            Typed::Other(_) => {}
+        }
+        self.error = None;
+        None
+    }
+}
+
+/// An export that waits for the index and the filters to be done.
+#[derive(Debug)]
+struct PendingExport {
+    target: PathBuf,
+    /// The path as the user typed it, for the notice.
+    typed: String,
+}
+
 /// The panel open over the rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
@@ -487,6 +541,7 @@ pub enum Panel {
     /// The text filter prompt.
     Text(Prompt),
     Jump(JumpPrompt),
+    Export(ExportPrompt),
     /// The search prompt, for a search up the rows if `backward`.
     Search {
         prompt: Prompt,
@@ -511,6 +566,7 @@ impl Panel {
             | Panel::Time(_)
             | Panel::Text(_)
             | Panel::Jump(_)
+            | Panel::Export(_)
             | Panel::Search { .. } => {}
         }
     }
@@ -849,6 +905,8 @@ pub struct App {
     matches: Option<Engine>,
     /// The way a move to a match is waiting to go, for matches not yet counted.
     pending_step: Option<bool>,
+    /// An export waiting for the index and the filters' results.
+    pending_export: Option<PendingExport>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
@@ -885,7 +943,11 @@ pub struct App {
     details: Details,
     histogram: HistogramState,
     panel: Option<Panel>,
-    notice: Option<&'static str>,
+    notice: Option<Cow<'static, str>>,
+    /// Where the file was opened from, to tell an export onto it.
+    path: PathBuf,
+    /// What a relative export path is read from.
+    current_dir: PathBuf,
     quit: bool,
 }
 
@@ -954,6 +1016,7 @@ impl App {
             bookmarks: BTreeSet::new(),
             matches: None,
             pending_step: None,
+            pending_export: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
             opens_at_end: follow,
@@ -979,6 +1042,8 @@ impl App {
             wraps: false,
             panel: None,
             notice: None,
+            path: path.to_owned(),
+            current_dir: std::env::current_dir().unwrap_or_default(),
             quit: false,
         }
     }
@@ -1049,6 +1114,12 @@ impl App {
         self.update_rows();
         if let Some(backward) = self.pending_step.take() {
             self.step(backward);
+        }
+        if self.progress.is_complete()
+            && !self.filtering()
+            && let Some(export) = self.pending_export.take()
+        {
+            self.finish_export(&export);
         }
     }
 
@@ -1278,6 +1349,7 @@ impl App {
     /// Opened at the end, the file's last entries are shown unfiltered until the
     /// index is complete and takes over, filtered.
     pub fn set_filters(&mut self, filters: Filters) {
+        self.cancel_export();
         self.filters = filters;
         self.histogram.reset();
         // The index shows as it is, which is cheaper than an engine passing every entry.
@@ -1312,6 +1384,12 @@ impl App {
     /// The time filter [`set_time_filter`](Self::set_time_filter) set; none at first.
     pub fn time_filter(&self) -> Option<&TimeFilter> {
         self.time_filter.as_ref()
+    }
+
+    /// Reads a relative export path from `dir` from here on. It is the process's
+    /// current directory at first.
+    pub fn set_current_dir(&mut self, dir: &Path) {
+        dir.clone_into(&mut self.current_dir);
     }
 
     /// Reads the wall clock from `now` from here on, for a time filter on
@@ -1547,7 +1625,7 @@ impl App {
             self.focus = Focus::Table;
         }
         if self.shows_histogram && !self.has_histogram() && !self.histogram_behind() {
-            self.notice = Some("no entry has a timestamp");
+            self.notice = Some(Cow::Borrowed("no entry has a timestamp"));
         }
     }
 
@@ -1809,8 +1887,9 @@ impl App {
             Action::ToggleBookmark => self.toggle_bookmark(),
             Action::NextBookmark => self.jump_bookmark(false),
             Action::PreviousBookmark => self.jump_bookmark(true),
+            Action::Export => self.panel = Some(Panel::Export(self.export_prompt())),
             Action::Confirm => self.toggle_details(),
-            Action::Cancel => {}
+            Action::Cancel => self.cancel_export(),
             Action::Quit => self.quit = true,
         }
     }
@@ -1873,6 +1952,26 @@ impl App {
     ///   stays where it is, and the [notice](Self::notice) says `no entry has a
     ///   timestamp`.
     ///
+    /// The export prompt is edited like a jump prompt. `Enter` exports, in turn:
+    /// - a path naming the viewed file, by its inode or its canonical path, keeps the
+    ///   prompt open with the error `cannot export to the file being viewed`;
+    /// - a path naming an existing regular file keeps the prompt open,
+    ///   [asking](ExportPrompt::overwrite) to overwrite it: `y` goes on, any other
+    ///   key goes back to editing the path (`Ctrl-c` still quits); a directory goes
+    ///   straight on and fails as below;
+    /// - the prompt closes. While the index or the filters are still at work, the
+    ///   notice says `export waits for the filters` and [`poll_index`](Self::poll_index)
+    ///   finishes the export once they are done; `Esc` with no panel open, or any
+    ///   change to the filters, drops a waiting export with the notice `export
+    ///   cancelled`;
+    /// - if the filters show no entry, the notice says `nothing to export` and no file
+    ///   is written;
+    /// - otherwise it writes every entry the filters show, in file order, with all its
+    ///   lines, folded or not, as [`export::write_entries`](crate::export::write_entries)
+    ///   does, and the notice says `exported N entries to <path as typed>` (`1 entry`
+    ///   for one). If the file can't be written, the notice says `export failed: ` and
+    ///   the error.
+    ///
     /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
@@ -1882,6 +1981,7 @@ impl App {
             Some(Panel::Text(prompt)) => prompt.key(key),
             Some(Panel::Jump(prompt)) => prompt.key(key),
             Some(Panel::Search { prompt, .. }) => prompt.key(key),
+            Some(Panel::Export(prompt)) => prompt.key(key),
             _ => action(key),
         };
         if let Some(action) = action {
@@ -1894,7 +1994,7 @@ impl App {
     /// [`Action::HideClass`] on an entry without a class (or with no row selected),
     /// which then change nothing.
     pub fn notice(&self) -> Option<&str> {
-        self.notice
+        self.notice.as_deref()
     }
 
     /// Whether [`Action::Quit`] has been applied.
@@ -1983,14 +2083,14 @@ impl App {
         let next = find_match(matches.filtered(), self.selected_entry(), backward, counted);
         match next {
             Next::Wait => self.pending_step = Some(backward),
-            Next::Nothing => self.notice = Some("pattern not found"),
+            Next::Nothing => self.notice = Some(Cow::Borrowed("pattern not found")),
             Next::Match { entry, wrapped } => match self.entry_row(entry) {
                 // The filters' results haven't caught up with the entry yet.
                 None => self.pending_step = Some(backward),
                 Some(row) => {
                     self.following = false;
                     self.viewport.goto(row);
-                    self.notice = wrapped.then_some("search wrapped");
+                    self.notice = wrapped.then_some(Cow::Borrowed("search wrapped"));
                 }
             },
         }
@@ -2003,7 +2103,7 @@ impl App {
 
     fn jump_bookmark(&mut self, backward: bool) {
         if self.bookmarks.is_empty() {
-            self.notice = Some("no bookmarks");
+            self.notice = Some(Cow::Borrowed("no bookmarks"));
             return;
         }
         let found = self.find_shown(backward, |record| self.is_bookmarked(record));
@@ -2019,12 +2119,12 @@ impl App {
         let inside: Vec<u64> = self.bookmarks.range(bytes.clone()).copied().collect();
         if inside.is_empty() {
             self.bookmarks.insert(bytes.start);
-            self.notice = Some("bookmarked");
+            self.notice = Some(Cow::Borrowed("bookmarked"));
         } else {
             for offset in inside {
                 self.bookmarks.remove(&offset);
             }
-            self.notice = Some("bookmark removed");
+            self.notice = Some(Cow::Borrowed("bookmark removed"));
         }
     }
 
@@ -2032,13 +2132,13 @@ impl App {
     /// it, or says `none`.
     fn land(&mut self, found: Option<(usize, bool)>, wrapped: &'static str, none: &'static str) {
         let Some((entry, did_wrap)) = found else {
-            self.notice = Some(none);
+            self.notice = Some(Cow::Borrowed(none));
             return;
         };
         let row = self.lead_rows() + self.shown_folds().row_of(entry, 0);
         self.following = false;
         self.viewport.goto(row);
-        self.notice = did_wrap.then_some(wrapped);
+        self.notice = did_wrap.then_some(Cow::Borrowed(wrapped));
     }
 
     /// The next shown entry whose record satisfies `matches`, up the rows if
@@ -2380,6 +2480,11 @@ impl App {
                         self.panel = Some(Panel::Jump(prompt));
                     }
                 }
+                Panel::Export(mut prompt) => {
+                    if !self.export(&mut prompt) {
+                        self.panel = Some(Panel::Export(prompt));
+                    }
+                }
                 Panel::Search {
                     mut prompt,
                     backward,
@@ -2403,6 +2508,103 @@ impl App {
                 self.panel = Some(panel);
             }
         }
+    }
+
+    fn cancel_export(&mut self) {
+        if self.pending_export.take().is_some() {
+            self.notice = Some(Cow::Borrowed("export cancelled"));
+        }
+    }
+
+    fn export_prompt(&self) -> ExportPrompt {
+        let name = self.name.strip_suffix(".gz").unwrap_or(&self.name);
+        ExportPrompt {
+            text: format!("{name}.filtered.log"),
+            error: None,
+            overwrite: false,
+        }
+    }
+
+    /// Exports as `prompt` asks and returns whether it is done with the prompt. If
+    /// not, `prompt` says why, or asks to overwrite the file. While the index or the
+    /// filters are still at work, the export waits for them in `pending_export`.
+    fn export(&mut self, prompt: &mut ExportPrompt) -> bool {
+        let target = self.current_dir.join(&prompt.text);
+        if self.is_viewed_file(&target) {
+            prompt.error = Some("cannot export to the file being viewed".to_owned());
+            return false;
+        }
+        if !prompt.overwrite && target.is_file() {
+            prompt.overwrite = true;
+            return false;
+        }
+        let export = PendingExport {
+            target,
+            typed: mem::take(&mut prompt.text),
+        };
+        if self.progress.is_complete() && !self.filtering() {
+            self.finish_export(&export);
+        } else {
+            self.notice = Some(Cow::Borrowed("export waits for the filters"));
+            self.pending_export = Some(export);
+        }
+        true
+    }
+
+    /// Whether `target` is the file being viewed, however it is named or linked to.
+    /// Creating it would truncate the mapped file.
+    fn is_viewed_file(&self, target: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let (Ok(viewed), Ok(target)) = (fs::metadata(&self.path), fs::metadata(target)) {
+                return (viewed.dev(), viewed.ino()) == (target.dev(), target.ino());
+            }
+        }
+        let viewed = fs::canonicalize(&self.path).ok();
+        viewed.is_some() && fs::canonicalize(target).ok() == viewed
+    }
+
+    /// Writes the export once the index and the filters' results are complete.
+    fn finish_export(&mut self, export: &PendingExport) {
+        let count = self.shown_ranges(&read(&self.index)).count();
+        let notice = if count == 0 {
+            "nothing to export".to_owned()
+        } else {
+            match self.write_export(&export.target) {
+                Ok(()) => {
+                    let noun = if count == 1 { "entry" } else { "entries" };
+                    format!("exported {count} {noun} to {}", export.typed)
+                }
+                Err(error) => format!("export failed: {error}"),
+            }
+        };
+        self.notice = Some(Cow::Owned(notice));
+    }
+
+    /// The byte ranges of the entries the filters show, in file order, from `index`.
+    fn shown_ranges<'a>(
+        &'a self,
+        index: &'a Indexed<Source>,
+    ) -> impl Iterator<Item = Range<usize>> + 'a {
+        let all = self.filter.is_none().then(|| index.records.iter());
+        let matched = self.filter.iter().flat_map(|filter| {
+            filter
+                .engine
+                .filtered()
+                .entries
+                .iter()
+                .map(|&entry| &index.records[entry as usize])
+        });
+        all.into_iter().flatten().chain(matched).map(file_range)
+    }
+
+    /// Streams the entries the filters show from the file to `target`.
+    fn write_export(&self, target: &Path) -> io::Result<()> {
+        let mut out = io::BufWriter::new(File::create(target)?);
+        let index = read(&self.index);
+        export::write_entries(&mut out, self.source.bytes(), self.shown_ranges(&index))?;
+        out.flush()
     }
 
     /// Jumps as a prompt for `to` asks with `text` typed into it. A blank text jumps
@@ -2431,7 +2633,9 @@ impl App {
         // Too many digits for a `u64` is a line past the end of any file.
         let line: u64 = text.parse().unwrap_or(u64::MAX);
         if matches!(self.opening, Opening::Tail(..)) {
-            self.notice = Some("line numbers are not known until the file is indexed");
+            self.notice = Some(Cow::Borrowed(
+                "line numbers are not known until the file is indexed",
+            ));
             return Ok(None);
         }
         let folds = self.shown_folds();
@@ -2474,7 +2678,7 @@ impl App {
             (_, filter) => (index.records.as_slice(), filter.as_ref()),
         };
         let Some((_, last)) = last_dated(records, 0, None) else {
-            self.notice = Some("no entry has a timestamp");
+            self.notice = Some(Cow::Borrowed("no entry has a timestamp"));
             return Ok(None);
         };
         let start = spec.start(last, &self.settings.zone);
@@ -2517,7 +2721,7 @@ impl App {
     /// says that it has none.
     fn change_classes(&mut self, change: impl FnOnce(&mut Classes, String)) {
         let Some(class) = self.selected_class() else {
-            self.notice = Some(NO_CLASS);
+            self.notice = Some(Cow::Borrowed(NO_CLASS));
             return;
         };
         let mut classes = self.filters.classes.clone();

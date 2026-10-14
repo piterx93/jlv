@@ -23,6 +23,7 @@ use crate::ui::Theme;
 
 pub mod app;
 pub mod cli;
+pub mod export;
 pub mod filter;
 pub mod fold;
 pub mod follow;

@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStringExt;
 
@@ -563,6 +564,56 @@ fn a_jump_prompt_error_follows_its_text_in_the_footer() {
         &[&keys[..], &[key(KeyCode::Enter)]].concat(),
     );
     assert_eq!(row(&terminal, 23), ":abc ─ 'abc' is not a line number");
+}
+
+#[test]
+fn the_footer_shows_the_export_prompt_as_typed() {
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &[char_key('e')]);
+    assert_eq!(row(&terminal, 23), "export to: app.log.filtered.log");
+}
+
+#[test]
+fn the_export_prompt_shows_control_characters_in_the_path_as_replacement_characters() {
+    let mut app = named_app("/var/log/a\x1bb.log", numbered_log(100).as_bytes());
+    let terminal = terminal_after_pressing(&mut app, &[char_key('e')]);
+    assert_eq!(row(&terminal, 23), "export to: a\u{fffd}b.log.filtered.log");
+}
+
+/// [`hundred_lines`] opened from `app.log` in `dir`, where they are written, with
+/// `dir` as its current directory.
+fn exporting_hundred_lines(dir: &tempfile::TempDir) -> App {
+    let path = dir.path().join("app.log");
+    fs::write(&path, numbered_log(100)).unwrap();
+    let mut app = named_app(&path, numbered_log(100).as_bytes());
+    app.set_current_dir(dir.path());
+    app
+}
+
+#[test]
+fn the_footer_asks_before_overwriting_an_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(dir.path().join("app.log.filtered.log"), "old\n").unwrap();
+    let keys = [char_key('e'), key(KeyCode::Enter)];
+    let terminal = terminal_after_pressing(&mut exporting_hundred_lines(&dir), &keys);
+    assert_eq!(row(&terminal, 23), "overwrite app.log.filtered.log? y/n");
+}
+
+#[test]
+fn an_export_prompt_error_follows_its_path_in_the_footer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let suggested = "app.log.filtered.log".len();
+    let keys = [
+        vec![char_key('e')],
+        vec![key(KeyCode::Backspace); suggested],
+        "./app.log".chars().map(char_key).collect(),
+        vec![key(KeyCode::Enter)],
+    ]
+    .concat();
+    let terminal = terminal_after_pressing(&mut exporting_hundred_lines(&dir), &keys);
+    assert_eq!(
+        row(&terminal, 23),
+        "export to: ./app.log ─ cannot export to the file being viewed"
+    );
 }
 
 #[test]

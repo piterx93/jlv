@@ -137,6 +137,10 @@ const TAB_STOP: usize = 4;
 /// and the text typed for a line, `t ` and the text for a time, followed by ` ─ `
 /// and the prompt's [error](crate::app::JumpPrompt::error) while it has one.
 ///
+/// The export prompt is shown the same way, as `export to: ` and the path typed,
+/// or, while it [asks to overwrite](crate::app::ExportPrompt::overwrite),
+/// `overwrite <path>? y/n`.
+///
 /// While the app [shows the details pane](App::shows_details), the bottom of the
 /// body is a box titled ` Details `, a third of the screen's height high (at least 5
 /// lines, and at most what leaves the rows 5), with a plain border (`┌─┐`), or a thick
@@ -209,7 +213,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     };
     let key_notice = app
         .notice()
-        .map_or(String::new(), |notice| format!(" ─ {notice}"));
+        .map_or(String::new(), |notice| format!(" ─ {}", printable(notice)));
     let matches = app
         .match_count()
         .map_or(String::new(), |(position, total)| {
@@ -286,6 +290,18 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             };
             let error = prompt.error.as_deref().map(|error| format!(" ─ {error}"));
             format!("{opener}{}{}", prompt.text, error.unwrap_or_default()).into()
+        }
+        Some(Panel::Export(prompt)) if prompt.overwrite => {
+            format!("overwrite {}? y/n", printable(&prompt.text)).into()
+        }
+        Some(Panel::Export(prompt)) => {
+            let error = prompt.error.as_deref().map(|error| format!(" ─ {error}"));
+            format!(
+                "export to: {}{}",
+                printable(&prompt.text),
+                error.unwrap_or_default()
+            )
+            .into()
         }
         Some(Panel::Search { prompt, backward }) => {
             if fits {

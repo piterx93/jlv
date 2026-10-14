@@ -1,0 +1,5 @@
+2026-10-07 12:00:01.500 [main] ERROR com.example.OrderService - Order 42 failed
+java.lang.IllegalStateException: boom
+	at com.example.OrderService.place(OrderService.java:42)
+	at com.example.App.main(App.java:10)
+2026-10-07 12:00:03.000 [main] WARN  com.example.OrderService - Order 42 slow
