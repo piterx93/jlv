@@ -2,8 +2,8 @@
 //! columns of its preset, or whole under `Raw`, and the continuation lines of the
 //! unfolded entries.
 
-use std::borrow::Cow;
 use std::iter;
+use std::ops::Range;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -11,8 +11,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{Theme, abbreviate, level_style, printable};
-use crate::app::{App, ShownLine};
+use super::{Theme, abbreviate, level_style, printable, printable_from};
+use crate::app::{App, Search, ShownLine};
 use crate::format::{EntryParser, strip_ansi};
 use crate::source;
 
@@ -169,25 +169,32 @@ impl Columns {
     /// Row `i` of `app`, its text made safe to show.
     fn row(&self, app: &App, i: usize, theme: Theme) -> Row {
         let shown = app.row(i);
+        let search = app.search().filter(|_| theme == Theme::Styled);
         let mut row = match shown {
-            Some(shown) => self.entry_row(app, shown, theme),
+            Some(shown) => self.entry_row(app, shown, search, theme),
             None => Row::new(Vec::new(), app.line(i).into_owned(), 0),
         };
         row.number = shown.and_then(|shown| shown.number);
+        if search.is_some() && app.hides_match(i) {
+            // Past the space that sets the marker apart from the message.
+            row.highlights.push(row.marker + 1..row.text.len());
+        }
         row
     }
 
-    fn entry_row(&self, app: &App, shown: ShownLine, theme: Theme) -> Row {
+    fn entry_row(&self, app: &App, shown: ShownLine, search: Option<&Search>, theme: Theme) -> Row {
         // `Raw` doesn't look into lines, so escape codes are shown, made harmless.
         let Some(table) = &self.table else {
-            return Row::new(Vec::new(), text(shown.line), shown.hidden);
+            let row = Row::new(Vec::new(), text(shown.line), shown.hidden);
+            return row.highlighted(search, shown.line, 0..shown.line.len());
         };
         let line = strip_ansi(shown.line);
         let head = shown.first.then(|| table.parser.parse(&line)).flatten();
         let Some(head) = head else {
             // Continuation lines and the headless entry have nothing but a message.
             let blank = Span::raw(" ".repeat(self.lead));
-            return Row::new(vec![blank], text(&line), shown.hidden);
+            let row = Row::new(vec![blank], text(&line), shown.hidden);
+            return row.highlighted(search, &line, 0..line.len());
         };
         let record = shown.record;
         let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
@@ -212,7 +219,8 @@ impl Columns {
         let class = text(&line[head.class]);
         let class = cell(&abbreviate(&class, table.class), table.class);
         cells.push(Span::raw(class + " "));
-        Row::new(cells, text(&line[head.message]), shown.hidden)
+        let row = Row::new(cells, text(&line[head.message.clone()]), shown.hidden);
+        row.highlighted(search, &line, head.message)
     }
 }
 
@@ -225,6 +233,8 @@ struct Row {
     marker: usize,
     /// The line's number in the file, if known.
     number: Option<u64>,
+    /// The byte ranges of `text` that the search matches, in order.
+    highlights: Vec<Range<usize>>,
 }
 
 impl Row {
@@ -241,7 +251,35 @@ impl Row {
             text,
             marker,
             number: None,
+            highlights: Vec::new(),
         }
+    }
+
+    /// The row with the matches of `search` in `line[message]`, the bytes that the
+    /// row's message shows, highlighted.
+    fn highlighted(mut self, search: Option<&Search>, line: &[u8], message: Range<usize>) -> Self {
+        if let Some(search) = search {
+            self.highlights = highlights(search, line, message, &self.text[..self.marker]);
+        }
+        self
+    }
+
+    /// `part`, which starts at byte `at` of the row's text, as spans.
+    fn spans<'a>(&'a self, at: usize, part: &'a str, highlight: Style) -> Vec<Span<'a>> {
+        let end = at + part.len();
+        let mut spans = Vec::new();
+        let mut done = at;
+        for found in &self.highlights {
+            let (start, stop) = (found.start.max(done), found.end.min(end));
+            if start >= stop {
+                continue;
+            }
+            spans.push(Span::raw(&self.text[done..start]));
+            spans.push(Span::styled(&self.text[start..stop], highlight));
+            done = stop;
+        }
+        spans.push(Span::raw(&self.text[done..end]));
+        spans
     }
 
     /// How many screen lines the row takes when wrapped.
@@ -254,16 +292,26 @@ impl Row {
     /// the marker need, the cells only on the first. The gutter of the first has the
     /// line number, if shown, and `▶` if the row is `selected`.
     fn lines(&self, columns: &Columns, app: &App, selected: bool, theme: Theme) -> Vec<Line<'_>> {
-        let parts = if app.wraps() {
+        let highlight = theme.paint(Style::new().fg(Color::Black).bg(Color::Yellow));
+        let parts: Vec<Vec<Span>> = if app.wraps() {
             let parts = wrap(&self.text, columns.message);
-            parts.into_iter().map(Cow::Borrowed).collect()
+            // The parts follow one another without gaps.
+            let starts = parts.iter().scan(0, |at, part| {
+                *at += part.len();
+                Some(*at - part.len())
+            });
+            let spans = |(at, part)| self.spans(at, part, highlight);
+            starts.zip(parts.iter().copied()).map(spans).collect()
         } else {
             let (message, marker) = self.text.split_at(self.marker);
             let width = columns.message.saturating_sub(marker.width());
-            let kept = take_columns(skip_columns(message, app.scroll()).chars(), width);
-            vec![Cow::Owned(kept + marker)]
+            let scrolled = skip_columns(message, app.scroll());
+            let kept = &scrolled[..fitting_bytes(scrolled, width)];
+            let mut spans = self.spans(message.len() - scrolled.len(), kept, highlight);
+            spans.extend(self.spans(self.marker, marker, highlight));
+            vec![spans]
         };
-        let mut parts = parts.into_iter().map(Span::raw);
+        let mut parts = parts.into_iter();
         let number = columns.numbers.map(|width| {
             let number = self
                 .number
@@ -277,11 +325,52 @@ impl Row {
             .into_iter()
             .chain([marker])
             .chain(cells)
-            .chain(parts.next());
+            .chain(parts.next().into_iter().flatten());
         let indent = " ".repeat(columns.gutter + columns.lead);
-        let rest = parts.map(|part| Line::from(vec![Span::raw(indent.clone()), part]));
+        let rest =
+            parts.map(|part| Line::from_iter(iter::once(Span::raw(indent.clone())).chain(part)));
         iter::once(Line::from_iter(first)).chain(rest).collect()
     }
+}
+
+/// The byte ranges of `shown`, the text that `line[message]` is shown as, that `search`
+/// matches in the message. A match is cut at the message's ends.
+fn highlights(
+    search: &Search,
+    line: &[u8],
+    message: Range<usize>,
+    shown: &str,
+) -> Vec<Range<usize>> {
+    // Only what the display keeps is searched, which also bounds the work per row.
+    let searched = &line[..message.end.min(message.start + source::DISPLAY_CAP)];
+    // Without tabs, control characters or invalid UTF-8 the text is the bytes.
+    let same = shown.as_bytes() == &line[message.clone()];
+    // Where the text of the message up to a byte of the line ends. The matches come in
+    // order, so the text is made piece by piece, keeping its column for the tab stops.
+    let (mut done, mut column, mut length) = (message.start, 0, 0);
+    let mut offset = |at: usize| {
+        if same {
+            return at - message.start;
+        }
+        let piece = source::display(&line[done..at]);
+        let (piece, end) = printable_from(&piece, column);
+        (done, column, length) = (at, end, length + piece.len());
+        length
+    };
+    let boundary = |at: usize| shown.is_char_boundary(at);
+    search
+        .matcher
+        .find(searched)
+        .into_iter()
+        .map(|found| found.start.max(message.start)..found.end.min(message.end))
+        .filter(|found| found.start < found.end)
+        .map(|found| {
+            let start = offset(found.start);
+            start..offset(found.end)
+        })
+        // The text can be cut short, and a regex can match half a character.
+        .filter(|found| found.end <= shown.len() && boundary(found.start) && boundary(found.end))
+        .collect()
 }
 
 /// `bytes` as text that is safe to show.
@@ -307,6 +396,18 @@ fn cell_keeping_end(text: &str, width: usize) -> String {
     let kept: String = take_columns(text.chars().rev(), width.saturating_sub(1));
     let kept: String = kept.chars().rev().collect();
     pad(&format!("…{kept}"), width)
+}
+
+/// How many bytes of `text` fit into `width` columns.
+fn fitting_bytes(text: &str, width: usize) -> usize {
+    let mut used = 0;
+    for (at, c) in text.char_indices() {
+        used += c.width().unwrap_or(0);
+        if used > width {
+            return at;
+        }
+    }
+    text.len()
 }
 
 /// The first of `chars` that fit into `width` columns.

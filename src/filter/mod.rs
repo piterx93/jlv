@@ -8,7 +8,9 @@
 //! read again is evaluated again.
 //!
 //! The level, time and class checks read the record and the class column of the
-//! entry's first line; only the text check reads the rest of the entry.
+//! entry's first line; only the text check reads the rest of the entry. An engine
+//! can also count a search: it then passes the entries that pass the filters and
+//! have a line the search matches.
 
 use std::fmt;
 use std::ops::Range;
@@ -248,6 +250,7 @@ pub struct Engine {
     /// still in the channel, are told apart and dropped.
     generation: u64,
     filters: Arc<Filters>,
+    search: Option<Arc<Matcher>>,
     filtered: Filtered,
     /// Per evaluated entry, the level it adds to `filtered.counts`, so that entries
     /// read again can be taken out of them.
@@ -260,6 +263,34 @@ impl Engine {
         indexed: Arc<RwLock<Indexed<B>>>,
         preset: Preset,
         filters: Filters,
+        options: Options,
+    ) -> Engine
+    where
+        B: AsRef<[u8]> + Send + Sync + 'static,
+    {
+        Self::spawn_with(indexed, preset, filters, None, options)
+    }
+
+    /// Like [`spawn`](Self::spawn), but an entry passes only if one of its lines, with
+    /// ANSI escape codes stripped, also matches `search`.
+    pub fn spawn_search<B>(
+        indexed: Arc<RwLock<Indexed<B>>>,
+        preset: Preset,
+        filters: Filters,
+        search: Matcher,
+        options: Options,
+    ) -> Engine
+    where
+        B: AsRef<[u8]> + Send + Sync + 'static,
+    {
+        Self::spawn_with(indexed, preset, filters, Some(Arc::new(search)), options)
+    }
+
+    fn spawn_with<B>(
+        indexed: Arc<RwLock<Indexed<B>>>,
+        preset: Preset,
+        filters: Filters,
+        search: Option<Arc<Matcher>>,
         options: Options,
     ) -> Engine
     where
@@ -280,6 +311,7 @@ impl Engine {
             updates,
             generation: 0,
             filters: Arc::new(filters),
+            search,
             filtered: Filtered::default(),
             counted: Vec::new(),
         };
@@ -355,6 +387,7 @@ impl Engine {
         let _ = self.jobs.send(Job {
             generation: self.generation,
             filters: Arc::clone(&self.filters),
+            search: self.search.clone(),
             from: self.filtered.evaluated,
         });
     }
@@ -385,6 +418,7 @@ impl Engine {
 struct Job {
     generation: u64,
     filters: Arc<Filters>,
+    search: Option<Arc<Matcher>>,
     from: usize,
 }
 
@@ -436,6 +470,7 @@ impl<B: AsRef<[u8]>> Worker<B> {
             let chunk = job.from..total.min(job.from + self.chunk);
             let check = Check {
                 filters: &job.filters,
+                search: job.search.as_deref(),
             };
             let update = check.chunk(&indexed, chunk.clone(), job.generation, &mut scratch);
             drop(indexed);
@@ -473,6 +508,7 @@ struct Scratch {
 /// The filters at work on entries.
 struct Check<'a> {
     filters: &'a Filters,
+    search: Option<&'a Matcher>,
 }
 
 impl Check<'_> {
@@ -496,12 +532,20 @@ impl Check<'_> {
                 .unwrap_or_default();
             let passes = self.passes_all_but_level(record, entry, scratch);
             update.counted.push(record.level().filter(|_| passes));
-            if passes && self.filters.levels.shows(record.level()) {
+            if passes && self.filters.levels.shows(record.level()) && self.finds(entry, scratch) {
                 // 2^32 entries would take an index of 128 GiB at 32 bytes each.
                 update.entries.push(index as u32);
             }
         }
         update
+    }
+
+    /// Whether some line of `entry` matches the search, always true without one.
+    fn finds(&self, entry: &[u8], scratch: &mut Scratch) -> bool {
+        self.search.is_none_or(|search| {
+            source::lines(entry)
+                .any(|line| search.is_match(strip_ansi_into(line, &mut scratch.buffer)))
+        })
     }
 
     fn passes_all_but_level(&self, record: &Record, entry: &[u8], scratch: &mut Scratch) -> bool {

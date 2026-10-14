@@ -60,6 +60,7 @@ const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Ca
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
 const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel";
+const SEARCH_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel";
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
@@ -124,9 +125,15 @@ const TAB_STOP: usize = 4;
 /// Tab Ignore case  Enter Apply  Esc Cancel`, or the prompt's
 /// [error](crate::app::Prompt::error).
 ///
+/// The search prompt is drawn the same way, titled ` Search ` or ` Search backward `,
+/// with the footer `Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel`.
+///
 /// While a jump prompt is open, the footer shows it in place of the key hints: `:`
 /// and the text typed for a line, `t ` and the text for a time, followed by ` ─ `
 /// and the prompt's [error](crate::app::JumpPrompt::error) while it has one.
+///
+/// While the app has a search, the header has ` ─ match k/N` ([`App::match_count`])
+/// after the status and before the notice.
 ///
 /// While the app has a [notice](App::notice), the header ends with ` ─ ` and it.
 /// The level counters ([`App::level_counts`]) are right-aligned on the header line,
@@ -163,8 +170,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let key_notice = app
         .notice()
         .map_or(String::new(), |notice| format!(" ─ {notice}"));
+    let matches = app
+        .match_count()
+        .map_or(String::new(), |(position, total)| {
+            format!(" ─ match {position}/{total}")
+        });
     let title = format!(
-        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}{key_notice}",
+        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}{matches}{key_notice}",
         printable(app.file_name()),
         human_size(app.size()),
         app.settings().preset,
@@ -223,7 +235,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         }
         Some(Panel::Text(prompt)) => {
             if fits {
-                render_text_prompt(frame, prompt, body);
+                render_prompt(frame, prompt, " Text filter ", body);
             }
             panel_hints(prompt.error.as_deref(), TEXT_PROMPT_HINTS)
         }
@@ -234,6 +246,17 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             };
             let error = prompt.error.as_deref().map(|error| format!(" ─ {error}"));
             format!("{opener}{}{}", prompt.text, error.unwrap_or_default()).into()
+        }
+        Some(Panel::Search { prompt, backward }) => {
+            if fits {
+                let title = if *backward {
+                    " Search backward "
+                } else {
+                    " Search "
+                };
+                render_prompt(frame, prompt, title, body);
+            }
+            panel_hints(prompt.error.as_deref(), SEARCH_PROMPT_HINTS)
         }
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
@@ -308,7 +331,7 @@ fn render_time_panel(frame: &mut Frame, panel: &TimePanel, body: Rect) {
     );
 }
 
-fn render_text_prompt(frame: &mut Frame, prompt: &Prompt, body: Rect) {
+fn render_prompt(frame: &mut Frame, prompt: &Prompt, title: &str, body: Rect) {
     let check = |on| if on { 'x' } else { ' ' };
     let lines = vec![
         Line::from(format!(" ▶{}", printable(&prompt.pattern))),
@@ -321,7 +344,7 @@ fn render_text_prompt(frame: &mut Frame, prompt: &Prompt, body: Rect) {
     let area = body.centered(Constraint::Length(60), Constraint::Length(4));
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Text filter ")),
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(title)),
         area,
     );
 }
@@ -440,11 +463,21 @@ pub fn human_size(bytes: u64) -> String {
 /// (wide characters count as two columns) and every other control character, C0, DEL
 /// or C1, becomes `�`. Text without either is returned as is.
 pub fn printable(text: &str) -> Cow<'_, str> {
+    printable_from(text, 0).0
+}
+
+/// [`printable`] for text that starts at `column`, and the column it ends at, so that
+/// text shown piece by piece keeps its tab stops.
+fn printable_from(text: &str, column: usize) -> (Cow<'_, str>, usize) {
+    let width = |c: char| c.width().unwrap_or(0);
     if !text.chars().any(char::is_control) {
-        return Cow::Borrowed(text);
+        return (
+            Cow::Borrowed(text),
+            column + text.chars().map(width).sum::<usize>(),
+        );
     }
     let mut shown = String::with_capacity(text.len());
-    let mut column: usize = 0;
+    let mut column = column;
     for c in text.chars() {
         if c == '\t' {
             let stop = (column + 1).next_multiple_of(TAB_STOP);
@@ -457,8 +490,8 @@ pub fn printable(text: &str) -> Cow<'_, str> {
                 c
             };
             shown.push(c);
-            column += c.width().unwrap_or(0);
+            column += width(c);
         }
     }
-    Cow::Owned(shown)
+    (Cow::Owned(shown), column)
 }

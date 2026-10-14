@@ -69,4 +69,14 @@ exclude_re = [
     # Past the last match the jump goes to the last row, and `Viewport::goto` clamps a
     # row past the end to the last one, so one or two rows further is the same row.
     'src/app/mod\.rs:\d+:\d+: replace - with [/+] in App::time_row$',
+    # Skipping the scan of hidden lines for entries the count doesn't include only
+    # matters before they are counted; once counted, the marker is highlighted alike.
+    'src/app/mod\.rs:\d+:\d+: replace \|\| with && in App::hides_match$',
+    'src/app/mod\.rs:\d+:\d+: replace App::is_match -> bool with true$',
+    # The rows of the matches come in with them, so a match is never one past the
+    # last entry the rows show.
+    'src/app/mod\.rs:\d+:\d+: replace < with <= in App::entry_row$',
+    # A match ending where the message starts, or starting where it ends, is cut to an
+    # empty range, which highlights no cell.
+    'src/ui/table\.rs:\d+:\d+: replace < with <= in highlights$',
 ]

@@ -197,6 +197,23 @@ pub fn wait_for_filter(app: &mut App) {
     }
 }
 
+/// Polls `app` until its index is complete and the results of its filters and its
+/// search are in. Fails the test after [`INDEX_DEADLINE`].
+pub fn wait_for_search(app: &mut App) {
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        if app.progress().is_complete() && !app.filtering() && !app.searching() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "searching took longer than {INDEX_DEADLINE:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// `n` log lines that say which line they are, `… - step 1` to `… - step n`.
 pub fn numbered_log(n: usize) -> String {
     (1..=n)

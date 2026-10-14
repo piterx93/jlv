@@ -19,7 +19,7 @@ use crate::test_support;
 use crate::test_support::{
     INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
     key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
-    wait_for_index_within,
+    wait_for_index_within, wait_for_search,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -2928,4 +2928,359 @@ proptest! {
         let log = [at("12:00:00.000"), UNDATED.to_string(), at("12:30:00.000")].concat();
         jumped(app_in(Preset::Logback, log.as_bytes()), opener, &text);
     }
+}
+
+// --- search ---
+
+/// A regex matching entries 7, 42 and 90 of [`hundred_lines`], rows 6, 41 and 89.
+const THREE_STEPS: &str = r"step (7|42|90)$";
+
+/// `app` after opening the search prompt with `opener` (`/` or `?`), typing the
+/// regex `pattern` and pressing Enter, with the matches counted.
+fn searched(app: App, opener: char, pattern: &str) -> App {
+    let mut keys = vec![char_key(opener), ctrl('r')];
+    keys.extend(typing(pattern));
+    keys.push(key(KeyCode::Enter));
+    let mut app = pressed(app, &keys);
+    wait_for_search(&mut app);
+    app
+}
+
+fn selected(app: &App) -> Option<usize> {
+    app.viewport().selected()
+}
+
+/// The open search prompt of `app` and whether it searches backward; fails the test
+/// if it is closed.
+fn search_prompt(app: &App) -> (&Prompt, bool) {
+    match app.panel() {
+        Some(Panel::Search { prompt, backward }) => (prompt, *backward),
+        other => panic!("the search prompt is not open: {other:?}"),
+    }
+}
+
+/// The pattern of `app`'s search and whether it goes backward, if it has one.
+fn search_of(app: &App) -> Option<(&str, bool)> {
+    let search = app.search()?;
+    Some((search.matcher.pattern(), search.backward))
+}
+
+#[test]
+fn search_keys_are_slash_question_mark_n_and_capital_n() {
+    assert_eq!(action(char_key('/')), Some(Action::SearchForward));
+    assert_eq!(action(char_key('?')), Some(Action::SearchBackward));
+    assert_eq!(action(char_key('n')), Some(Action::NextMatch));
+    assert_eq!(action(char_key('N')), Some(Action::PreviousMatch));
+}
+
+#[test]
+fn slash_and_question_mark_open_an_empty_forward_and_backward_search_prompt() {
+    for (opener, backward) in [('/', false), ('?', true)] {
+        let app = pressed(hundred_lines(), &[char_key(opener)]);
+        let empty = Prompt {
+            pattern: String::new(),
+            options: matcher::Options::default(),
+            error: None,
+        };
+        assert_eq!(search_prompt(&app), (&empty, backward));
+    }
+}
+
+#[test]
+fn search_prompt_opens_empty_with_the_last_search_options() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    let app = pressed(app, &[char_key('?')]);
+    let (prompt, _) = search_prompt(&app);
+    assert_eq!(prompt.pattern, "");
+    assert_eq!(prompt.options, REGEX);
+}
+
+#[test]
+fn search_prompt_types_characters_and_toggles_its_options() {
+    let mut keys = vec![char_key('/')];
+    keys.extend(typing("nN/?q"));
+    keys.extend([ctrl('r'), key(KeyCode::Tab)]);
+    let app = pressed(hundred_lines(), &keys);
+    let (prompt, _) = search_prompt(&app);
+    assert_eq!(prompt.pattern, "nN/?q");
+    let both = matcher::Options {
+        regex: true,
+        ignore_case: true,
+    };
+    assert_eq!(prompt.options, both);
+    assert!(!app.should_quit());
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn enter_sets_the_search_and_selects_the_next_matching_entry() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    assert_eq!(app.panel(), None);
+    assert_eq!(search_of(&app), Some((THREE_STEPS, false)));
+    assert_eq!(selected(&app), Some(6));
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn backward_search_selects_the_previous_matching_entry() {
+    let app = jumped(hundred_lines(), ':', "51");
+    let app = searched(app, '?', THREE_STEPS);
+    assert_eq!(search_of(&app), Some((THREE_STEPS, true)));
+    assert_eq!(selected(&app), Some(41));
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn n_selects_the_next_match_and_capital_n_the_previous_one() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected(&app), Some(41));
+    let app = pressed(app, &[char_key('N')]);
+    assert_eq!(selected(&app), Some(6));
+}
+
+#[test]
+fn after_a_backward_search_n_goes_up_and_capital_n_down() {
+    let app = searched(jumped(hundred_lines(), ':', "51"), '?', THREE_STEPS);
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected(&app), Some(6));
+    let app = pressed(app, &[char_key('N')]);
+    assert_eq!(selected(&app), Some(41));
+}
+
+#[test]
+fn n_past_the_last_match_wraps_to_the_first_with_a_notice() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    let app = pressed(app, &[char_key('n'), char_key('n')]);
+    assert_eq!((selected(&app), app.notice()), (Some(89), None));
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected(&app), Some(6));
+    assert_eq!(app.notice(), Some("search wrapped"));
+}
+
+#[test]
+fn capital_n_before_the_first_match_wraps_to_the_last_with_a_notice() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    let app = pressed(app, &[char_key('N')]);
+    assert_eq!(selected(&app), Some(89));
+    assert_eq!(app.notice(), Some("search wrapped"));
+}
+
+#[test]
+fn a_search_without_matches_says_pattern_not_found_and_stays() {
+    let app = applied(hundred_lines(), &[Action::Down; 3]);
+    let app = searched(app, '/', "nowhere");
+    assert_eq!(app.panel(), None);
+    assert_eq!(selected(&app), Some(3));
+    assert_eq!(app.notice(), Some("pattern not found"));
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected(&app), Some(3));
+    assert_eq!(app.notice(), Some("pattern not found"));
+}
+
+#[test]
+fn n_and_capital_n_without_a_search_do_nothing() {
+    let app = applied(
+        hundred_lines(),
+        &[
+            Action::Down,
+            Action::Down,
+            Action::Down,
+            Action::NextMatch,
+            Action::PreviousMatch,
+        ],
+    );
+    assert_eq!(pos(&app), (0, Some(3)));
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn an_invalid_regex_keeps_the_search_prompt_open_with_the_reason() {
+    let keys = [char_key('/'), ctrl('r'), char_key('('), key(KeyCode::Enter)];
+    let app = pressed(hundred_lines(), &keys);
+    let (prompt, _) = search_prompt(&app);
+    assert_eq!(prompt.error, Some(Matcher::new("(", REGEX).unwrap_err()));
+    assert!(app.search().is_none());
+}
+
+#[test]
+fn esc_closes_the_search_prompt_and_keeps_the_last_search() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    let app = pressed(app, &[char_key('?'), char_key('x'), key(KeyCode::Esc)]);
+    assert_eq!(app.panel(), None);
+    assert_eq!(search_of(&app), Some((THREE_STEPS, false)));
+    assert_eq!(selected(&app), Some(6));
+}
+
+#[test]
+fn enter_on_an_empty_search_pattern_clears_the_search() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    let app = pressed(app, &[char_key('/'), key(KeyCode::Enter)]);
+    assert_eq!(app.panel(), None);
+    assert!(app.search().is_none());
+    assert_eq!(app.match_count(), None);
+    assert_eq!(selected(&app), Some(6));
+}
+
+#[test]
+fn match_count_is_the_matches_up_to_the_selected_entry_of_all_matches() {
+    let app = searched(hundred_lines(), '/', THREE_STEPS);
+    assert_eq!(app.match_count(), Some((1, 3)));
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(app.match_count(), Some((2, 3)));
+    let app = pressed(app, &[char_key('j')]);
+    assert_eq!(app.match_count(), Some((2, 3)));
+    let app = pressed(app, &[char_key('g')]);
+    assert_eq!(app.match_count(), Some((0, 3)));
+}
+
+#[test]
+fn search_covers_the_whole_first_line_not_only_the_message() {
+    let mut app = logback(&[STARTED, FAILED, DONE]);
+    app.resize(10);
+    let app = searched(app, '/', "ERROR");
+    assert_eq!(selected(&app), Some(1));
+    assert_eq!(app.match_count(), Some((1, 1)));
+}
+
+#[test]
+fn matches_in_folded_stack_traces_count_for_their_entry() {
+    let app = searched(traces(), '/', r"App\.java");
+    assert_eq!(selected_row(&app), FAILED.trim_end());
+    assert_eq!(app.match_count(), Some((1, 2)));
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn the_count_and_n_cover_only_the_entries_the_filters_show() {
+    let mut app = logback(&[STARTED, FAILED, DONE]);
+    app.resize(10);
+    let app = searched(app, '/', r"com\.example");
+    assert_eq!(app.match_count(), Some((2, 3)));
+    let mut app = applied(app, &[Action::ToggleLevel(Level::Error)]);
+    wait_for_search(&mut app);
+    assert_eq!(app.match_count(), Some((1, 2)));
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn entries_appended_while_following_are_searched() {
+    let app = followed(Preset::Logback, &[STARTED, FAILED, DONE].concat());
+    let app = searched(app, '/', "Failed");
+    assert_eq!(selected(&app), Some(1));
+    assert!(!app.following());
+    let mut app = grown(app, &[STARTED, FAILED, DONE, FAILED].concat());
+    wait_for_search(&mut app);
+    assert_eq!(app.match_count(), Some((1, 2)));
+    let app = pressed(app, &[char_key('n')]);
+    assert_eq!(selected(&app), Some(3));
+}
+
+/// `app` after searching it for the plain `pattern` with `/`, before any poll.
+fn search_entered(app: App, pattern: &str) -> App {
+    let mut keys = vec![char_key('/')];
+    keys.extend(typing(pattern));
+    keys.push(key(KeyCode::Enter));
+    pressed(app, &keys)
+}
+
+#[test]
+fn counting_a_large_file_runs_in_the_background() {
+    let mut app = app(numbered_log(5000).as_bytes());
+    app.resize(10);
+    let mut app = search_entered(app, "step 4999");
+    assert!(app.searching());
+    wait_for_search(&mut app);
+    assert_eq!(selected(&app), Some(4998));
+    assert_eq!(app.match_count(), Some((1, 1)));
+}
+
+#[test]
+fn a_search_moves_only_once_the_matches_it_needs_are_counted() {
+    let mut app = following_app(Preset::Raw, numbered_log(5000).as_bytes());
+    app.resize(10);
+    wait_for_index(&mut app);
+    // From the last row, the match lies past the wrap, which takes every match.
+    let mut app = search_entered(app, "step 4999");
+    assert_eq!(selected(&app), Some(4999));
+    assert!(app.following());
+    wait_for_search(&mut app);
+    assert_eq!(selected(&app), Some(4998));
+    assert!(!app.following());
+}
+
+#[test]
+fn a_move_before_the_matches_are_counted_drops_the_search_move() {
+    let mut app = app(numbered_log(5000).as_bytes());
+    app.resize(10);
+    let app = search_entered(app, "step 4999");
+    let mut app = pressed(app, &[char_key('j')]);
+    wait_for_search(&mut app);
+    assert_eq!(selected(&app), Some(1));
+    assert_eq!(app.notice(), None);
+}
+
+/// A sliding time filter re-evaluates only from the entries that can drop out, so the
+/// search keeps the matches before them while the new entries are counted.
+#[test]
+fn matches_stay_counted_while_a_sliding_time_filter_takes_in_appended_entries() {
+    let times = [
+        "12:00:00.000",
+        "12:01:00.000",
+        "12:02:00.000",
+        "12:03:00.000",
+    ];
+    let app = timed(followed(Preset::Logback, &log_at(&times)), "10m");
+    let mut app = searched(app, '/', "at 12:0[015]");
+    assert_eq!(app.match_count(), Some((1, 2)));
+    let grown = [&times[..], &["12:04:00.000", "12:05:00.000"]].concat();
+    let source = test_support::source(log_at(&grown).as_bytes());
+    app.file_changed(FileChange::Grew(source));
+    // The entry appended that matches may be counted already.
+    assert!(
+        matches!(app.match_count(), Some((1, 2 | 3))),
+        "{:?}",
+        app.match_count()
+    );
+    wait_for_search(&mut app);
+    assert_eq!(app.match_count(), Some((1, 3)));
+}
+
+#[test]
+fn the_app_expects_updates_while_only_the_search_is_counting() {
+    let mut app = app(numbered_log(5000).as_bytes());
+    app.resize(10);
+    let app = search_entered(app, "step 4999");
+    assert!(app.searching() && !app.filtering() && app.progress().is_complete());
+    assert!(app.expects_updates());
+}
+
+/// [`numbered_log`] of 100 entries searched for entries 21 and 2001, with entry 51
+/// selected, then grown to 3,100 entries: more than are counted again at once.
+fn searched_then_grown() -> App {
+    let mut app = app(numbered_log(100).as_bytes());
+    app.resize(10);
+    let app = jumped(searched(app, '/', r"step (21|2001)$"), ':', "51");
+    let source = test_support::source(numbered_log(3100).as_bytes());
+    let mut app = app;
+    app.file_changed(FileChange::Grew(source));
+    assert!(app.searching());
+    app
+}
+
+#[test]
+fn a_backward_step_over_entries_already_counted_moves_at_once() {
+    let app = pressed(searched_then_grown(), &[char_key('N')]);
+    assert_eq!(selected(&app), Some(20));
+}
+
+#[test]
+fn a_backward_step_waits_until_the_entries_before_the_selection_are_counted() {
+    let app = jumped(searched_then_grown(), ':', "3001");
+    let mut app = pressed(app, &[char_key('N')]);
+    assert_eq!(selected(&app), Some(3000));
+    wait_for_search(&mut app);
+    assert_eq!(selected(&app), Some(2000));
 }

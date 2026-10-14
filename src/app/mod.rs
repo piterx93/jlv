@@ -17,7 +17,8 @@ use memchr::{memchr, memchr_iter, memrchr};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::filter::{
-    self, Base, Classes, Engine, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange, TimeSpec,
+    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
+    TimeSpec,
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
@@ -82,6 +83,14 @@ pub enum Action {
     LinePrompt,
     /// Opens the prompt for a time to jump to ([`App::panel`]).
     TimePrompt,
+    /// Opens the prompt for a search down the rows ([`App::panel`]).
+    SearchForward,
+    /// Opens the prompt for a search up the rows ([`App::panel`]).
+    SearchBackward,
+    /// Selects the next matching entry in the direction of the search ([`App::search`]).
+    NextMatch,
+    /// Selects the next matching entry against the direction of the search.
+    PreviousMatch,
     /// Applies what the open panel edits and closes it.
     Confirm,
     /// Closes the open panel without applying its edits.
@@ -99,7 +108,8 @@ pub enum Action {
 /// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
 /// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
 /// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
-/// prompt, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
+/// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
+/// and previous match, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys
 /// repeat.
@@ -135,6 +145,10 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ClearFilters,
         (KeyCode::Char(':'), KeyModifiers::NONE) => Action::LinePrompt,
         (KeyCode::Char('t'), KeyModifiers::NONE) => Action::TimePrompt,
+        (KeyCode::Char('/'), KeyModifiers::NONE) => Action::SearchForward,
+        (KeyCode::Char('?'), KeyModifiers::NONE) => Action::SearchBackward,
+        (KeyCode::Char('n'), KeyModifiers::NONE) => Action::NextMatch,
+        (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
@@ -418,6 +432,19 @@ pub enum Panel {
     /// The text filter prompt.
     Text(Prompt),
     Jump(JumpPrompt),
+    /// The search prompt, for a search up the rows if `backward`.
+    Search {
+        prompt: Prompt,
+        backward: bool,
+    },
+}
+
+/// A search: what it looks for and which way [`Action::NextMatch`] goes, up the rows
+/// if `backward`.
+#[derive(Debug, Clone)]
+pub struct Search {
+    pub matcher: Matcher,
+    pub backward: bool,
 }
 
 impl Panel {
@@ -425,7 +452,11 @@ impl Panel {
         match self {
             Panel::Levels(panel) => panel.edit(action),
             // Their text is edited through `App::key`, not actions.
-            Panel::Classes(_) | Panel::Time(_) | Panel::Text(_) | Panel::Jump(_) => {}
+            Panel::Classes(_)
+            | Panel::Time(_)
+            | Panel::Text(_)
+            | Panel::Jump(_)
+            | Panel::Search { .. } => {}
         }
     }
 }
@@ -468,6 +499,39 @@ enum Slide {
     Restart,
 }
 
+/// How an engine evaluates again after the index or the time range changed.
+enum Rerun {
+    /// From the first entry.
+    Restart,
+    /// From this entry, which the index read again or dropped.
+    Reread(usize),
+    /// From this entry, with filters that only drop entries from there on.
+    Drop(usize),
+}
+
+impl Rerun {
+    /// What the engine has to do for `slide`, the entries from `from` on being new or
+    /// read again. Only the matches dated before a later start drop out.
+    fn after(slide: &Slide, engine: &Engine, records: &[Record], from: usize) -> Rerun {
+        match *slide {
+            Slide::Restart => Rerun::Restart,
+            Slide::Later(start) => {
+                let dropped = first_dropped(engine, records, start);
+                Rerun::Drop(dropped.map_or(from, |entry| entry.min(from)))
+            }
+            Slide::None => Rerun::Reread(from),
+        }
+    }
+
+    fn apply(&self, engine: &mut Engine, filters: &Filters) {
+        match *self {
+            Rerun::Restart => engine.set_filters(filters.clone()),
+            Rerun::Reread(from) => engine.reread(from),
+            Rerun::Drop(from) => engine.set_filters_from(filters.clone(), from),
+        }
+    }
+}
+
 /// The index, shared with the filter engine. Only `App` writes it.
 type SharedIndex = Arc<RwLock<Indexed<Source>>>;
 
@@ -505,12 +569,6 @@ impl Filter {
         self.catch_up(all, 0, Instant::now());
     }
 
-    /// Starts over with `filters`, from no match.
-    fn restart(&mut self, filters: Filters) {
-        self.engine.set_filters(filters);
-        self.folds.truncate(0);
-    }
-
     /// [`take_in`](Self::take_in), but waiting for the engine until it evaluated the
     /// first `evaluated` entries or `deadline` passed.
     fn catch_up(&mut self, all: &Folds, evaluated: usize, deadline: Instant) {
@@ -525,18 +583,14 @@ impl Filter {
         }
     }
 
-    /// Drops the matches from index entry `from` on, which the index read again or
-    /// dropped, and has the engine evaluate the entries from there.
-    fn reread(&mut self, from: usize) {
-        let kept = self.matches_before(from);
-        self.engine.reread(from);
-        self.folds.truncate(kept);
-    }
-
-    /// Like [`reread`](Self::reread), with `filters` that only drop entries.
-    fn refilter_from(&mut self, filters: Filters, from: usize) {
-        let kept = self.matches_before(from);
-        self.engine.set_filters_from(filters, from);
+    /// Has the engine evaluate again as `rerun` says, dropping the fold state of the
+    /// matches it drops.
+    fn rerun(&mut self, rerun: &Rerun, filters: &Filters) {
+        let kept = match *rerun {
+            Rerun::Restart => 0,
+            Rerun::Reread(from) | Rerun::Drop(from) => self.matches_before(from),
+        };
+        rerun.apply(&mut self.engine, filters);
         self.folds.truncate(kept);
     }
 
@@ -680,6 +734,12 @@ pub struct App {
     clock: fn() -> Timestamp,
     /// At work since the first [`set_filters`](Self::set_filters).
     filter: Option<Filter>,
+    search: Option<Search>,
+    /// Counts the entries the filters show that match `search`; at work while there
+    /// is one.
+    matches: Option<Engine>,
+    /// The way a move to a match is waiting to go, for matches not yet counted.
+    pending_step: Option<bool>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
@@ -776,6 +836,9 @@ impl App {
             last_dated: None,
             clock: Timestamp::now,
             filter: None,
+            search: None,
+            matches: None,
+            pending_step: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
             opens_at_end: follow,
@@ -810,10 +873,13 @@ impl App {
     /// While a file is [watched](Self::watch), it also takes in what happened to the
     /// file since the last call, as [`file_changed`](Self::file_changed) does.
     pub fn poll_index(&mut self) {
-        // Before the index changes, which starts the engine over from the first entry
-        // it changes and drops what it found past it.
+        // Before the index changes, which starts the engines over from the first entry
+        // it changes and drops what they found past it.
         if let Some(filter) = &mut self.filter {
             filter.take_in(&self.folds);
+        }
+        if let Some(matches) = &mut self.matches {
+            matches.poll();
         }
         let changes = self.watch.as_mut().map_or_else(Vec::new, Watch::changes);
         for change in changes {
@@ -861,6 +927,9 @@ impl App {
             }
         }
         self.update_rows();
+        if let Some(backward) = self.pending_step.take() {
+            self.step(backward);
+        }
     }
 
     /// How far indexing got as of the last [`poll_index`](Self::poll_index):
@@ -995,7 +1064,7 @@ impl App {
     /// without anything happening on screen: the index isn't complete, a watcher may
     /// report changes to the file, or the filters' results are still coming in.
     pub(crate) fn expects_updates(&self) -> bool {
-        !self.progress.is_complete() || self.watch.is_some() || self.filtering()
+        !self.progress.is_complete() || self.watch.is_some() || self.filtering() || self.searching()
     }
 
     /// Whether the preset was detected, found none fitting and fell back to `Raw`.
@@ -1072,6 +1141,9 @@ impl App {
             self.filter = None;
         } else {
             self.start_filter();
+        }
+        if let Some(matches) = &mut self.matches {
+            matches.set_filters(self.filters.clone());
         }
         self.viewport = Viewport::new(0, self.viewport.height());
         self.update_rows();
@@ -1170,8 +1242,54 @@ impl App {
     ///
     /// [`Action::LinePrompt`] and [`Action::TimePrompt`] open an empty jump prompt
     /// for a line or a time. [`App::key`] edits it.
+    ///
+    /// [`Action::SearchForward`] and [`Action::SearchBackward`] open the search
+    /// prompt, empty and with the options of the last search. [`App::key`] edits it
+    /// like the text filter prompt.
     pub fn panel(&self) -> Option<&Panel> {
         self.panel.as_ref()
+    }
+
+    /// The search set in the search prompt, if any; none at first.
+    pub fn search(&self) -> Option<&Search> {
+        self.search.as_ref()
+    }
+
+    /// `(position, total)` of the search's matches, `None` without a search: `total`
+    /// is how many entries the filters show match the search, `position` how many of
+    /// them are at or before the selected row's entry.
+    pub fn match_count(&self) -> Option<(usize, usize)> {
+        let entries = &self.matches.as_ref()?.filtered().entries;
+        let position = self.selected_entry().map_or(0, |selected| {
+            entries.partition_point(|&entry| entry as usize <= selected)
+        });
+        Some((position, entries.len()))
+    }
+
+    /// Whether the search's matches aren't all counted yet: entries the filters show
+    /// are still to be searched.
+    pub fn searching(&self) -> bool {
+        self.matches
+            .as_ref()
+            .is_some_and(|matches| matches.filtered().evaluated < read(&self.index).records.len())
+    }
+
+    /// Whether a line that folding hides from row `i`'s entry matches the search.
+    pub fn hides_match(&self, i: usize) -> bool {
+        let (Some(search), Some(shown)) = (&self.search, self.row(i)) else {
+            return false;
+        };
+        // The engine already knows which entries have a match; most folded ones don't.
+        let counted = self
+            .index_entry(i)
+            .is_some_and(|entry| self.is_match(entry));
+        if shown.hidden == 0 || !counted {
+            return false;
+        }
+        let entry = &self.source.bytes()[file_range(&shown.record)];
+        source::lines(entry)
+            .skip(1)
+            .any(|line| search.matcher.is_match(&strip_ansi(line)))
     }
 
     /// Whether long messages wrap onto the following screen lines instead of being
@@ -1199,6 +1317,7 @@ impl App {
     /// When the selected line gets folded away, its entry's first line takes its
     /// place.
     pub fn apply(&mut self, action: Action) {
+        self.pending_step = None;
         if let Some(panel) = self.panel.take() {
             self.apply_in_panel(panel, action);
             return;
@@ -1267,6 +1386,10 @@ impl App {
             }
             Action::LinePrompt => self.panel = Some(Panel::Jump(JumpPrompt::new(Jump::Line))),
             Action::TimePrompt => self.panel = Some(Panel::Jump(JumpPrompt::new(Jump::Time))),
+            Action::SearchForward => self.open_search(false),
+            Action::SearchBackward => self.open_search(true),
+            Action::NextMatch => self.step_search(false),
+            Action::PreviousMatch => self.step_search(true),
             Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
@@ -1299,6 +1422,17 @@ impl App {
     /// clears it for an empty pattern; an invalid regex keeps the prompt open with
     /// the [error](Prompt::error).
     ///
+    /// The search prompt is edited the same way. `Enter` sets the [search](Self::search)
+    /// to the pattern, or clears it for an empty pattern, and selects the first
+    /// matching entry after the selected one (before it, searching backward), as
+    /// [`Action::NextMatch`] does; `Esc` keeps the last search. The matches are all
+    /// the lines of an entry, folded away or not, with ANSI escape codes stripped.
+    /// [`Action::NextMatch`] and [`Action::PreviousMatch`] stop following and select the
+    /// next and previous matching entry among those the filters show, wrapping around
+    /// with the [notice](Self::notice) `search wrapped`, or say `pattern not found`.
+    /// Matches are counted in the background; a move that needs matches not counted
+    /// yet is made at the [`poll_index`](Self::poll_index) that has them.
+    ///
     /// A jump prompt is edited like the time panel, without `Tab` and the presets.
     /// `Enter` closes it and jumps, or only closes it while its text is blank; text
     /// that says nothing to jump to keeps it open with the [error](JumpPrompt::error).
@@ -1327,6 +1461,7 @@ impl App {
             Some(Panel::Time(panel)) => panel.key(key),
             Some(Panel::Text(prompt)) => prompt.key(key),
             Some(Panel::Jump(prompt)) => prompt.key(key),
+            Some(Panel::Search { prompt, .. }) => prompt.key(key),
             _ => action(key),
         };
         if let Some(action) = action {
@@ -1369,7 +1504,115 @@ impl App {
         if self.filter.is_some() {
             self.start_filter();
         }
+        self.start_search();
         self.read_tail();
+    }
+
+    /// Opens the search prompt, empty and reading its pattern as the last search did.
+    fn open_search(&mut self, backward: bool) {
+        let options = self
+            .search
+            .as_ref()
+            .map_or_else(matcher::Options::default, |search| search.matcher.options());
+        let prompt = Prompt {
+            options,
+            ..Prompt::new(None)
+        };
+        self.panel = Some(Panel::Search { prompt, backward });
+    }
+
+    /// Makes `search` the search and selects its first match from the selected entry,
+    /// or drops the search for `None`.
+    fn set_search(&mut self, search: Option<Search>) {
+        self.search = search;
+        self.start_search();
+        self.step_search(false);
+    }
+
+    /// Starts counting the matches of the search, in place of any engine at work.
+    fn start_search(&mut self) {
+        self.matches = self.search.as_ref().map(|search| {
+            let options = filter::Options {
+                chunk: FILTER_CHUNK,
+            };
+            Engine::spawn_search(
+                Arc::clone(&self.index),
+                self.settings.preset,
+                self.filters.clone(),
+                search.matcher.clone(),
+                options,
+            )
+        });
+    }
+
+    /// [`step`](Self::step) in the direction of the search, or against it if `reverse`.
+    fn step_search(&mut self, reverse: bool) {
+        if let Some(search) = &self.search {
+            self.step(search.backward != reverse);
+        }
+    }
+
+    /// Selects the next entry that matches the search, up the rows if `backward`. When
+    /// the matches that tell aren't counted yet, it is done as soon as they are.
+    fn step(&mut self, backward: bool) {
+        let Some(matches) = &self.matches else {
+            return;
+        };
+        let counted = self.progress.is_complete() && !self.searching();
+        let next = find_match(matches.filtered(), self.selected_entry(), backward, counted);
+        match next {
+            Next::Wait => self.pending_step = Some(backward),
+            Next::Nothing => self.notice = Some("pattern not found"),
+            Next::Match { entry, wrapped } => match self.entry_row(entry) {
+                // The filters' results haven't caught up with the entry yet.
+                None => self.pending_step = Some(backward),
+                Some(row) => {
+                    self.following = false;
+                    self.viewport.goto(row);
+                    self.notice = wrapped.then_some("search wrapped");
+                }
+            },
+        }
+    }
+
+    /// The index entry that viewport row `row` shows, `None` for the truncation row and
+    /// while the rows are the file's last entries, which the index doesn't number.
+    fn index_entry(&self, row: usize) -> Option<usize> {
+        let (shown, _) = self.shown_folds().line_at(self.fold_row(row)?);
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(..), _) => None,
+            (_, Some(filter)) => Some(filter.entry(shown)),
+            (_, None) => Some(shown),
+        }
+    }
+
+    fn selected_entry(&self) -> Option<usize> {
+        self.index_entry(self.viewport.selected()?)
+    }
+
+    /// The viewport row of the first line of index entry `entry`, `None` while the
+    /// rows don't show it.
+    fn entry_row(&self, entry: usize) -> Option<usize> {
+        let shown = match (&self.opening, &self.filter) {
+            (Opening::Tail(..), _) => return None,
+            (_, Some(filter)) => filter
+                .engine
+                .filtered()
+                .entries
+                .binary_search(&(entry as u32))
+                .ok()?,
+            (_, None) => entry,
+        };
+        let folds = self.shown_folds();
+        (shown < folds.entries()).then(|| self.lead_rows() + folds.row_of(shown, 0))
+    }
+
+    /// Whether the search's matches counted so far include index entry `entry`.
+    fn is_match(&self, entry: usize) -> bool {
+        self.matches.as_ref().is_some_and(|matches| {
+            let entries = &matches.filtered().entries;
+            entries.binary_search(&(entry as u32)).is_ok()
+        })
     }
 
     /// Starts evaluating the filters over the index, in place of any engine at work.
@@ -1398,19 +1641,16 @@ impl App {
     /// changed, and waits for them when there are only a few left to evaluate.
     fn reread(&mut self, from: usize) {
         let slide = self.slide_time_filter(from);
+        let index = read(&self.index);
+        if let Some(matches) = &mut self.matches {
+            Rerun::after(&slide, matches, &index.records, from).apply(matches, &self.filters);
+        }
         let Some(filter) = &mut self.filter else {
             return;
         };
-        match slide {
-            Slide::Restart => filter.restart(self.filters.clone()),
-            Slide::Later(start) => {
-                // Only matches dated before the new start drop out; the others stay.
-                let from = first_dropped(&filter.engine, &read(&self.index).records, start)
-                    .map_or(from, |entry| entry.min(from));
-                filter.refilter_from(self.filters.clone(), from);
-            }
-            Slide::None => filter.reread(from),
-        }
+        let rerun = Rerun::after(&slide, &filter.engine, &index.records, from);
+        drop(index);
+        filter.rerun(&rerun, &self.filters);
         let total = read(&self.index).records.len();
         if total.saturating_sub(filter.engine.filtered().evaluated) <= FILTER_CHUNK {
             filter.catch_up(&self.folds, total, Instant::now() + CATCH_UP);
@@ -1620,6 +1860,18 @@ impl App {
                         self.panel = Some(Panel::Jump(prompt));
                     }
                 }
+                Panel::Search {
+                    mut prompt,
+                    backward,
+                } => match prompt.matcher() {
+                    Ok(matcher) => {
+                        self.set_search(matcher.map(|matcher| Search { matcher, backward }))
+                    }
+                    Err(error) => {
+                        prompt.error = Some(error);
+                        self.panel = Some(Panel::Search { prompt, backward });
+                    }
+                },
             },
             Action::Cancel => {}
             Action::Quit => {
@@ -1913,6 +2165,54 @@ fn last_dated(
         Some(_) => dated(0..from),
         None => None,
     })
+}
+
+/// Where a move to a match goes.
+enum Next {
+    /// The matches that tell aren't counted yet.
+    Wait,
+    Nothing,
+    Match {
+        entry: usize,
+        wrapped: bool,
+    },
+}
+
+/// The match `matches`, the counted entries that match, has after index entry
+/// `selected` or, `backward`, before it. Past the last one it wraps to the first, once
+/// `counted` says there are no more to come.
+fn find_match(matches: &Filtered, selected: Option<usize>, backward: bool, counted: bool) -> Next {
+    let entries = &matches.entries;
+    let (near, far) = if backward {
+        // Matches before the selected entry are all in only once it is evaluated.
+        if !counted && selected.is_none_or(|selected| matches.evaluated <= selected) {
+            return Next::Wait;
+        }
+        let before = selected.map_or(entries.len(), |selected| {
+            entries.partition_point(|&entry| (entry as usize) < selected)
+        });
+        (
+            before.checked_sub(1).and_then(|i| entries.get(i)),
+            entries.last(),
+        )
+    } else {
+        let after = selected.map_or(0, |selected| {
+            entries.partition_point(|&entry| entry as usize <= selected)
+        });
+        (entries.get(after), entries.first())
+    };
+    match (near, far) {
+        (Some(&entry), _) => Next::Match {
+            entry: entry as usize,
+            wrapped: false,
+        },
+        _ if !counted => Next::Wait,
+        (None, Some(&entry)) => Next::Match {
+            entry: entry as usize,
+            wrapped: true,
+        },
+        (None, None) => Next::Nothing,
+    }
 }
 
 /// Whether `filters` let every entry through.

@@ -19,7 +19,7 @@ use crate::matcher::{self, Matcher};
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
     hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_filter,
-    wait_for_index, wait_for_index_within,
+    wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -2112,4 +2112,219 @@ proptest! {
             prop_assert_eq!(cell.style(), Cell::EMPTY.style());
         }
     }
+}
+
+// --- search ---
+
+/// The search prompt with the keys that open it, type `pattern` and toggle regex.
+fn regex_search_keys(opener: char, pattern: &str) -> Vec<KeyEvent> {
+    let mut keys = vec![char_key(opener), ctrl('r')];
+    keys.extend(pattern.chars().map(char_key));
+    keys
+}
+
+/// The 80×24 terminal after searching `app` for the regex `pattern` with `/` and
+/// counting its matches, then pressing `keys`; drawn after each key.
+fn searched_terminal(app: &mut App, pattern: &str, keys: &[KeyEvent]) -> Terminal<TestBackend> {
+    let mut search = regex_search_keys('/', pattern);
+    search.push(key(KeyCode::Enter));
+    let mut terminal = terminal_after_pressing(app, &search);
+    wait_for_search(app);
+    draw(&mut terminal, app, Theme::Styled);
+    for &key in keys {
+        app.key(key);
+        draw(&mut terminal, app, Theme::Styled);
+    }
+    terminal
+}
+
+/// Screen lines `lines` as [`row`] shows them, each followed by a line with `^`
+/// under its highlighted cells, those on a yellow background, if it has any.
+fn with_highlights(terminal: &Terminal<TestBackend>, lines: RangeInclusive<u16>) -> String {
+    let buffer = terminal.backend().buffer();
+    let mut out = Vec::new();
+    for y in lines {
+        out.push(row(terminal, y));
+        let marks: String = (0..buffer.area.width)
+            .map(|x| {
+                if buffer[(x, y)].bg == Color::Yellow {
+                    '^'
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        if marks.contains('^') {
+            out.push(marks.trim_end().to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// Four lines, three of them about orders, the third about two.
+const ORDERS: &str = concat!(
+    "order 1 created\n",
+    "payment for order 1 failed\n",
+    "order 2 created, order 1 retried\n",
+    "shipping\n",
+);
+
+#[test]
+fn search_prompt_shows_an_invalid_regex_error_in_the_footer() {
+    let mut keys = regex_search_keys('/', "(");
+    keys.push(key(KeyCode::Enter));
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.example.App - step 8                             "
+    " 12:00:00.009 [main] INFO  com.example.App - step 9                             "
+    " 12:00:00.┌ Search ──────────────────────────────────────────────────┐          "
+    " 12:00:00.│ ▶(                                                       │          "
+    " 12:00:00.│  [x] regex  [ ] ignore case                              │          "
+    " 12:00:00.└──────────────────────────────────────────────────────────┘          "
+    " 12:00:00.014 [main] INFO  com.example.App - step 14                            "
+    " 12:00:00.015 [main] INFO  com.example.App - step 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "invalid regex: unclosed group                                                   "
+    "#);
+}
+
+#[test]
+fn search_prompt_footer_shows_its_keys() {
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &[char_key('/')]);
+    assert_eq!(
+        row(&terminal, 23),
+        "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel"
+    );
+}
+
+#[test]
+fn backward_search_prompt_is_titled_search_backward() {
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &[char_key('?')]);
+    assert!(
+        row(&terminal, 10).contains("┌ Search backward ─"),
+        "{}",
+        row(&terminal, 10)
+    );
+}
+
+#[test]
+fn matches_are_highlighted_in_the_visible_rows() {
+    let terminal = searched_terminal(&mut app(ORDERS.as_bytes()), "order", &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
+     order 1 created
+     ^^^^^
+    ▶payment for order 1 failed
+                 ^^^^^
+     order 2 created, order 1 retried
+     ^^^^^            ^^^^^
+     shipping
+    ");
+}
+
+#[test]
+fn a_match_in_folded_lines_highlights_the_fold_marker() {
+    let terminal = searched_terminal(&mut traces(), r"App\.java:2", &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ▶12:00:00.002 INFO  com.example.App          step 2 [+2]
+                                                        ^^^^
+     12:00:00.003 INFO  com.example.App          step 3 [+1]
+     12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+#[test]
+fn matches_in_unfolded_stack_trace_lines_are_highlighted() {
+    let terminal = searched_terminal(&mut traces(), r"App\.java:2", &[char_key(' ')]);
+    assert_snapshot!(with_highlights(&terminal, 1..=6), @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ▶12:00:00.002 INFO  com.example.App          step 2
+                                                     at App.step(App.java:1)
+                                                     at App.step(App.java:2)
+                                                                 ^^^^^^^^^^
+     12:00:00.003 INFO  com.example.App          step 3 [+1]
+     12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+#[test]
+fn header_shows_the_match_count_before_the_notice() {
+    let keys = [char_key('n'), char_key('n')];
+    let terminal = searched_terminal(&mut app(ORDERS.as_bytes()), "order", &keys);
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 85 B ─ Raw ─ match 1/3 ─ search wrapped"
+    );
+}
+
+/// Three Logback entries: `App - step` runs from the class column into the message,
+/// a tab comes before `done`, and the last message wraps inside `done`.
+const COLUMNS_LOG: &str = concat!(
+    "2026-10-07 12:00:00.001 [main] INFO  com.example.App - step 1\n",
+    "2026-10-07 12:00:00.002 [main] INFO  com.example.App - \tstep 2 done\n",
+    "2026-10-07 12:00:00.003 [main] INFO  com.example.App - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa done\n",
+);
+
+/// Only the message column is highlighted: of `App - step`, the `step` in it. A tab
+/// before a match moves its highlight by the columns the tab takes, and a wrapped
+/// match is highlighted on both screen lines.
+#[test]
+fn highlights_stay_in_the_message_column_and_follow_tabs_and_wrapping() {
+    let mut app = app_in(Preset::Logback, COLUMNS_LOG.as_bytes());
+    let terminal = searched_terminal(&mut app, "App - step|done", &[char_key('w')]);
+    assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
+     12:00:00.001 INFO  com.example.App          step 1
+                                                 ^^^^
+    ▶12:00:00.002 INFO  com.example.App              step 2 done
+                                                            ^^^^
+     12:00:00.003 INFO  com.example.App          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa d
+                                                                                   ^
+                                                 one
+                                                 ^^^
+    ");
+}
+
+/// A match past the 64 KiB a line is shown up to is never on screen, even scrolled
+/// as far right as the line goes.
+#[test]
+fn a_match_past_the_shown_part_of_a_huge_line_is_not_highlighted() {
+    let huge = format!("{} needle\nshort\n", "a".repeat(100_000));
+    let mut app = app(huge.as_bytes());
+    let mut terminal = searched_terminal(&mut app, "needle", &[]);
+    for _ in 0..10_000 {
+        app.apply(Action::ScrollRight);
+    }
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert!(row(&terminal, 1).ends_with('…'), "{}", row(&terminal, 1));
+    assert_eq!(with_highlights(&terminal, 1..=1), row(&terminal, 1));
+}
+
+/// Text between matches keeps its tab stops: the tab after `ab` takes two columns.
+#[test]
+fn a_tab_after_a_match_keeps_its_tab_stop() {
+    let terminal = searched_terminal(&mut app(b"ab\tdone\n"), "b|done", &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=1), @r"
+    ▶ab  done
+      ^  ^^^^
+    ");
+}
+
+/// A regex over bytes can match half of a character, which no cell shows alone.
+#[test]
+fn a_match_of_half_a_character_is_not_highlighted() {
+    let terminal = searched_terminal(&mut app("café\n".as_bytes()), r"(?-u)\xC3", &[]);
+    assert_eq!(with_highlights(&terminal, 1..=1), "▶café");
 }
