@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, FileChange, action};
-use crate::filter::Filters;
+use crate::filter::{Classes, Filters};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
 use crate::test_support::{
@@ -262,6 +262,94 @@ fn level_panel_shows_a_checkbox_per_level_over_the_rows() {
     " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
     "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel                             "
     "#);
+}
+
+/// The 80×24 screen after pressing `keys` as the event loop hands them over
+/// ([`App::key`]), drawn after each.
+fn screen_after_pressing(app: &mut App, keys: &[KeyEvent]) -> String {
+    terminal_after_pressing(app, keys).backend().to_string()
+}
+
+/// The 80×24 terminal after pressing `keys` as [`screen_after_pressing`] does.
+fn terminal_after_pressing(app: &mut App, keys: &[KeyEvent]) -> Terminal<TestBackend> {
+    let mut terminal = drawn(app, 80, 24, Theme::Styled);
+    for &key in keys {
+        app.key(key);
+        draw(&mut terminal, app, Theme::Styled);
+    }
+    terminal
+}
+
+/// The keys that open the class panel and type `lines` into it, one per line.
+fn class_panel_keys(lines: &[&str]) -> Vec<KeyEvent> {
+    let mut keys = vec![key(KeyCode::F(6))];
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            keys.push(key(KeyCode::Down));
+        }
+        keys.extend(line.chars().map(char_key));
+    }
+    keys
+}
+
+#[test]
+fn class_panel_shows_one_rule_per_line_over_the_rows() {
+    let keys = class_panel_keys(&["com.myco.*", "!org.hibernate"]);
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [mai┌ Classes ─────────────────────────────────┐                  "
+    " 12:00:00.008 [mai│  com.myco.*                              │                  "
+    " 12:00:00.009 [mai│ ▶!org.hibernate                          │                  "
+    " 12:00:00.010 [mai│                                          │                  "
+    " 12:00:00.011 [mai│                                          │                  "
+    " 12:00:00.012 [mai│                                          │                  "
+    " 12:00:00.013 [mai│                                          │                  "
+    " 12:00:00.014 [mai│                                          │                  "
+    " 12:00:00.015 [mai│                                          │                  "
+    " 12:00:00.016 [mai└──────────────────────────────────────────┘                  "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel                       "
+    "#);
+}
+
+#[test]
+fn class_panel_error_replaces_the_key_hints_in_the_footer() {
+    // The second error is longer than the panel is wide.
+    for rule in ["!", "com.*.Order"] {
+        let mut keys = class_panel_keys(&["Order", rule]);
+        keys.push(key(KeyCode::Enter));
+        let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+        let error = Classes::parse(["Order", rule]).unwrap_err();
+        assert_eq!(row(&terminal, 23), error, "{rule}");
+        assert_eq!(
+            row(&terminal, 16),
+            format!(" 12:00:00.016 [mai└{}┘", "─".repeat(42)),
+            "{rule}"
+        );
+    }
+}
+
+#[test]
+fn header_ends_with_the_notice_about_the_last_key() {
+    let mut app = hundred_lines();
+    let mut terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    app.key(char_key('c'));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 5.1 KB ─ Raw ─ the selected entry has no class"
+    );
 }
 
 #[test]

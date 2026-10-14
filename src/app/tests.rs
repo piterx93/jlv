@@ -10,7 +10,7 @@ use proptest::prelude::*;
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
-use crate::filter::{Filters, Levels, TimeRange};
+use crate::filter::{Classes, Filters, Levels, Rule, TimeRange};
 use crate::format::Level;
 use crate::index::Progress;
 use crate::matcher::{self, Matcher};
@@ -185,6 +185,21 @@ fn f2_opens_the_level_panel() {
 }
 
 #[test]
+fn c_shows_only_the_selected_class() {
+    assert_eq!(action(char_key('c')), Some(Action::OnlyClass));
+}
+
+#[test]
+fn capital_c_hides_the_selected_class() {
+    assert_eq!(action(char_key('C')), Some(Action::HideClass));
+}
+
+#[test]
+fn f6_opens_the_class_panel() {
+    assert_eq!(action(key(KeyCode::F(6))), Some(Action::ClassPanel));
+}
+
+#[test]
 fn enter_confirms() {
     assert_eq!(action(key(KeyCode::Enter)), Some(Action::Confirm));
 }
@@ -217,11 +232,6 @@ fn ctrl_c_quits() {
 fn d_and_u_without_ctrl_do_nothing() {
     assert_eq!(action(char_key('d')), None);
     assert_eq!(action(char_key('u')), None);
-}
-
-#[test]
-fn c_without_ctrl_does_nothing() {
-    assert_eq!(action(char_key('c')), None);
 }
 
 #[test]
@@ -1261,9 +1271,9 @@ fn filters_show_only_matching_entries() {
 fn filters_are_kept_as_set() {
     let mut app = logback(&[STARTED]);
     let mut filters = Filters::default();
-    filters.classes.include = vec!["com.example".to_string()];
-    app.set_filters(filters);
-    assert_eq!(app.filters().classes.include, ["com.example"]);
+    filters.classes.include = vec![Rule::Substring("com.example".to_string())];
+    app.set_filters(filters.clone());
+    assert_eq!(app.filters().classes, filters.classes);
 }
 
 #[test]
@@ -1505,7 +1515,7 @@ fn with_an_a() -> App {
 fn panel(app: &App) -> LevelPanel {
     match app.panel() {
         Some(&Panel::Levels(panel)) => panel,
-        None => panic!("the level panel is not open"),
+        other => panic!("the level panel is not open: {other:?}"),
     }
 }
 
@@ -1604,4 +1614,232 @@ fn cancel_closes_the_panel_and_keeps_the_filters() {
 fn quit_quits_while_the_panel_is_open() {
     let app = applied(logback(&[STARTED]), &[Action::LevelPanel, Action::Quit]);
     assert!(app.should_quit());
+}
+
+// --- class filter ---
+
+const ORDER: &str = "2026-10-07 12:00:00.000 [main] INFO  com.myco.order.OrderService - created\n";
+const PAY: &str = "2026-10-07 12:00:01.000 [main] ERROR com.myco.pay.PayClient - failed\n";
+const SQL: &str = "2026-10-07 12:00:02.000 [main] DEBUG org.hibernate.SQL - select\n";
+
+/// `ORDER`, `PAY` and `SQL`, with `rules` as the class filter and its results in.
+fn with_classes(rules: &[&str]) -> App {
+    let filters = Filters {
+        classes: Classes::parse(rules.iter().copied()).unwrap(),
+        ..Filters::default()
+    };
+    filtered(logback(&[ORDER, PAY, SQL]), filters)
+}
+
+/// `app` after pressing `keys`.
+fn pressed(mut app: App, keys: &[KeyEvent]) -> App {
+    for &key in keys {
+        app.key(key);
+    }
+    app
+}
+
+/// The keys that type `text`.
+fn typing(text: &str) -> Vec<KeyEvent> {
+    text.chars().map(char_key).collect()
+}
+
+/// `app` with the class panel opened and `keys` pressed in it.
+fn in_class_panel(app: App, keys: &[KeyEvent]) -> App {
+    let app = pressed(app, &[key(KeyCode::F(6))]);
+    pressed(app, keys)
+}
+
+/// The open class panel of `app`; fails the test if it is closed.
+fn class_panel(app: &App) -> &ClassPanel {
+    match app.panel() {
+        Some(Panel::Classes(panel)) => panel,
+        other => panic!("the class panel is not open: {other:?}"),
+    }
+}
+
+/// The rows of `app` as the lines of the file they are, line endings included.
+fn rows_of(app: &App) -> Vec<String> {
+    rows(app).into_iter().map(|row| row + "\n").collect()
+}
+
+#[test]
+fn only_class_replaces_the_includes_with_the_selected_class_and_keeps_the_excludes() {
+    let app = applied(
+        with_classes(&["com.myco.*", "!PayClient"]),
+        &[Action::OnlyClass],
+    );
+    assert_eq!(
+        app.filters().classes,
+        Classes {
+            include: vec![Rule::Prefix("com.myco.order.OrderService".to_string())],
+            exclude: vec![Rule::Substring("PayClient".to_string())],
+        }
+    );
+}
+
+#[test]
+fn hide_class_adds_an_exclude_for_the_selected_class() {
+    let mut app = applied(with_classes(&[]), &[Action::Down, Action::HideClass]);
+    wait_for_filter(&mut app);
+    assert_eq!(
+        app.filters().classes.exclude,
+        [Rule::Prefix("com.myco.pay.PayClient".to_string())]
+    );
+    assert_eq!(rows_of(&app), [ORDER, SQL]);
+}
+
+#[test]
+fn on_an_entry_without_a_class_only_and_hide_class_change_nothing_but_say_so() {
+    for action in [Action::OnlyClass, Action::HideClass] {
+        let app = applied(hundred_lines(), &[action]);
+        assert_eq!(app.filters().classes, Classes::default(), "{action:?}");
+        assert_eq!(
+            app.notice(),
+            Some("the selected entry has no class"),
+            "{action:?}"
+        );
+    }
+}
+
+#[test]
+fn a_notice_goes_away_with_the_next_key() {
+    let app = pressed(hundred_lines(), &[char_key('c'), char_key('j')]);
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn keys_outside_a_text_panel_do_their_action() {
+    let app = pressed(hundred_lines(), &[char_key('j'), char_key('q')]);
+    assert_eq!(pos(&app), (0, Some(1)));
+    assert!(app.should_quit());
+}
+
+#[test]
+fn class_panel_opens_with_the_rules_one_per_line_and_an_empty_line_to_type_in() {
+    let app = in_class_panel(
+        with_classes(&["!org.hibernate", "com.myco.*", "Order"]),
+        &[],
+    );
+    assert_eq!(
+        *class_panel(&app),
+        ClassPanel {
+            lines: vec![
+                "com.myco.*".to_string(),
+                "Order".to_string(),
+                "!org.hibernate".to_string(),
+                String::new(),
+            ],
+            cursor: 3,
+            error: None,
+        }
+    );
+}
+
+#[test]
+fn characters_typed_in_the_class_panel_go_into_its_line_not_to_their_actions() {
+    let mut keys = typing("qjG1c");
+    keys.push(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
+    let app = in_class_panel(hundred_lines(), &keys);
+    assert_eq!(class_panel(&app).lines, ["qjG1cC"]);
+    assert!(!app.should_quit());
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert_eq!(app.filters().levels, Levels::default());
+    assert_eq!(app.filters().classes, Classes::default());
+}
+
+#[test]
+fn ctrl_c_quits_while_the_class_panel_is_open() {
+    let app = in_class_panel(hundred_lines(), &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn backspace_deletes_the_last_character_then_the_empty_line() {
+    let backspace = key(KeyCode::Backspace);
+    let mut keys = typing("ab");
+    keys.push(key(KeyCode::Down));
+    keys.extend(typing("c"));
+    keys.extend([backspace, backspace, backspace]);
+    let app = in_class_panel(hundred_lines(), &keys);
+    let panel = class_panel(&app);
+    assert_eq!(
+        (panel.lines.as_slice(), panel.cursor),
+        (&["a".to_string()][..], 0)
+    );
+}
+
+#[test]
+fn backspace_on_the_only_line_when_empty_does_nothing() {
+    let app = in_class_panel(hundred_lines(), &[key(KeyCode::Backspace)]);
+    let panel = class_panel(&app);
+    assert_eq!(
+        (panel.lines.as_slice(), panel.cursor),
+        (&[String::new()][..], 0)
+    );
+}
+
+#[test]
+fn down_on_the_last_line_adds_an_empty_line_unless_it_is_empty() {
+    let down = key(KeyCode::Down);
+    let mut keys = vec![down];
+    keys.extend(typing("a"));
+    keys.extend([down, down]);
+    let app = in_class_panel(hundred_lines(), &keys);
+    let panel = class_panel(&app);
+    assert_eq!(panel.lines, ["a", ""]);
+    assert_eq!(panel.cursor, 1);
+}
+
+#[test]
+fn up_and_down_move_the_cursor_between_the_lines_stopping_at_the_top() {
+    let up = key(KeyCode::Up);
+    let mut keys = vec![up, up, up];
+    keys.extend(typing("x"));
+    keys.push(key(KeyCode::Down));
+    keys.extend(typing("y"));
+    let app = in_class_panel(with_classes(&["a", "b"]), &keys);
+    assert_eq!(class_panel(&app).lines, ["ax", "by", ""]);
+}
+
+#[test]
+fn enter_applies_the_class_panel_rules_on_top_of_the_other_filters_and_closes_it() {
+    let mut levels = Levels::default();
+    levels.toggle(Level::Error);
+    let app = filtered(
+        logback(&[ORDER, PAY, SQL]),
+        Filters {
+            levels,
+            ..Filters::default()
+        },
+    );
+    let mut keys = typing("com.myco.*");
+    keys.push(key(KeyCode::Enter));
+    let mut app = in_class_panel(app, &keys);
+    wait_for_filter(&mut app);
+    assert_eq!(app.panel(), None);
+    assert_eq!(rows_of(&app), [ORDER]);
+}
+
+#[test]
+fn esc_closes_the_class_panel_without_applying_it() {
+    let mut keys = typing("com.myco.*");
+    keys.push(key(KeyCode::Esc));
+    let app = in_class_panel(hundred_lines(), &keys);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.filters().classes, Classes::default());
+}
+
+#[test]
+fn rules_that_do_not_parse_keep_the_class_panel_open_with_the_reason() {
+    let mut keys = typing("Order");
+    keys.push(key(KeyCode::Down));
+    keys.extend(typing("!"));
+    keys.push(key(KeyCode::Enter));
+    let app = in_class_panel(hundred_lines(), &keys);
+    assert_eq!(
+        class_panel(&app).error,
+        Some(Classes::parse(["Order", "!"]).unwrap_err())
+    );
+    assert_eq!(app.filters().classes, Classes::default());
 }

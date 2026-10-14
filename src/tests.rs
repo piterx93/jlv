@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::Args;
-use crate::filter::Levels;
+use crate::filter::{Classes, Filters, Levels};
 use crate::format::{Level, Preset};
 use crate::test_support;
 
@@ -78,6 +78,7 @@ fn defaults(file: impl Into<PathBuf>) -> Args {
         format: None,
         no_follow: false,
         level: None,
+        class: None,
         no_mouse: false,
         config: None,
     }
@@ -237,6 +238,59 @@ fn empty_regular_file_is_handed_over() {
     assert_eq!(launch.source.bytes(), b"");
 }
 
+/// `initial_filters` for `-l` and `-c` as given, the rest of the command line at its
+/// defaults.
+fn initial(level: Option<&[Level]>, class: Option<&[&str]>) -> Option<Filters> {
+    let args = Args {
+        level: level.map(Levels::only),
+        class: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
+        ..defaults("app.log")
+    };
+    initial_filters(&args)
+}
+
+/// The levels and class rules of `filters`, failing the test if any other filter is on.
+fn levels_and_classes(filters: Filters) -> (Levels, Classes) {
+    assert!(filters.time.is_none(), "{filters:?}");
+    assert!(filters.text.is_none(), "{filters:?}");
+    (filters.levels, filters.classes)
+}
+
+#[test]
+fn without_level_or_class_there_are_no_initial_filters() {
+    assert!(initial(None, None).is_none());
+}
+
+#[test]
+fn level_alone_sets_the_initial_levels_and_no_class_rules() {
+    let filters = initial(Some(&[Level::Warn]), None).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (Levels::only(&[Level::Warn]), Classes::default())
+    );
+}
+
+#[test]
+fn class_alone_sets_the_initial_class_rules_and_every_level() {
+    let filters = initial(None, Some(&["com.myco.*"])).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (Levels::default(), Classes::parse(["com.myco.*"]).unwrap())
+    );
+}
+
+#[test]
+fn level_and_class_together_set_both() {
+    let filters = initial(Some(&[Level::Error]), Some(&["!org.hibernate"])).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (
+            Levels::only(&[Level::Error]),
+            Classes::parse(["!org.hibernate"]).unwrap()
+        )
+    );
+}
+
 #[test]
 fn every_option_is_handed_over() {
     let dir = TempDir::new().unwrap();
@@ -248,6 +302,8 @@ fn every_option_is_handed_over() {
         OsStr::new("--no-mouse"),
         OsStr::new("-l"),
         OsStr::new("warn,error"),
+        OsStr::new("-c"),
+        OsStr::new("com.myco.*,!org.hibernate"),
         OsStr::new("--config"),
         OsStr::new("/nonexistent/config.toml"),
         file.as_os_str(),
@@ -260,6 +316,7 @@ fn every_option_is_handed_over() {
             format: Some(Preset::LogbackBasic),
             no_follow: true,
             level: Some(Levels::only(&[Level::Warn, Level::Error])),
+            class: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
             no_mouse: true,
             config: Some(PathBuf::from("/nonexistent/config.toml")),
         }
@@ -524,7 +581,7 @@ mod event_loop {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
     };
 
-    use crate::app::App;
+    use crate::app::{App, Panel};
     use crate::event_loop;
     use crate::format::Preset;
     use crate::test_support::{
@@ -602,6 +659,22 @@ mod event_loop {
             row(&terminal, 22),
             "▶12:00:00.100 [main] INFO  com.example.App - step 100"
         );
+    }
+
+    #[test]
+    fn typed_characters_go_into_an_open_class_panel() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(char_key('q')),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ];
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        match app.panel() {
+            Some(Panel::Classes(panel)) => assert_eq!(panel.lines, ["q"]),
+            other => panic!("the class panel is not open: {other:?}"),
+        }
     }
 
     #[test]

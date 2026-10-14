@@ -6,7 +6,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
 use super::*;
-use crate::filter::Levels;
+use crate::filter::{Classes, Levels};
 use crate::format::{Level, Preset};
 
 fn parse(args: &[&str]) -> Result<Args, clap::Error> {
@@ -19,6 +19,7 @@ fn defaults(file: &str) -> Args {
         format: None,
         no_follow: false,
         level: None,
+        class: None,
         no_mouse: false,
         config: None,
     }
@@ -237,6 +238,34 @@ fn unknown_level_error_names_it_and_lists_the_valid_ones() {
 fn empty_level_list_is_an_error_listing_the_valid_levels() {
     let message = level_error("");
     assert!(message.contains(VALID_LEVELS), "{message}");
+}
+
+#[test]
+fn short_and_long_class_set_the_initial_class_rules() {
+    for option in ["-c", "--class"] {
+        let args = parse(&[option, "com.myco.*,!org.hibernate", "app.log"]).unwrap();
+        assert_eq!(
+            args.class,
+            Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
+            "{option}"
+        );
+    }
+}
+
+#[test]
+fn class_rules_are_split_at_commas_skipping_empty_items() {
+    let args = parse(&["-c", ",com.myco.*,, !org.hibernate ,", "app.log"]).unwrap();
+    assert_eq!(
+        args.class,
+        Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap())
+    );
+}
+
+#[test]
+fn a_class_rule_that_does_not_parse_is_a_usage_error_naming_it() {
+    let err = parse(&["-c", "com.myco.*,!", "app.log"]).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::ValueValidation, "{err}");
+    assert!(err.to_string().contains("'!'"), "{err}");
 }
 
 #[test]

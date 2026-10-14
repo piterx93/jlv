@@ -11,7 +11,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, LevelPanel, Panel};
+use crate::app::{App, ClassPanel, LevelPanel, Panel};
 use crate::format::Level;
 use crate::source::Origin;
 
@@ -56,6 +56,7 @@ const TOO_SMALL: &str = "terminal too small (80×24 needed)";
 const NO_MATCHES: &str = "no entries match the current filters";
 const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
 const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel";
+const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
@@ -101,6 +102,14 @@ const TAB_STOP: usize = 4;
 /// TRACE to FATAL, as ` ▶[x] 1 TRACE ` (`▶` on the cursor's line, `[ ]` for a level
 /// the panel hides, then the key that toggles it and the name). The footer then
 /// shows the panel's keys, `j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel`.
+///
+/// The class panel is drawn the same way, a box 44 columns wide and 10 high titled
+/// ` Classes `: one line per rule line of the panel, as ` ▶com.myco.*` (`▶` on the
+/// cursor's line). The footer then shows `↑/↓ Line (↓ at the end adds one)  Enter
+/// Apply  Esc Cancel`, or, while the panel has an [error](crate::app::ClassPanel::error),
+/// why its rules don't parse.
+///
+/// While the app has a [notice](App::notice), the header ends with ` ─ ` and it.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
     let [header, body, footer] = Layout::vertical([
@@ -121,8 +130,11 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     } else {
         ""
     };
+    let key_notice = app
+        .notice()
+        .map_or(String::new(), |notice| format!(" ─ {notice}"));
     let title = format!(
-        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}",
+        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}{key_notice}",
         printable(app.file_name()),
         human_size(app.size()),
         app.settings().preset,
@@ -140,12 +152,21 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         table::render(frame, app, theme, body);
     }
     let hints = match app.panel() {
-        None => KEY_HINTS,
+        None => KEY_HINTS.into(),
         Some(Panel::Levels(panel)) => {
             if fits {
                 render_level_panel(frame, panel, body);
             }
-            LEVEL_PANEL_HINTS
+            LEVEL_PANEL_HINTS.into()
+        }
+        Some(Panel::Classes(panel)) => {
+            if fits {
+                render_class_panel(frame, panel, body);
+            }
+            match &panel.error {
+                Some(error) => printable(error),
+                None => CLASS_PANEL_HINTS.into(),
+            }
         }
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
@@ -165,6 +186,30 @@ fn render_level_panel(frame: &mut Frame, panel: &LevelPanel, body: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Levels ")),
+        area,
+    );
+}
+
+fn render_class_panel(frame: &mut Frame, panel: &ClassPanel, body: Rect) {
+    let lines: Vec<Line> = panel
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let cursor = if i == panel.cursor { '▶' } else { ' ' };
+            Line::from(format!(" {cursor}{}", printable(line)))
+        })
+        .collect();
+    let area = body.centered(Constraint::Length(44), Constraint::Length(10));
+    // Keeps the cursor's line in view once there are more lines than the box holds.
+    let scroll = panel
+        .cursor
+        .saturating_sub(usize::from(area.height.saturating_sub(3)));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::bordered().title(" Classes "))
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         area,
     );
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::filter::Levels;
+use crate::filter::{Classes, Levels};
 use crate::format::{Level, Preset};
 
 #[cfg(test)]
@@ -29,6 +29,10 @@ pub struct Args {
     /// Initial level filter, e.g. WARN,ERROR
     #[arg(short, long, value_name = "LEVELS", value_parser = parse_levels)]
     pub level: Option<Levels>,
+
+    /// Initial class filter, e.g. 'com.myco.*,!org.hibernate'
+    #[arg(short, long, value_name = "RULES", value_parser = parse_classes)]
+    pub class: Option<Classes>,
 
     /// Disable mouse
     #[arg(long)]
@@ -60,4 +64,10 @@ pub fn parse_levels(arg: &str) -> Result<Levels, String> {
         return Err(format!("no level given, expected some of {}", valid()));
     }
     Ok(Levels::only(&levels))
+}
+
+/// The class rules `-c/--class` names, comma-separated, as [`Classes::parse`] reads
+/// them. A rule it can't read is an error that names it.
+pub fn parse_classes(arg: &str) -> Result<Classes, String> {
+    Classes::parse(arg.split(','))
 }

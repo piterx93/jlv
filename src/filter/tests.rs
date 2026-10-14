@@ -194,7 +194,7 @@ fn escape_codes_are_stripped_before_matching() {
 ";
     let class = Filters {
         classes: Classes {
-            include: vec!["com.myco.Order".to_string()],
+            include: vec![Rule::Substring("com.myco.Order".to_string())],
             exclude: vec![],
         },
         ..Filters::default()
@@ -326,8 +326,8 @@ impl Model {
         Filters {
             levels,
             classes: Classes {
-                include: self.include.iter().map(|rule| rule.to_string()).collect(),
-                exclude: self.exclude.iter().map(|rule| rule.to_string()).collect(),
+                include: self.include.iter().map(|rule| substring(rule)).collect(),
+                exclude: self.exclude.iter().map(|rule| substring(rule)).collect(),
             },
             time: self.time.map(|(start, end)| TimeRange {
                 start: at_second(start),
@@ -518,5 +518,269 @@ proptest! {
         engine.reread(known.saturating_sub(1));
         let found = finish(&mut engine, entries.len(), |_| {});
         prop_assert_eq!(found, model.naive(&entries));
+    }
+}
+
+// --- class rules ---
+
+fn prefix(rule: &str) -> Rule {
+    Rule::Prefix(rule.to_string())
+}
+
+fn substring(rule: &str) -> Rule {
+    Rule::Substring(rule.to_string())
+}
+
+/// The class filter `rules` make; fails the test if they don't parse.
+fn classes(rules: &[&str]) -> Classes {
+    Classes::parse(rules.iter().copied()).unwrap()
+}
+
+/// Which of `names` pass the class filter `rules` make.
+fn passing<'a>(rules: &[&str], names: &[&'a str]) -> Vec<&'a str> {
+    let classes = classes(rules);
+    names
+        .iter()
+        .copied()
+        .filter(|name| classes.passes(Some(name.as_bytes())))
+        .collect()
+}
+
+#[test]
+fn a_rule_ending_in_dot_star_is_a_prefix_include() {
+    assert_eq!(
+        classes(&["com.myco.*"]),
+        Classes {
+            include: vec![prefix("com.myco")],
+            exclude: vec![],
+        }
+    );
+}
+
+#[test]
+fn any_other_rule_is_a_substring_include() {
+    assert_eq!(
+        classes(&["OrderService"]),
+        Classes {
+            include: vec![substring("OrderService")],
+            exclude: vec![],
+        }
+    );
+}
+
+#[test]
+fn a_bang_makes_either_form_an_exclude() {
+    assert_eq!(
+        classes(&["!org.hibernate", "!com.myco.*"]),
+        Classes {
+            include: vec![],
+            exclude: vec![substring("org.hibernate"), prefix("com.myco")],
+        }
+    );
+}
+
+#[test]
+fn a_prefix_rule_matches_the_package_and_everything_below_it_only() {
+    let names = [
+        "com.myco",
+        "com.myco.Order",
+        "com.myco.pay.Client",
+        "com.mycompany",
+        "com.mycompany.Order",
+        "org.com.myco.Order",
+    ];
+    assert_eq!(
+        passing(&["com.myco.*"], &names),
+        ["com.myco", "com.myco.Order", "com.myco.pay.Client"]
+    );
+}
+
+#[test]
+fn a_substring_rule_matches_anywhere_in_the_full_class_name() {
+    let names = [
+        "com.myco.OrderService",
+        "OrderServiceImpl",
+        "com.myco.Order",
+        "c.m.OrderService",
+    ];
+    assert_eq!(
+        passing(&["myco.OrderService"], &names),
+        ["com.myco.OrderService"]
+    );
+}
+
+#[test]
+fn includes_are_ored() {
+    let names = ["com.myco.Order", "org.hibernate.SQL", "org.apache.Http"];
+    assert_eq!(
+        passing(&["com.myco.*", "hibernate"], &names),
+        ["com.myco.Order", "org.hibernate.SQL"]
+    );
+}
+
+#[test]
+fn excludes_win_over_includes() {
+    let names = ["com.myco.Order", "com.myco.pay.Client"];
+    assert_eq!(
+        passing(&["com.myco.*", "!com.myco.pay.*"], &names),
+        ["com.myco.Order"]
+    );
+}
+
+#[test]
+fn without_includes_everything_but_the_excludes_passes() {
+    let names = ["com.myco.Order", "org.hibernate.SQL", "org.apache.Http"];
+    assert_eq!(
+        passing(&["!org.hibernate"], &names),
+        ["com.myco.Order", "org.apache.Http"]
+    );
+}
+
+#[test]
+fn rules_are_case_sensitive() {
+    let names = ["com.myco.OrderService", "com.MyCo.Order"];
+    assert_eq!(
+        passing(&["com.MyCo.*", "orderservice"], &names),
+        ["com.MyCo.Order"]
+    );
+}
+
+#[test]
+fn an_entry_without_a_class_fails_any_include() {
+    assert!(!classes(&["com.myco.*", "!org.hibernate"]).passes(None));
+}
+
+#[test]
+fn an_entry_without_a_class_passes_excludes_alone() {
+    assert!(classes(&["!org.hibernate"]).passes(None));
+}
+
+#[test]
+fn whitespace_around_a_rule_is_ignored() {
+    assert_eq!(
+        classes(&[" com.myco.* ", "\t!org.hibernate", "! org.apache "]),
+        classes(&["com.myco.*", "!org.hibernate", "!org.apache"])
+    );
+}
+
+#[test]
+fn empty_and_blank_items_are_skipped() {
+    assert_eq!(classes(&["", "  ", "Order", ""]), classes(&["Order"]));
+}
+
+#[test]
+fn a_rule_given_twice_counts_once() {
+    assert_eq!(
+        classes(&["Order", "Order ", "!org.*", "!org.*"]),
+        Classes {
+            include: vec![substring("Order")],
+            exclude: vec![prefix("org")],
+        }
+    );
+}
+
+#[test]
+fn a_rule_naming_no_class_is_an_error_naming_it() {
+    for rule in ["!", "*", ".*", "!*", "!.*"] {
+        let error = Classes::parse(["Order", rule]).unwrap_err();
+        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+    }
+}
+
+#[test]
+fn a_star_anywhere_but_in_a_trailing_dot_star_is_an_error_naming_the_rule() {
+    for rule in ["Order*", "com.*.Order", "com.myco.**"] {
+        let error = Classes::parse([rule]).unwrap_err();
+        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+    }
+}
+
+#[test]
+fn an_exclude_equal_to_an_include_hides_that_class_and_everything_else() {
+    let names = ["com.myco.Order", "org.hibernate.SQL"];
+    assert_eq!(
+        passing(&["com.myco.*", "!com.myco.*"], &names),
+        [] as [&str; 0]
+    );
+}
+
+#[test]
+fn class_rules_see_the_full_class_name_of_the_first_line() {
+    let log = "\
+2026-10-07 12:00:00.000 [main] INFO  com.myco.order.service.OrderService - created
+2026-10-07 12:00:01.000 [main] INFO  com.mycompany.Billing - billed
+";
+    let filters = Filters {
+        classes: classes(&["com.myco.*"]),
+        ..Filters::default()
+    };
+    assert_eq!(filter(Preset::Logback, log, filters).entries, [0]);
+}
+
+const SEGMENTS: [&str; 7] = [
+    "com",
+    "myco",
+    "mycompany",
+    "Order",
+    "OrderService",
+    "org",
+    "hibernate",
+];
+
+/// `segments` joined with dots.
+fn dotted(segments: std::ops::Range<usize>) -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(&SEGMENTS[..]), segments)
+        .prop_map(|segments| segments.join("."))
+}
+
+fn rule() -> impl Strategy<Value = Rule> {
+    prop_oneof![
+        dotted(1..3).prop_map(Rule::Prefix),
+        dotted(1..3).prop_map(Rule::Substring),
+    ]
+}
+
+fn class_name() -> impl Strategy<Value = Option<String>> {
+    prop::option::weighted(0.9, dotted(1..5))
+}
+
+proptest! {
+    #[test]
+    fn adding_an_exclude_never_adds_matches(
+        include in prop::collection::vec(rule(), 0..3),
+        exclude in prop::collection::vec(rule(), 0..3),
+        added in rule(),
+        class in class_name(),
+    ) {
+        let before = Classes { include, exclude };
+        let mut after = before.clone();
+        after.exclude.push(added);
+        let class = class.as_deref().map(str::as_bytes);
+        prop_assert!(!after.passes(class) || before.passes(class));
+    }
+
+    // Without any include everything passes, so the first include can only take
+    // matches away.
+    #[test]
+    fn adding_an_include_never_removes_matches_while_there_is_no_exclude(
+        include in prop::collection::vec(rule(), 1..3),
+        added in rule(),
+        class in class_name(),
+    ) {
+        let before = Classes { include, exclude: vec![] };
+        let mut after = before.clone();
+        after.include.push(added);
+        let class = class.as_deref().map(str::as_bytes);
+        prop_assert!(!before.passes(class) || after.passes(class));
+    }
+
+    #[test]
+    fn parsing_and_matching_never_panic(
+        items in prop::collection::vec(prop_oneof![any::<String>(), "[!*. a]{0,5}"], 0..4),
+        class in prop::option::of(prop::collection::vec(any::<u8>(), 0..12)),
+    ) {
+        if let Ok(classes) = Classes::parse(items.iter().map(String::as_str)) {
+            classes.passes(class.as_deref());
+        }
     }
 }

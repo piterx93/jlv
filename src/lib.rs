@@ -14,7 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event};
 
-use crate::app::{App, action};
+use crate::app::App;
 use crate::cli::Args;
 use crate::filter::Filters;
 use crate::follow::Options;
@@ -116,8 +116,8 @@ fn open_showing_progress(path: &Path, stderr: &mut dyn Write) -> Result<Source, 
 /// It opens at the end of the file, or at the top with `--no-follow`, and watches a
 /// plain file either way, so that `F` can follow it ([`App::watch`]); a gzip file is
 /// read-only and never watched. The file is
-/// read in the preset `--format` names, detected without it, and `--level` sets the
-/// level filter it starts with. Timestamps without an
+/// read in the preset `--format` names, detected without it, and `--level` and
+/// `--class` set the level and class filters it starts with. Timestamps without an
 /// offset are local time in the system's time zone, and a time-only log is dated
 /// from the file's modification time. Events are read from the terminal; a wait
 /// with a timeout ends with `None` when nothing came.
@@ -136,11 +136,8 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         mtime,
         follow,
     );
-    if let Some(levels) = args.level {
-        app.set_filters(Filters {
-            levels,
-            ..Filters::default()
-        });
+    if let Some(filters) = initial_filters(&args) {
+        app.set_filters(filters);
     }
     app.watch(&args.file, file, Options::default())
         .map_err(|err| in_file(&args.file, err))?;
@@ -154,9 +151,22 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     result
 }
 
-/// Draws the screen, waits for the next event from `next_event`, applies the key's
-/// action, and again, until the app should quit. Other events, and a wait that timed
-/// out, only redraw. Errors from drawing or reading events end the loop.
+/// The filters the viewer starts with: the levels of `--level` and the class rules of
+/// `--class`, every other filter off. `None` without either, so that no filter runs.
+pub fn initial_filters(args: &Args) -> Option<Filters> {
+    if args.level.is_none() && args.class.is_none() {
+        return None;
+    }
+    Some(Filters {
+        levels: args.level.unwrap_or_default(),
+        classes: args.class.clone().unwrap_or_default(),
+        ..Filters::default()
+    })
+}
+
+/// Draws the screen, waits for the next event from `next_event`, hands a key to the
+/// app ([`App::key`]), and again, until the app should quit. Other events, and a wait
+/// that timed out, only redraw. Errors from drawing or reading events end the loop.
 ///
 /// Before every drawing the app takes in what its index found since the last one
 /// ([`App::poll_index`]), and what happened to the file if it watches one. While
@@ -180,10 +190,8 @@ where
             .draw(|frame| ui::render(frame, app, theme))
             .map_err(io::Error::other)?;
         let timeout = app.expects_updates().then_some(REDRAW);
-        if let Some(Event::Key(key)) = next_event(timeout)?
-            && let Some(action) = action(key)
-        {
-            app.apply(action);
+        if let Some(Event::Key(key)) = next_event(timeout)? {
+            app.key(key);
         }
     }
     Ok(())

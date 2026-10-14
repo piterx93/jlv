@@ -10,6 +10,7 @@
 //! The level, time and class checks read the record and the class column of the
 //! entry's first line; only the text check reads the rest of the entry.
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, RwLock};
@@ -85,27 +86,107 @@ impl Levels {
     }
 }
 
-/// Rules on the full class name, matched case-sensitively as substrings. An entry
-/// passes if its class contains no `exclude` and, unless `include` is empty, at
-/// least one `include`. An entry without a class passes only while `include` is
-/// empty.
+/// The class filter: rules on the full class name of an entry's first line, matched
+/// case-sensitively. An entry passes if no `exclude` rule matches its class and,
+/// unless `include` is empty, at least one `include` rule does. An entry without a
+/// class passes only while `include` is empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Classes {
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
+    pub include: Vec<Rule>,
+    pub exclude: Vec<Rule>,
+}
+
+/// One rule of the class filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rule {
+    /// Written `com.myco.*`: the class `com.myco` and every class starting with
+    /// `com.myco.`, but not `com.mycompany`.
+    Prefix(String),
+    /// Written `OrderService`: every class containing it.
+    Substring(String),
 }
 
 impl Classes {
+    /// The rules `rules` name, one per item: `com.myco.*` is a prefix rule,
+    /// `OrderService` a substring rule, and `!` in front of either makes it an
+    /// exclude. Whitespace around an item and after its `!` is ignored, empty items
+    /// are skipped and a rule given twice counts once. An item that names no class
+    /// (`!`, `*`, `.*`), or has a `*` anywhere but in a trailing `.*`, is an error that
+    /// names it.
+    pub fn parse<'a>(rules: impl IntoIterator<Item = &'a str>) -> Result<Classes, String> {
+        let mut classes = Classes::default();
+        for item in rules
+            .into_iter()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            let (rules, written) = match item.strip_prefix('!') {
+                Some(written) => (&mut classes.exclude, written.trim_start()),
+                None => (&mut classes.include, item),
+            };
+            let rule = Rule::parse(written).map_err(|why| format!("class rule '{item}' {why}"))?;
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        }
+        Ok(classes)
+    }
+
+    /// The rules as [`parse`](Self::parse) reads them, one per item: the includes,
+    /// then the excludes, each in order.
+    pub fn rules(&self) -> Vec<String> {
+        let include = self.include.iter().map(Rule::to_string);
+        let exclude = self.exclude.iter().map(|rule| format!("!{rule}"));
+        include.chain(exclude).collect()
+    }
+
+    /// Whether an entry whose class is `class`, `None` for an entry without one,
+    /// passes the rules.
+    pub fn passes(&self, class: Option<&[u8]>) -> bool {
+        let matched = |rule: &Rule| class.is_some_and(|class| rule.matches(class));
+        !self.exclude.iter().any(matched)
+            && (self.include.is_empty() || self.include.iter().any(matched))
+    }
+
     fn is_empty(&self) -> bool {
         self.include.is_empty() && self.exclude.is_empty()
     }
+}
 
-    fn pass(&self, class: Option<&[u8]>) -> bool {
-        let names = |rule: &String| {
-            class.is_some_and(|class| memmem::find(class, rule.as_bytes()).is_some())
+impl Rule {
+    /// The rule `written` names, without the `!` of an exclude; the error says why
+    /// it names none.
+    fn parse(written: &str) -> Result<Rule, &'static str> {
+        let (name, rule): (_, fn(String) -> Rule) = match written.strip_suffix(".*") {
+            Some(package) => (package, Rule::Prefix),
+            None => (written, Rule::Substring),
         };
-        !self.exclude.iter().any(names)
-            && (self.include.is_empty() || self.include.iter().any(names))
+        if name.contains('*') {
+            Err("has a '*' that is not a trailing '.*'")
+        } else if name.is_empty() {
+            Err("names no class")
+        } else {
+            Ok(rule(name.to_string()))
+        }
+    }
+
+    fn matches(&self, class: &[u8]) -> bool {
+        match self {
+            Rule::Prefix(package) => class
+                .strip_prefix(package.as_bytes())
+                .is_some_and(|rest| rest.is_empty() || rest[0] == b'.'),
+            Rule::Substring(part) => memmem::find(class, part.as_bytes()).is_some(),
+        }
+    }
+}
+
+/// As [`Classes::parse`] reads it, without the `!` of an exclude.
+impl fmt::Display for Rule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Rule::Prefix(package) => write!(f, "{package}.*"),
+            Rule::Substring(part) => f.write_str(part),
+        }
     }
 }
 
@@ -424,7 +505,7 @@ impl Check<'_> {
         let first = strip_ansi_into(lines.next().unwrap_or_default(), &mut scratch.buffer);
         if !filters
             .classes
-            .pass(record.class().and_then(|class| first.get(class)))
+            .passes(record.class().and_then(|class| first.get(class)))
         {
             return false;
         }

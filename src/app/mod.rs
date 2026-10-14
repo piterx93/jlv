@@ -16,10 +16,10 @@ use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::filter::{self, Engine, Filters, Indexed, Levels};
+use crate::filter::{self, Classes, Engine, Filters, Indexed, Levels, Rule};
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
-use crate::format::{Anchor, Level, Preset, detect};
+use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
@@ -61,6 +61,14 @@ pub enum Action {
     ToggleLevel(Level),
     /// Opens the level panel ([`App::panel`]).
     LevelPanel,
+    /// Shows only the class of the selected entry and the classes below it: the
+    /// class filter's includes become the one rule `<class>.*`.
+    OnlyClass,
+    /// Hides the class of the selected entry and the classes below it: adds the
+    /// exclude `!<class>.*` to the class filter.
+    HideClass,
+    /// Opens the class panel ([`App::panel`]).
+    ClassPanel,
     /// Applies what the open panel edits and closes it.
     Confirm,
     /// Closes the open panel without applying its edits.
@@ -75,19 +83,13 @@ pub enum Action {
 /// `F` toggles follow, `T` toggles the thread column, `#` the line numbers, `w`
 /// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
 /// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
-/// FATAL, `F2` opens the level panel, `Enter` confirms, `Esc` cancels and `q F10
+/// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
+/// hides it, `F6` opens the class panel, `Enter` confirms, `Esc` cancels and `q F10
 /// Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
-    if key.kind == KeyEventKind::Release {
-        return None;
-    }
-    let modifiers = match key.code {
-        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
-        _ => key.modifiers,
-    };
-    let action = match (key.code, modifiers) {
+    let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::Down,
         (KeyCode::PageUp, KeyModifiers::NONE) => Action::PageUp,
@@ -110,6 +112,9 @@ pub fn action(key: KeyEvent) -> Option<Action> {
             Action::ToggleLevel(Level::ALL[usize::from(digit as u8 - b'1')])
         }
         (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
+        (KeyCode::Char('c'), KeyModifiers::NONE) => Action::OnlyClass,
+        (KeyCode::Char('C'), KeyModifiers::NONE) => Action::HideClass,
+        (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
@@ -117,6 +122,19 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         _ => return None,
     };
     Some(action)
+}
+
+/// The code and modifiers of `key` as the bindings see them, `None` for a release.
+/// A character ignores Shift, as it already says which case it is.
+fn normalized(key: KeyEvent) -> Option<(KeyCode, KeyModifiers)> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let modifiers = match key.code {
+        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
+        _ => key.modifiers,
+    };
+    Some((key.code, modifiers))
 }
 
 /// The level panel while it is open: the level filter as edited so far, not applied
@@ -140,19 +158,77 @@ impl LevelPanel {
     }
 }
 
+/// The class panel while it is open: the class rules as edited so far, one per line,
+/// not applied yet, the line its cursor is on, and why the rules last confirmed
+/// don't parse, if they don't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassPanel {
+    pub lines: Vec<String>,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+
+impl ClassPanel {
+    /// Opens on `classes`, one rule per line, with the cursor on an empty line after
+    /// them.
+    fn new(classes: &Classes) -> ClassPanel {
+        let mut lines = classes.rules();
+        lines.push(String::new());
+        ClassPanel {
+            cursor: lines.len() - 1,
+            lines,
+            error: None,
+        }
+    }
+
+    /// Edits the panel as `key` asks, or returns the action it stands for here.
+    /// `lines` is never empty, so the cursor always has a line to be on.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        let key = normalized(key)?;
+        let line = &mut self.lines[self.cursor];
+        match key {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Some(Action::Quit),
+            (KeyCode::Enter, KeyModifiers::NONE) => return Some(Action::Confirm),
+            (KeyCode::Esc, KeyModifiers::NONE) => return Some(Action::Cancel),
+            (KeyCode::Char(c), KeyModifiers::NONE) => line.push(c),
+            (KeyCode::Backspace, KeyModifiers::NONE) => {
+                if line.pop().is_none() && self.lines.len() > 1 {
+                    self.lines.remove(self.cursor);
+                    self.cursor = self.cursor.saturating_sub(1);
+                }
+            }
+            (KeyCode::Up, KeyModifiers::NONE) => self.cursor = self.cursor.saturating_sub(1),
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                if !line.is_empty() && self.cursor + 1 == self.lines.len() {
+                    self.lines.push(String::new());
+                }
+                self.cursor = (self.cursor + 1).min(self.lines.len() - 1);
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
 /// The panel open over the rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
     Levels(LevelPanel),
+    Classes(ClassPanel),
 }
 
 impl Panel {
     fn edit(&mut self, action: Action) {
         match self {
             Panel::Levels(panel) => panel.edit(action),
+            // Its lines are edited through `App::key`, not actions.
+            Panel::Classes(_) => {}
         }
     }
 }
+
+/// What [`App::notice`] says after `c` or `C` on an entry without a class.
+const NO_CLASS: &str = "the selected entry has no class";
 
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
 /// message column by.
@@ -393,6 +469,7 @@ pub struct App {
     shows_line_numbers: bool,
     wraps: bool,
     panel: Option<Panel>,
+    notice: Option<&'static str>,
     quit: bool,
 }
 
@@ -472,6 +549,7 @@ impl App {
             shows_line_numbers: true,
             wraps: false,
             panel: None,
+            notice: None,
             quit: false,
         }
     }
@@ -770,8 +848,10 @@ impl App {
             })
     }
 
-    /// The open panel, if any: [`Panel::Levels`] while the level panel is open.
-    /// [`Action::LevelPanel`] opens it with the
+    /// The open panel, if any: [`Panel::Levels`] while the level panel is open,
+    /// [`Panel::Classes`] while the class panel is.
+    ///
+    /// [`Action::LevelPanel`] opens the level panel with the
     /// current level filter and the cursor on TRACE. While it is open, up and down
     /// (`Action::Up`, `Action::Down`) move its cursor, stopping at TRACE and FATAL,
     /// [`Action::ToggleFold`] toggles the level under the cursor and
@@ -779,6 +859,10 @@ impl App {
     /// [`Action::Confirm`] sets the level filter to the panel's, keeping the other
     /// filters, and closes it; [`Action::Cancel`] closes it and keeps the filters as
     /// they were. [`Action::Quit`] still quits; every other action does nothing.
+    ///
+    /// [`Action::ClassPanel`] opens the class panel with the current class rules, one
+    /// per line ([`Classes::rules`](crate::filter::Classes::rules)), and an empty line
+    /// after them with the cursor on it. [`App::key`] edits it.
     pub fn panel(&self) -> Option<&Panel> {
         self.panel.as_ref()
     }
@@ -853,9 +937,50 @@ impl App {
                     cursor: Level::Trace,
                 }));
             }
+            Action::OnlyClass => self.change_classes(|classes, class| {
+                classes.include = vec![Rule::Prefix(class)];
+            }),
+            Action::HideClass => self.change_classes(|classes, class| {
+                classes.exclude.push(Rule::Prefix(class));
+            }),
+            Action::ClassPanel => {
+                self.panel = Some(Panel::Classes(ClassPanel::new(&self.filters.classes)));
+            }
             Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
+    }
+
+    /// Does what `key` asks. While the class panel is open, the key edits it: a
+    /// character, with or without Shift, is typed at the end of the cursor's line,
+    /// `Backspace` deletes the line's last character, or the line itself if it is
+    /// empty and not the only one (the cursor going to the line above), `↑ ↓` move the
+    /// cursor between the lines, stopping at the ends, and `↓` on the last line adds
+    /// an empty line after it unless it is empty itself. `Enter` sets the class filter
+    /// to the rules of the lines ([`Classes::parse`](crate::filter::Classes::parse)),
+    /// keeping the other filters, and closes the panel; if they don't parse, the
+    /// panel stays open with the [error](ClassPanel::error) and the filters stay as
+    /// they were. `Esc` closes the panel without applying it, `Ctrl-c` quits, and
+    /// other keys do nothing.
+    ///
+    /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
+    pub fn key(&mut self, key: KeyEvent) {
+        self.notice = None;
+        let action = match &mut self.panel {
+            Some(Panel::Classes(panel)) => panel.key(key),
+            _ => action(key),
+        };
+        if let Some(action) = action {
+            self.apply(action);
+        }
+    }
+
+    /// What the viewer has to tell about the last key, until the next one: `the
+    /// selected entry has no class` after [`Action::OnlyClass`] or
+    /// [`Action::HideClass`] on an entry without a class (or with no row selected),
+    /// which then change nothing.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice
     }
 
     /// Whether [`Action::Quit`] has been applied.
@@ -1059,14 +1184,27 @@ impl App {
     }
 
     /// `action` while `panel` is open, taken out of `self.panel`: Confirm applies it,
-    /// Cancel and Quit leave it closed, anything else edits it and puts it back.
+    /// Cancel leaves it closed, Quit quits with it open, anything else edits it and puts
+    /// it back.
     fn apply_in_panel(&mut self, mut panel: Panel, action: Action) {
         match action {
             Action::Confirm => match panel {
                 Panel::Levels(panel) => self.set_levels(panel.levels),
+                Panel::Classes(mut panel) => {
+                    match Classes::parse(panel.lines.iter().map(String::as_str)) {
+                        Ok(classes) => self.set_classes(classes),
+                        Err(error) => {
+                            panel.error = Some(error);
+                            self.panel = Some(Panel::Classes(panel));
+                        }
+                    }
+                }
             },
             Action::Cancel => {}
-            Action::Quit => self.quit = true,
+            Action::Quit => {
+                self.quit = true;
+                self.panel = Some(panel);
+            }
             _ => {
                 panel.edit(action);
                 self.panel = Some(panel);
@@ -1078,6 +1216,34 @@ impl App {
     fn set_levels(&mut self, levels: Levels) {
         let others = std::mem::take(&mut self.filters);
         self.set_filters(Filters { levels, ..others });
+    }
+
+    /// Sets the class filter to `classes`, keeping the other filters.
+    fn set_classes(&mut self, classes: Classes) {
+        let others = std::mem::take(&mut self.filters);
+        self.set_filters(Filters { classes, ..others });
+    }
+
+    /// Lets `change` change the class filter with the selected entry's class, or
+    /// says that it has none.
+    fn change_classes(&mut self, change: impl FnOnce(&mut Classes, String)) {
+        let Some(class) = self.selected_class() else {
+            self.notice = Some(NO_CLASS);
+            return;
+        };
+        let mut classes = self.filters.classes.clone();
+        change(&mut classes, class);
+        self.set_classes(classes);
+    }
+
+    /// The full class name of the selected row's entry, as its first line has it.
+    fn selected_class(&self) -> Option<String> {
+        let row = self.fold_row(self.viewport.selected()?)?;
+        let (entry, _) = self.shown_folds().line_at(row);
+        let record = self.shown_record(entry);
+        let first = strip_ansi(self.entry_line(&record, 0));
+        let class = first.get(record.class()?)?;
+        Some(String::from_utf8_lossy(class).into_owned())
     }
 
     fn set_all_folded(&mut self, folded: bool) {
