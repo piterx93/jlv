@@ -1,3 +1,6 @@
+# See [profile.mutants] in Cargo.toml.
+profile = "mutants"
+
 # main.rs only hands the command line to the library, where the logic and its tests live.
 exclude_globs = ["src/main.rs"]
 
@@ -33,7 +36,7 @@ exclude_re = [
     'src/source/gzip\.rs:\d+:\d+: replace is_damage -> bool with true$',
     'src/source/gzip\.rs:\d+:\d+: replace match guard is_damage\(&err\) with true in decompress$',
     # Lines that never run out make every test that reads them to the end allocate until
-    # the machine runs out of memory, which takes the dev container down with it.
+    # the machine runs out of memory.
     'src/source/mod\.rs:\d+:\d+: replace <impl Iterator for Lines<.a>>::next -> Option<&.a\[u8\]> with Some\(.*\)$',
     # The same goes for not stepping past the newline, which yields the same line again.
     'src/source/mod\.rs:\d+:\d+: replace \+ with [-*] in <impl Iterator for Lines<.a>>::next$',

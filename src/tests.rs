@@ -268,6 +268,10 @@ fn path_with_spaces_is_handed_over() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "APFS refuses file names that aren't UTF-8"
+)]
 fn non_utf8_path_is_handed_over() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, OsString::from_vec(b"caf\xe9.log".to_vec()));

@@ -30,6 +30,12 @@ proptest = "1"
 lto = "thin"
 strip = true
 
+# Mutants build four copies of target/ at once; without debug info each is a fraction
+# of the size.
+[profile.mutants]
+inherits = "test"
+debug = false
+
 [package.metadata.deb]
 section = "utils"
 
