@@ -14,6 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::format::Level;
+use crate::keymap;
 use crate::mouse::HitMap;
 use crate::source::Origin;
 use layout::Screen;
@@ -65,6 +66,7 @@ const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Ca
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
 const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel";
+const HELP_HINTS: &str = "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close";
 const SEARCH_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel";
 const TAB_STOP: usize = 4;
 
@@ -141,6 +143,16 @@ const TAB_STOP: usize = 4;
 /// The export prompt is shown the same way, as `export to: ` and the path typed,
 /// or, while it [asks to overwrite](crate::app::ExportPrompt::overwrite),
 /// `overwrite <path>? y/n`.
+///
+/// While the help overlay is open, it is drawn the same way, a box titled ` Help `,
+/// as wide as its widest line and the border need (the widest keys and the widest
+/// description plus 5 columns) and as high as its lines and the border need, but no
+/// wider and no higher than the body: one line per line of [`keymap::help`](crate::keymap::help), from the first
+/// that [`HelpPanel::scroll`](crate::app::HelpPanel::scroll) leaves, as ` k ↑
+/// Move up`: a space, the keys left-aligned in a column as wide as the widest keys,
+/// two spaces and the description. It tells the app how many lines it shows
+/// ([`App::fit_help`]). The footer then shows `j/k Scroll  PgUp/PgDn Page
+/// F1/Esc/q Close`.
 ///
 /// While the app [shows the details pane](App::shows_details), the bottom of the
 /// body is a box titled ` Details `, a third of the screen's height high (at least 5
@@ -270,6 +282,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     if let Some(area) = screen.details {
         details::render(frame, app, area);
     }
+    if fits && matches!(app.panel(), Some(Panel::Help(_))) {
+        render_help_panel(frame, app, body);
+    }
     let hints = match app.panel() {
         None => KEY_HINTS.into(),
         Some(Panel::Levels(panel)) => {
@@ -327,8 +342,36 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             }
             panel_hints(prompt.error.as_deref(), SEARCH_PROMPT_HINTS)
         }
+        Some(Panel::Help(_)) => HELP_HINTS.into(),
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
+}
+
+fn render_help_panel(frame: &mut Frame, app: &mut App, body: Rect) {
+    let help = keymap::help();
+    let height = u16::try_from(help.len() + 2).map_or(body.height, |h| h.min(body.height));
+    let keys_width = help.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
+    let widest = help.iter().map(|(_, d)| d.width()).max().unwrap_or(0);
+    // A space, the keys, two spaces, the description, and the two borders.
+    let width = u16::try_from(keys_width + widest + 5).map_or(body.width, |w| w.min(body.width));
+    let area = body.centered(Constraint::Length(width), Constraint::Length(height));
+    let inner = usize::from(area.height.saturating_sub(2));
+    app.fit_help(inner);
+    let scroll = match app.panel() {
+        Some(Panel::Help(panel)) => panel.scroll,
+        _ => 0,
+    };
+    let lines: Vec<Line> = help
+        .iter()
+        .skip(scroll)
+        .take(inner)
+        .map(|(keys, description)| Line::from(format!(" {keys:<keys_width$}  {description}")))
+        .collect();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Help ")),
+        area,
+    );
 }
 
 fn render_level_panel(frame: &mut Frame, panel: &LevelPanel, body: Rect) {

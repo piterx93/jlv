@@ -31,6 +31,7 @@ use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
+use crate::keymap;
 use crate::matcher::{self, Matcher};
 use crate::mouse::{HitMap, Target};
 use crate::source::{self, Origin, Source};
@@ -131,79 +132,24 @@ pub enum Action {
     /// Closes the open panel without applying its edits. With no panel open, drops an
     /// export that waits for the filters.
     Cancel,
+    /// Opens the help overlay ([`App::panel`]), which lists the
+    /// [key bindings](crate::keymap::bindings).
+    Help,
     Quit,
 }
 
-/// The action bound to a key, `None` for keys that do nothing.
+/// The action bound to a key in the [keymap](crate::keymap::bindings), `None` for
+/// keys that do nothing.
 ///
-/// `j k ↑ ↓` move by a line, `PgUp PgDn` by a page, `Ctrl-u Ctrl-d` by half a page,
-/// `g Home` go to the top, `G End` to the bottom, `← →` scroll the message column,
-/// `F` toggles follow, `T` toggles the thread column, `#` the line numbers, `w`
-/// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
-/// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
-/// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
-/// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
-/// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
-/// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
-/// and previous match, `]` and `[` the next and previous entry with an exception, `m`
-/// toggles a bookmark, `'` and `"` select the next and previous bookmark, `e F8`
-/// open the export prompt, `y` copies the selected entry, `Tab` cycles the focus, `H`
-/// toggles the histogram, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit.
 /// Characters ignore Shift (the character already says which case it is) but not Ctrl
 /// or Alt; other keys do nothing with any modifier. Key releases do nothing; held keys
 /// repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
-    let action = match normalized(key)? {
-        (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
-        (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::Down,
-        (KeyCode::PageUp, KeyModifiers::NONE) => Action::PageUp,
-        (KeyCode::PageDown, KeyModifiers::NONE) => Action::PageDown,
-        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::HalfPageUp,
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Action::HalfPageDown,
-        (KeyCode::Char('g') | KeyCode::Home, KeyModifiers::NONE) => Action::Top,
-        (KeyCode::Char('G') | KeyCode::End, KeyModifiers::NONE) => Action::Bottom,
-        (KeyCode::Left, KeyModifiers::NONE) => Action::ScrollLeft,
-        (KeyCode::Right, KeyModifiers::NONE) => Action::ScrollRight,
-        (KeyCode::Char('F'), KeyModifiers::NONE) => Action::ToggleFollow,
-        (KeyCode::Char('T'), KeyModifiers::NONE) => Action::ToggleThread,
-        (KeyCode::Char('H'), KeyModifiers::NONE) => Action::ToggleHistogram,
-        (KeyCode::Char('#'), KeyModifiers::NONE) => Action::ToggleLineNumbers,
-        (KeyCode::Char('w'), KeyModifiers::NONE) => Action::ToggleWrap,
-        (KeyCode::Char('P'), KeyModifiers::NONE) => Action::CyclePreset,
-        (KeyCode::Char(' '), KeyModifiers::NONE) => Action::ToggleFold,
-        (KeyCode::Char('z'), KeyModifiers::NONE) => Action::FoldAll,
-        (KeyCode::Char('Z'), KeyModifiers::NONE) => Action::UnfoldAll,
-        (KeyCode::Char(digit @ '1'..='6'), KeyModifiers::NONE) => {
-            Action::ToggleLevel(Level::ALL[usize::from(digit as u8 - b'1')])
-        }
-        (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
-        (KeyCode::Char('c'), KeyModifiers::NONE) => Action::OnlyClass,
-        (KeyCode::Char('C'), KeyModifiers::NONE) => Action::HideClass,
-        (KeyCode::F(4) | KeyCode::Char('&'), KeyModifiers::NONE) => Action::TextPanel,
-        (KeyCode::F(5), KeyModifiers::NONE) => Action::TimePanel,
-        (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
-        (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ClearFilters,
-        (KeyCode::Char(':'), KeyModifiers::NONE) => Action::LinePrompt,
-        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::TimePrompt,
-        (KeyCode::Char('/'), KeyModifiers::NONE) => Action::SearchForward,
-        (KeyCode::Char('?'), KeyModifiers::NONE) => Action::SearchBackward,
-        (KeyCode::Char('n'), KeyModifiers::NONE) => Action::NextMatch,
-        (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
-        (KeyCode::Char(']'), KeyModifiers::NONE) => Action::NextException,
-        (KeyCode::Char('['), KeyModifiers::NONE) => Action::PreviousException,
-        (KeyCode::Char('m'), KeyModifiers::NONE) => Action::ToggleBookmark,
-        (KeyCode::Char('e') | KeyCode::F(8), KeyModifiers::NONE) => Action::Export,
-        (KeyCode::Char('y'), KeyModifiers::NONE) => Action::Copy,
-        (KeyCode::Char('\''), KeyModifiers::NONE) => Action::NextBookmark,
-        (KeyCode::Char('"'), KeyModifiers::NONE) => Action::PreviousBookmark,
-        (KeyCode::Tab, KeyModifiers::NONE) => Action::CycleFocus,
-        (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
-        (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
-        (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
-        | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
-        _ => return None,
-    };
-    Some(action)
+    let (code, modifiers) = normalized(key)?;
+    keymap::bindings()
+        .iter()
+        .find(|binding| binding.code == code && binding.modifiers == modifiers)
+        .map(|binding| binding.action)
 }
 
 /// The code and modifiers of `key` as the bindings see them, `None` for a release.
@@ -560,6 +506,53 @@ pub enum Panel {
         prompt: Prompt,
         backward: bool,
     },
+    Help(HelpPanel),
+}
+
+/// The help overlay, which lists the lines of [`keymap::help`](crate::keymap::help).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpPanel {
+    /// How many of its lines are scrolled off above the overlay.
+    pub scroll: usize,
+    height: usize,
+    lines: usize,
+}
+
+impl HelpPanel {
+    fn max_scroll(&self) -> usize {
+        self.lines.saturating_sub(self.height)
+    }
+
+    fn edit(&mut self, action: Action) {
+        let scroll = match action {
+            Action::Up => self.scroll.saturating_sub(1),
+            Action::Down => self.scroll + 1,
+            Action::PageUp => self.scroll.saturating_sub(self.height),
+            Action::PageDown => self.scroll + self.height,
+            _ => return,
+        };
+        self.scroll = scroll.min(self.max_scroll());
+    }
+}
+
+/// What `key` is while the help overlay is open: `q` closes it like `Esc` and `F1`,
+/// and only the scrolling keys and `Ctrl-c` do anything else.
+fn help_action(key: KeyEvent) -> Option<Action> {
+    match normalized(key)? {
+        (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Cancel),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+        _ => action(key).filter(|action| {
+            matches!(
+                action,
+                Action::Up
+                    | Action::Down
+                    | Action::PageUp
+                    | Action::PageDown
+                    | Action::Cancel
+                    | Action::Help
+            )
+        }),
+    }
 }
 
 /// A search: what it looks for and which way [`Action::NextMatch`] goes, up the rows
@@ -581,6 +574,7 @@ impl Panel {
             | Panel::Jump(_)
             | Panel::Export(_)
             | Panel::Search { .. } => {}
+            Panel::Help(panel) => panel.edit(action),
         }
     }
 }
@@ -1609,6 +1603,22 @@ impl App {
         self.details.scroll = self.details.scroll.min(self.details.max_scroll());
     }
 
+    /// Sets how many lines the help overlay shows at a time, `height`. Scrolls it back
+    /// so that it goes no further than its last line at the bottom.
+    ///
+    /// While the overlay is open, `j ↓` and `k ↑` scroll it by a line, `PgDn` and
+    /// `PgUp` by `height` lines, never above its first line nor further than its last
+    /// line at the bottom; an overlay that shows every line doesn't scroll. `Esc`,
+    /// `F1` and `q` close it, `Ctrl-c` quits, and every other key does nothing. It
+    /// opens at its first line.
+    pub fn fit_help(&mut self, height: usize) {
+        if let Some(Panel::Help(panel)) = &mut self.panel {
+            panel.height = height;
+            panel.lines = keymap::help().len();
+            panel.scroll = panel.scroll.min(panel.max_scroll());
+        }
+    }
+
     /// The selected row's entry, every line of it as in the file whether folded or
     /// not, line endings included. `None` with no row selected or with the row that
     /// marks a truncation selected.
@@ -1939,6 +1949,13 @@ impl App {
             Action::Copy => self.copy_entry(),
             Action::Confirm => self.toggle_details(),
             Action::Cancel => self.cancel_export(),
+            Action::Help => {
+                self.panel = Some(Panel::Help(HelpPanel {
+                    scroll: 0,
+                    height: 0,
+                    lines: 0,
+                }))
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -2032,6 +2049,7 @@ impl App {
             Some(Panel::Jump(prompt)) => prompt.key(key),
             Some(Panel::Search { prompt, .. }) => prompt.key(key),
             Some(Panel::Export(prompt)) => prompt.key(key),
+            Some(Panel::Help(_)) => help_action(key),
             _ => action(key),
         };
         if let Some(action) = action {
@@ -2628,8 +2646,10 @@ impl App {
                         self.panel = Some(Panel::Search { prompt, backward });
                     }
                 },
+                Panel::Help(panel) => self.panel = Some(Panel::Help(panel)),
             },
             Action::Cancel => {}
+            Action::Help if matches!(panel, Panel::Help(_)) => {}
             Action::Quit => {
                 self.quit = true;
                 self.panel = Some(panel);

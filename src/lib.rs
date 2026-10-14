@@ -34,6 +34,7 @@ pub mod follow;
 pub mod format;
 pub mod histogram;
 pub mod index;
+pub mod keymap;
 pub mod matcher;
 pub mod mouse;
 pub mod source;

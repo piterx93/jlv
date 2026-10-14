@@ -302,7 +302,7 @@ fn letters_with_alt_are_not_plain_letters() {
 #[test]
 fn unbound_keys_do_nothing() {
     assert_eq!(action(char_key('v')), None);
-    assert_eq!(action(key(KeyCode::F(1))), None);
+    assert_eq!(action(key(KeyCode::F(12))), None);
 }
 
 #[test]
@@ -4641,4 +4641,129 @@ fn copy_failure_shows_in_the_notice() {
         Err(CopyError::Terminal(io::Error::other("broken pipe")))
     });
     assert_eq!(app.notice(), Some("copy failed: broken pipe"));
+}
+
+// --- help overlay ---
+
+/// How far the help overlay is scrolled, `None` while it is closed.
+fn help_scroll(app: &App) -> Option<usize> {
+    match app.panel() {
+        Some(Panel::Help(help)) => Some(help.scroll),
+        _ => None,
+    }
+}
+
+/// How many lines the help overlay has.
+fn help_lines() -> usize {
+    crate::keymap::help().len()
+}
+
+/// `app` with the help overlay open, showing `height` lines at a time, and `keys`
+/// pressed in it.
+fn in_help(app: App, height: usize, keys: &[KeyEvent]) -> App {
+    let mut app = pressed(app, &[key(KeyCode::F(1))]);
+    app.fit_help(height);
+    pressed(app, keys)
+}
+
+#[test]
+fn f1_opens_the_help_overlay_at_its_first_line() {
+    let app = pressed(hundred_lines(), &[key(KeyCode::F(1))]);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn esc_f1_and_q_close_the_help_overlay_without_quitting() {
+    for close in [key(KeyCode::Esc), key(KeyCode::F(1)), char_key('q')] {
+        let app = in_help(hundred_lines(), 10, &[close]);
+        assert_eq!(help_scroll(&app), None, "{close:?}");
+        assert!(!app.should_quit(), "{close:?}");
+    }
+}
+
+#[test]
+fn ctrl_c_quits_with_the_help_overlay_open() {
+    let app = in_help(hundred_lines(), 10, &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn j_k_and_the_arrows_scroll_the_help_overlay_by_a_line() {
+    let keys = [
+        char_key('j'),
+        char_key('j'),
+        key(KeyCode::Down),
+        char_key('k'),
+    ];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(2));
+    let app = pressed(app, &[key(KeyCode::Up)]);
+    assert_eq!(help_scroll(&app), Some(1));
+}
+
+#[test]
+fn page_keys_scroll_the_help_overlay_by_its_height() {
+    let keys = [
+        key(KeyCode::PageDown),
+        key(KeyCode::PageDown),
+        key(KeyCode::PageUp),
+    ];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(10));
+}
+
+#[test]
+fn help_overlay_does_not_scroll_above_its_first_line() {
+    let keys = [char_key('j'), key(KeyCode::PageUp), char_key('k')];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn help_overlay_does_not_scroll_past_its_last_line_at_the_bottom() {
+    let mut keys = vec![key(KeyCode::PageDown); help_lines()];
+    keys.push(char_key('j'));
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(help_lines() - 10));
+}
+
+#[test]
+fn help_overlay_that_shows_every_line_does_not_scroll() {
+    let keys = [char_key('j'), key(KeyCode::PageDown)];
+    let app = in_help(hundred_lines(), help_lines(), &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn a_taller_help_overlay_scrolls_back_to_keep_its_last_line_at_the_bottom() {
+    let keys = vec![key(KeyCode::PageDown); help_lines()];
+    let mut app = in_help(hundred_lines(), 10, &keys);
+    app.fit_help(20);
+    assert_eq!(help_scroll(&app), Some(help_lines() - 20));
+}
+
+#[test]
+fn other_keys_do_nothing_while_the_help_overlay_is_open() {
+    let keys = [
+        char_key('G'),
+        char_key('/'),
+        key(KeyCode::F(2)),
+        char_key('x'),
+    ];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn help_overlay_opens_again_at_its_first_line() {
+    let keys = [char_key('j'), key(KeyCode::Esc), key(KeyCode::F(1))];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn f1_does_nothing_in_another_panel() {
+    let app = pressed(hundred_lines(), &[key(KeyCode::F(2)), key(KeyCode::F(1))]);
+    assert!(matches!(app.panel(), Some(Panel::Levels(_))));
 }

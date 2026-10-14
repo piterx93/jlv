@@ -2778,3 +2778,118 @@ fn hit_map_of_a_too_small_terminal_has_no_rows() {
     drawn(&mut app, 79, 24, Theme::Styled);
     assert_eq!(app.hit_map().lines, Vec::<usize>::new());
 }
+
+// --- help overlay ---
+
+#[test]
+fn help_overlay_lists_the_keymap_over_the_rows() {
+    let keys = [key(KeyCode::F(1))];
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ k ↑           Move up                      │                 "
+    " 12:00:00.003 [ma│ j ↓           Move down                    │                 "
+    " 12:00:00.004 [ma│ PgUp          Page up                      │                 "
+    " 12:00:00.005 [ma│ PgDn          Page down                    │                 "
+    " 12:00:00.006 [ma│ Ctrl-u        Half page up                 │                 "
+    " 12:00:00.007 [ma│ Ctrl-d        Half page down               │                 "
+    " 12:00:00.008 [ma│ g Home        Go to top                    │                 "
+    " 12:00:00.009 [ma│ G End         Go to bottom and follow      │                 "
+    " 12:00:00.010 [ma│ ←             Scroll left                  │                 "
+    " 12:00:00.011 [ma│ →             Scroll right                 │                 "
+    " 12:00:00.012 [ma│ Tab           Focus next pane              │                 "
+    " 12:00:00.013 [ma│ Enter         Details panel                │                 "
+    " 12:00:00.014 [ma│ Esc           Cancel waiting export        │                 "
+    " 12:00:00.015 [ma│ F             Toggle follow                │                 "
+    " 12:00:00.016 [ma│ P             Cycle format preset          │                 "
+    " 12:00:00.017 [ma│ /             Search forward               │                 "
+    " 12:00:00.018 [ma│ ?             Search backward              │                 "
+    " 12:00:00.019 [ma│ n             Next match                   │                 "
+    " 12:00:00.020 [ma│ N             Previous match               │                 "
+    " 12:00:00.021 [ma│ :             Jump to line                 │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close                                      "
+    "#);
+}
+
+#[test]
+fn help_overlay_scrolls_a_page_with_page_down() {
+    let keys = [key(KeyCode::F(1)), key(KeyCode::PageDown)];
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ t             Jump to time                 │                 "
+    " 12:00:00.003 [ma│ 1 2 3 4 5 6   Toggle level (TRACE to FATAL)│                 "
+    " 12:00:00.004 [ma│ F2            Level filter                 │                 "
+    " 12:00:00.005 [ma│ F4 &          Text filter                  │                 "
+    " 12:00:00.006 [ma│ F5            Time filter                  │                 "
+    " 12:00:00.007 [ma│ F6            Class filter                 │                 "
+    " 12:00:00.008 [ma│ c             Only this class              │                 "
+    " 12:00:00.009 [ma│ C             Hide this class              │                 "
+    " 12:00:00.010 [ma│ x             Clear all filters            │                 "
+    " 12:00:00.011 [ma│ Space         Fold or unfold entry         │                 "
+    " 12:00:00.012 [ma│ z             Fold all                     │                 "
+    " 12:00:00.013 [ma│ Z             Unfold all                   │                 "
+    " 12:00:00.014 [ma│ ]             Next exception               │                 "
+    " 12:00:00.015 [ma│ [             Previous exception           │                 "
+    " 12:00:00.016 [ma│ m             Toggle bookmark              │                 "
+    " 12:00:00.017 [ma│ '             Next bookmark                │                 "
+    " 12:00:00.018 [ma│ "             Previous bookmark            │                 "
+    " 12:00:00.019 [ma│ y             Copy entry                   │                 "
+    " 12:00:00.020 [ma│ e F8          Export filtered              │                 "
+    " 12:00:00.021 [ma│ T             Toggle thread column         │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close                                      "
+    "#);
+}
+
+#[test]
+fn help_overlay_scrolled_to_its_end_shows_its_last_lines() {
+    let keys = [
+        key(KeyCode::F(1)),
+        key(KeyCode::PageDown),
+        key(KeyCode::PageDown),
+        key(KeyCode::PageDown),
+    ];
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ F6            Class filter                 │                 "
+    " 12:00:00.003 [ma│ c             Only this class              │                 "
+    " 12:00:00.004 [ma│ C             Hide this class              │                 "
+    " 12:00:00.005 [ma│ x             Clear all filters            │                 "
+    " 12:00:00.006 [ma│ Space         Fold or unfold entry         │                 "
+    " 12:00:00.007 [ma│ z             Fold all                     │                 "
+    " 12:00:00.008 [ma│ Z             Unfold all                   │                 "
+    " 12:00:00.009 [ma│ ]             Next exception               │                 "
+    " 12:00:00.010 [ma│ [             Previous exception           │                 "
+    " 12:00:00.011 [ma│ m             Toggle bookmark              │                 "
+    " 12:00:00.012 [ma│ '             Next bookmark                │                 "
+    " 12:00:00.013 [ma│ "             Previous bookmark            │                 "
+    " 12:00:00.014 [ma│ y             Copy entry                   │                 "
+    " 12:00:00.015 [ma│ e F8          Export filtered              │                 "
+    " 12:00:00.016 [ma│ T             Toggle thread column         │                 "
+    " 12:00:00.017 [ma│ #             Toggle line numbers          │                 "
+    " 12:00:00.018 [ma│ H             Toggle histogram             │                 "
+    " 12:00:00.019 [ma│ w             Toggle wrap                  │                 "
+    " 12:00:00.020 [ma│ F1            Help                         │                 "
+    " 12:00:00.021 [ma│ q F10 Ctrl-c  Quit                         │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close                                      "
+    "#);
+}
+
+#[test]
+fn help_overlay_in_a_tall_terminal_is_as_high_as_its_lines_and_border() {
+    let mut app = hundred_lines();
+    let mut terminal = drawn(&mut app, 80, 60, Theme::Styled);
+    app.key(key(KeyCode::F(1)));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    let find = |mark: &str| (0..60).find(|&y| row(&terminal, y).contains(mark)).unwrap();
+    let (top, bottom) = (find("┌ Help "), find("└"));
+    assert_eq!(
+        usize::from(bottom - top) + 1,
+        crate::keymap::help().len() + 2
+    );
+    assert!(row(&terminal, top + 1).contains("│ k ↑ "));
+}
