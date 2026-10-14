@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::iter;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -15,8 +15,11 @@ use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::format::Level;
 use crate::source::Origin;
+use layout::Screen;
 
 mod abbrev;
+mod details;
+mod layout;
 mod table;
 
 pub use abbrev::abbreviate;
@@ -132,6 +135,19 @@ const TAB_STOP: usize = 4;
 /// and the text typed for a line, `t ` and the text for a time, followed by ` ─ `
 /// and the prompt's [error](crate::app::JumpPrompt::error) while it has one.
 ///
+/// While the app [shows the details pane](App::shows_details), the bottom of the
+/// body is a box titled ` Details `, a third of the screen's height high (at least 5
+/// lines, and at most what leaves the rows 5), with a plain border (`┌─┐`), or a thick
+/// one (`┏━┓`) while it has the [focus](App::focus). Inside, one column in from each
+/// side, it shows the selected entry ([`App::details_entry`]): under a preset, a
+/// first line with the full class and the thread in parentheses, as
+/// `com.example.App (main)`, then the message of the entry's first line, then every
+/// continuation line; the headless entry, and every entry under `Raw`, show their
+/// lines as they are. Lines are made safe to show like the rows and wrapped at the
+/// box's inner width, cut at the column rather than at a word. The pane is scrolled as
+/// [`App::details_scroll`] says, and tells the app its inner height and how many
+/// wrapped lines the entry takes ([`App::fit_details`]).
+///
 /// While the app has a search, the header has ` ─ match k/N` ([`App::match_count`])
 /// after the status and before the notice.
 ///
@@ -149,12 +165,14 @@ const TAB_STOP: usize = 4;
 /// options that are on). Without filters there is no bar.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let filters = filter_bar(app);
+    let screen = Screen::new(area, filters.is_some(), app.shows_details());
+    let Screen {
+        header,
+        rows: body,
+        footer,
+        ..
+    } = screen;
 
     let progress = app.progress();
     let indexing = if progress.is_complete() {
@@ -196,22 +214,19 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         );
     }
 
-    let fits = area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT;
-    let body = match filter_bar(app) {
-        Some(filters) if fits => {
-            let [bar, body] =
-                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
-            frame.render_widget(Line::from(filters), bar);
-            body
-        }
-        _ => body,
-    };
+    let fits = screen.fits;
+    if let (Some(bar), Some(filters)) = (screen.filters, filters) {
+        frame.render_widget(Line::from(filters), bar);
+    }
     if !fits {
         frame.render_widget(Line::from(TOO_SMALL), body);
     } else if app.nothing_matches() {
         frame.render_widget(Line::from(NO_MATCHES), body);
     } else {
         table::render(frame, app, theme, body);
+    }
+    if let Some(area) = screen.details {
+        details::render(frame, app, area);
     }
     let hints = match app.panel() {
         None => KEY_HINTS.into(),

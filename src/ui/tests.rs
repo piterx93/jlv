@@ -2328,3 +2328,242 @@ fn a_match_of_half_a_character_is_not_highlighted() {
     let terminal = searched_terminal(&mut app("café\n".as_bytes()), r"(?-u)\xC3", &[]);
     assert_eq!(with_highlights(&terminal, 1..=1), "▶café");
 }
+
+// --- details pane ---
+
+/// A Logback entry whose stack trace takes 12 lines, more than the details pane shows.
+fn long_trace() -> App {
+    let trace: String = (1..=12)
+        .map(|i| format!("\tat com.example.Step{i}.run(Step.java:{i})\n"))
+        .collect();
+    let log = format!(
+        "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n\
+         java.lang.IllegalStateException: boom\n{trace}"
+    );
+    app_in(Preset::Logback, log.as_bytes())
+}
+
+/// The screen lines of the details pane at 80×24.
+const DETAILS_LINES: RangeInclusive<u16> = 15..=22;
+
+#[test]
+fn details_pane_shows_the_selected_entry_with_its_stack_trace() {
+    let keys = [
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        key(KeyCode::Enter),
+    ];
+    assert_snapshot!(screen_after(&mut table(), &keys), @r#"
+    "jlv ─ app.log ─ 500 B ─ Logback                          F:1 E:1 W:1 I:1 D:1 T:1"
+    " 12:00:00.100 TRACE com.example.App          Tick                               "
+    " 12:00:00.200 DEBUG com.example.App          Config loaded                      "
+    " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   "
+    " 12:00:01.000 WARN  com.example.App          Retry 1/3                          "
+    "▶12:00:02.000 ERROR com.example.App          Failed [+2]                        "
+    " 12:00:03.000 FATAL com.example.App          Giving up                          "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "┌ Details ─────────────────────────────────────────────────────────────────────┐"
+    "│ com.example.App (main)                                                       │"
+    "│ Failed                                                                       │"
+    "│ java.lang.IllegalStateException: boom                                        │"
+    "│     at com.example.App.main(App.java:10)                                     │"
+    "│                                                                              │"
+    "│                                                                              │"
+    "└──────────────────────────────────────────────────────────────────────────────┘"
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn details_pane_has_a_thick_border_while_focused() {
+    let keys = [
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        key(KeyCode::Enter),
+        key(KeyCode::Tab),
+    ];
+    assert_snapshot!(lines_after(&mut table(), &keys, DETAILS_LINES), @r"
+    ┏ Details ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃ com.example.App (main)                                                       ┃
+    ┃ Failed                                                                       ┃
+    ┃ java.lang.IllegalStateException: boom                                        ┃
+    ┃     at com.example.App.main(App.java:10)                                     ┃
+    ┃                                                                              ┃
+    ┃                                                                              ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    ");
+}
+
+#[test]
+fn details_pane_scrolls_through_an_entry_longer_than_itself() {
+    let keys = [
+        key(KeyCode::Enter),
+        key(KeyCode::Tab),
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+    ];
+    assert_snapshot!(lines_after(&mut long_trace(), &keys, DETAILS_LINES), @r"
+    ┏ Details ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃     at com.example.Step1.run(Step.java:1)                                    ┃
+    ┃     at com.example.Step2.run(Step.java:2)                                    ┃
+    ┃     at com.example.Step3.run(Step.java:3)                                    ┃
+    ┃     at com.example.Step4.run(Step.java:4)                                    ┃
+    ┃     at com.example.Step5.run(Step.java:5)                                    ┃
+    ┃     at com.example.Step6.run(Step.java:6)                                    ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    ");
+}
+
+#[test]
+fn details_pane_scrolls_no_further_than_its_last_line() {
+    let page = key(KeyCode::PageDown);
+    let keys = [key(KeyCode::Enter), key(KeyCode::Tab), page, page];
+    assert_snapshot!(lines_after(&mut long_trace(), &keys, DETAILS_LINES), @r"
+    ┏ Details ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃     at com.example.Step7.run(Step.java:7)                                    ┃
+    ┃     at com.example.Step8.run(Step.java:8)                                    ┃
+    ┃     at com.example.Step9.run(Step.java:9)                                    ┃
+    ┃     at com.example.Step10.run(Step.java:10)                                  ┃
+    ┃     at com.example.Step11.run(Step.java:11)                                  ┃
+    ┃     at com.example.Step12.run(Step.java:12)                                  ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    ");
+}
+
+#[test]
+fn details_pane_leaves_the_rows_above_it() {
+    let keys = [key(KeyCode::Enter), char_key('G')];
+    assert_snapshot!(lines_after(&mut hundred_lines(), &keys, 13..=15), @r"
+     12:00:00.099 [main] INFO  com.example.App - step 99
+    ▶12:00:00.100 [main] INFO  com.example.App - step 100
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    ");
+}
+
+#[test]
+fn details_pane_shows_the_headless_entry_as_it_is() {
+    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ starting up                                                                  │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_shows_a_raw_entry_as_it_is() {
+    assert_snapshot!(lines_after(&mut hundred_lines(), &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ 12:00:00.001 [main] INFO  com.example.App - step 1                           │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_wraps_a_long_message_at_its_inner_width() {
+    let log = format!(
+        "2026-10-07 12:00:00.000 [main] INFO  com.example.App - {}\n",
+        "0123456789".repeat(10)
+    );
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ com.example.App (main)                                                       │
+    │ 0123456789012345678901234567890123456789012345678901234567890123456789012345 │
+    │ 678901234567890123456789                                                     │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_shows_the_lines_appended_to_its_entry() {
+    let log = concat!(
+        "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n",
+        "java.lang.IllegalStateException: boom\n",
+        "\tat com.example.App.main(App.java:10)\n",
+    );
+    let mut app = following_app(Preset::Logback, log.as_bytes());
+    wait_for_index(&mut app);
+    let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter)]);
+    let longer = format!("{log}\tat java.lang.Thread.run(Thread.java:1583)\n");
+    let mut app = changed(
+        app,
+        FileChange::Grew(test_support::source(longer.as_bytes())),
+    );
+    draw(&mut terminal, &mut app, Theme::Styled);
+    let lines: Vec<String> = DETAILS_LINES.map(|y| row(&terminal, y)).collect();
+    assert_snapshot!(lines.join("\n"), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ com.example.App (main)                                                       │
+    │ Failed                                                                       │
+    │ java.lang.IllegalStateException: boom                                        │
+    │     at com.example.App.main(App.java:10)                                     │
+    │     at java.lang.Thread.run(Thread.java:1583)                                │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+/// The last line of the details pane, focused and scrolled to the bottom, on a
+/// Logback entry of exactly `len` bytes whose stack trace ends in a line of `x`.
+fn last_details_line(len: usize) -> String {
+    let head = "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n";
+    let line = "\tat com.example.Step.run(Step.java:1)\n";
+    let lines = (len - head.len()) / line.len() - 1;
+    let rest = len - head.len() - lines * line.len();
+    let log = format!(
+        "{head}{}\tat {}\n",
+        line.repeat(lines),
+        "x".repeat(rest - 5)
+    );
+    assert_eq!(log.len(), len);
+    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter), key(KeyCode::Tab)]);
+    loop {
+        let scroll = app.details_scroll();
+        app.apply(Action::PageDown);
+        if app.details_scroll() == scroll {
+            break;
+        }
+    }
+    draw(&mut terminal, &mut app, Theme::Styled);
+    let last = row(&terminal, *DETAILS_LINES.end() - 1);
+    last.trim_matches(['┃', ' ']).to_owned()
+}
+
+#[test]
+fn details_pane_ends_an_entry_longer_than_its_cap_with_an_ellipsis() {
+    assert_eq!(last_details_line(super::details::DETAILS_CAP + 1), "…");
+}
+
+#[test]
+fn details_pane_shows_an_entry_as_long_as_its_cap_whole() {
+    let last = last_details_line(super::details::DETAILS_CAP);
+    assert!(last.ends_with('x'), "{last}");
+}

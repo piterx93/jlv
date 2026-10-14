@@ -206,6 +206,11 @@ fn enter_confirms() {
 }
 
 #[test]
+fn tab_cycles_the_focus() {
+    assert_eq!(action(key(KeyCode::Tab)), Some(Action::CycleFocus));
+}
+
+#[test]
 fn esc_cancels() {
     assert_eq!(action(key(KeyCode::Esc)), Some(Action::Cancel));
 }
@@ -3283,4 +3288,198 @@ fn a_backward_step_waits_until_the_entries_before_the_selection_are_counted() {
     assert_eq!(selected(&app), Some(3000));
     wait_for_search(&mut app);
     assert_eq!(selected(&app), Some(2000));
+}
+
+// --- details pane ---
+
+/// An entry with a stack trace of three lines, then an entry of one line.
+const DETAILS_LOG: &str = concat!(
+    "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n",
+    "java.lang.IllegalStateException: boom\n",
+    "\tat com.example.App.run(App.java:10)\n",
+    "\tat com.example.App.main(App.java:5)\n",
+    "2026-10-07 12:00:01.000 [main] INFO  com.example.App - Recovered\n",
+);
+
+/// The first entry of `DETAILS_LOG`, as in the file.
+fn first_details_entry() -> String {
+    DETAILS_LOG
+        .lines()
+        .take(4)
+        .map(|line| line.to_owned() + "\n")
+        .collect()
+}
+
+/// `DETAILS_LOG` with the details pane shown, 2 lines high for an entry that takes
+/// 10, the first entry selected and the focus on the table.
+fn details_shown() -> App {
+    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    app.resize(10);
+    app.apply(Action::Confirm);
+    app.fit_details(2, 10);
+    app
+}
+
+/// [`details_shown`] with the focus on the details pane.
+fn details_focused() -> App {
+    applied(details_shown(), &[Action::CycleFocus])
+}
+
+#[test]
+fn details_pane_is_hidden_at_first() {
+    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    assert!(!app.shows_details());
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn confirm_without_a_panel_shows_the_details_pane() {
+    assert!(details_shown().shows_details());
+}
+
+#[test]
+fn confirm_hides_the_shown_details_pane() {
+    let app = applied(details_shown(), &[Action::Confirm]);
+    assert!(!app.shows_details());
+}
+
+#[test]
+fn confirm_in_a_panel_leaves_the_details_pane_hidden() {
+    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = applied(app, &[Action::LevelPanel, Action::Confirm]);
+    assert!(!app.shows_details());
+}
+
+#[test]
+fn cycle_focus_moves_the_focus_to_the_details_pane_and_back() {
+    let mut app = details_shown();
+    app.apply(Action::CycleFocus);
+    assert_eq!(app.focus(), Focus::Details);
+    app.apply(Action::CycleFocus);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn cycle_focus_without_the_details_pane_keeps_the_focus_on_the_table() {
+    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = applied(app, &[Action::CycleFocus]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn hiding_the_details_pane_gives_the_focus_back_to_the_table() {
+    let app = applied(details_focused(), &[Action::Confirm]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn down_with_the_details_focused_scrolls_them_and_keeps_the_selection() {
+    let app = applied(details_focused(), &[Action::Down]);
+    assert_eq!(app.details_scroll(), 1);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn up_with_the_details_focused_scrolls_them_back() {
+    let app = applied(details_focused(), &[Action::Down, Action::Down, Action::Up]);
+    assert_eq!(app.details_scroll(), 1);
+}
+
+#[test]
+fn page_down_with_the_details_focused_scrolls_them_by_their_height() {
+    let app = applied(details_focused(), &[Action::PageDown]);
+    assert_eq!(app.details_scroll(), 2);
+}
+
+#[test]
+fn page_up_with_the_details_focused_scrolls_them_back_by_their_height() {
+    let app = applied(details_focused(), &[Action::Down; 5]);
+    let app = applied(app, &[Action::PageUp]);
+    assert_eq!(app.details_scroll(), 3);
+}
+
+#[test]
+fn details_scroll_stops_at_the_first_line() {
+    let app = applied(details_focused(), &[Action::Down, Action::PageUp]);
+    assert_eq!(app.details_scroll(), 0);
+}
+
+#[test]
+fn details_scroll_stops_with_the_last_line_at_the_bottom() {
+    let app = applied(details_focused(), &[Action::Down; 20]);
+    assert_eq!(app.details_scroll(), 8);
+}
+
+#[test]
+fn details_taking_fewer_lines_scroll_back_to_their_last_line() {
+    let mut app = applied(details_focused(), &[Action::Down; 8]);
+    app.fit_details(2, 5);
+    assert_eq!(app.details_scroll(), 3);
+}
+
+#[test]
+fn scrolling_the_details_up_keeps_following() {
+    let mut app = followed(Preset::Logback, DETAILS_LOG);
+    app.apply(Action::Confirm);
+    app.fit_details(2, 10);
+    let app = applied(app, &[Action::CycleFocus, Action::Down, Action::Up]);
+    assert!(app.following());
+}
+
+#[test]
+fn other_actions_with_the_details_focused_work_on_the_table() {
+    let app = applied(details_focused(), &[Action::Bottom]);
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn selecting_another_entry_scrolls_the_details_back_to_the_top() {
+    let app = applied(
+        details_focused(),
+        &[Action::Down, Action::CycleFocus, Action::Down],
+    );
+    assert_eq!(app.viewport().selected(), Some(1));
+    assert_eq!(app.details_scroll(), 0);
+}
+
+#[test]
+fn details_entry_follows_the_selection() {
+    let app = applied(details_shown(), &[Action::Down]);
+    let second = DETAILS_LOG.lines().last().unwrap().to_owned() + "\n";
+    assert_eq!(app.details_entry(), Some(second.as_bytes()));
+}
+
+#[test]
+fn moving_between_the_lines_of_the_selected_entry_keeps_the_details_scroll() {
+    let app = applied(
+        details_shown(),
+        &[
+            Action::ToggleFold,
+            Action::CycleFocus,
+            Action::Down,
+            Action::CycleFocus,
+            Action::Down,
+        ],
+    );
+    assert_eq!(app.viewport().selected(), Some(1));
+    assert_eq!(app.details_scroll(), 1);
+}
+
+#[test]
+fn details_entry_is_every_line_of_the_selected_entry_folded_or_not() {
+    let entry = first_details_entry();
+    assert_eq!(details_shown().details_entry(), Some(entry.as_bytes()));
+}
+
+#[test]
+fn append_to_the_shown_entry_keeps_the_details_scroll_and_adds_its_lines() {
+    let first = first_details_entry();
+    let mut app = followed(Preset::Logback, &first);
+    app.apply(Action::Confirm);
+    app.fit_details(2, 10);
+    let app = applied(app, &[Action::CycleFocus, Action::Down]);
+    let longer = first + "\tat java.lang.Thread.run(Thread.java:1583)\n";
+    let app = grown(app, &longer);
+    assert_eq!(app.details_scroll(), 1);
+    assert_eq!(app.details_entry(), Some(longer.as_bytes()));
 }

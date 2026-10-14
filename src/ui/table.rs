@@ -374,7 +374,7 @@ fn highlights(
 }
 
 /// `bytes` as text that is safe to show.
-fn text(bytes: &[u8]) -> String {
+pub(super) fn text(bytes: &[u8]) -> String {
     printable(&source::display(bytes)).into_owned()
 }
 
@@ -441,7 +441,7 @@ fn skip_columns(text: &str, columns: usize) -> &str {
 
 /// `text` cut into lines of at most `width` columns, at least one. A character wider
 /// than `width` gets a line of its own.
-fn wrap(text: &str, width: usize) -> Vec<&str> {
+pub(super) fn wrap(text: &str, width: usize) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut used = 0;

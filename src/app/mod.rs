@@ -52,6 +52,8 @@ pub enum Action {
     /// Shows the message column 8 columns further right.
     ScrollRight,
     ToggleThread,
+    /// Moves the [focus](App::focus) to the next pane that is shown.
+    CycleFocus,
     /// Shows or hides the gutter of file line numbers.
     ToggleLineNumbers,
     ToggleWrap,
@@ -91,7 +93,8 @@ pub enum Action {
     NextMatch,
     /// Selects the next matching entry against the direction of the search.
     PreviousMatch,
-    /// Applies what the open panel edits and closes it.
+    /// Applies what the open panel edits and closes it. With no panel open, opens
+    /// the details pane ([`App::shows_details`]), or closes it.
     Confirm,
     /// Closes the open panel without applying its edits.
     Cancel,
@@ -109,7 +112,7 @@ pub enum Action {
 /// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
 /// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
 /// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
-/// and previous match, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
+/// and previous match, `Tab` cycles the focus, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys
 /// repeat.
@@ -149,6 +152,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('?'), KeyModifiers::NONE) => Action::SearchBackward,
         (KeyCode::Char('n'), KeyModifiers::NONE) => Action::NextMatch,
         (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
+        (KeyCode::Tab, KeyModifiers::NONE) => Action::CycleFocus,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
@@ -195,6 +199,31 @@ fn typed(key: KeyEvent) -> Option<Typed> {
         _ => return None,
     };
     Some(typed)
+}
+
+/// The pane that takes the moves `Up`, `Down`, `PageUp` and `PageDown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Table,
+    /// The details pane ([`App::shows_details`]).
+    Details,
+}
+
+/// The scroll of the details pane and what it was last told about its size.
+#[derive(Debug, Clone, Copy, Default)]
+struct Details {
+    /// Where the shown entry starts in the file.
+    entry: Option<usize>,
+    scroll: usize,
+    height: usize,
+    lines: usize,
+}
+
+impl Details {
+    fn max_scroll(&self) -> usize {
+        self.lines.saturating_sub(self.height)
+    }
 }
 
 /// The level panel while it is open: the level filter as edited so far, not applied
@@ -770,6 +799,9 @@ pub struct App {
     shows_thread: bool,
     shows_line_numbers: bool,
     wraps: bool,
+    shows_details: bool,
+    focus: Focus,
+    details: Details,
     panel: Option<Panel>,
     notice: Option<&'static str>,
     quit: bool,
@@ -854,6 +886,9 @@ impl App {
             unrecognized: picked.is_none(),
             viewport: Viewport::new(0, 0),
             scroll: 0,
+            shows_details: false,
+            focus: Focus::Table,
+            details: Details::default(),
             shows_thread: false,
             shows_line_numbers: true,
             wraps: false,
@@ -1292,6 +1327,88 @@ impl App {
             .any(|line| search.matcher.is_match(&strip_ansi(line)))
     }
 
+    /// Whether the details pane is shown: the selected row's entry in full, below the
+    /// rows. [`Action::Confirm`] with no panel open shows it and hides it again.
+    pub fn shows_details(&self) -> bool {
+        self.shows_details
+    }
+
+    /// The pane that takes the moves. [`Action::CycleFocus`] moves it from the table
+    /// to the details pane and back while that is shown, and keeps it on the table
+    /// while it isn't; hiding the details pane gives it back to the table.
+    ///
+    /// With the focus on the details pane, `Up` and `Down` scroll it by a line and
+    /// `PageUp` and `PageDown` by its height (see [`fit_details`](Self::fit_details)),
+    /// stopping at its first and last lines; they neither move the selection nor stop
+    /// following. Every other action works on the table as usual.
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// How many lines the details pane is scrolled down. It starts at 0 for each
+    /// entry selected: moving the selection to another entry scrolls it back to the
+    /// top, while moving between the lines of the same entry, or the entry being read
+    /// again after an append, keeps it.
+    pub fn details_scroll(&self) -> usize {
+        self.details.scroll
+    }
+
+    /// Sets how many screen lines the details pane shows, `height`, and how many the
+    /// selected entry takes in it, `lines`. Scrolls the pane back so that it goes no
+    /// further than its last line at the bottom.
+    pub fn fit_details(&mut self, height: usize, lines: usize) {
+        self.track_details_entry();
+        self.details.height = height;
+        self.details.lines = lines;
+        self.details.scroll = self.details.scroll.min(self.details.max_scroll());
+    }
+
+    /// The selected row's entry, every line of it as in the file whether folded or
+    /// not, line endings included. `None` with no row selected or with the row that
+    /// marks a truncation selected.
+    pub fn details_entry(&self) -> Option<&[u8]> {
+        let record = self.selected_record()?;
+        Some(&self.source.bytes()[file_range(&record)])
+    }
+
+    fn selected_record(&self) -> Option<Record> {
+        let row = self.fold_row(self.viewport.selected()?)?;
+        let (entry, _) = self.shown_folds().line_at(row);
+        Some(self.shown_record(entry))
+    }
+
+    /// Scrolls the details back to the top when the selection moved to another entry.
+    fn track_details_entry(&mut self) {
+        let start = self
+            .selected_record()
+            .map(|record| file_range(&record).start);
+        if start != self.details.entry {
+            self.details = Details {
+                entry: start,
+                scroll: 0,
+                ..self.details
+            };
+        }
+    }
+
+    fn toggle_details(&mut self) {
+        self.shows_details = !self.shows_details;
+        self.focus = Focus::Table;
+        self.details = Details::default();
+    }
+
+    fn scroll_details(&mut self, action: Action) {
+        let Details { height, scroll, .. } = self.details;
+        let scroll = match action {
+            Action::Up => scroll.saturating_sub(1),
+            Action::Down => scroll + 1,
+            Action::PageUp => scroll.saturating_sub(height),
+            Action::PageDown => scroll + height,
+            _ => scroll,
+        };
+        self.details.scroll = scroll.min(self.details.max_scroll());
+    }
+
     /// Whether long messages wrap onto the following screen lines instead of being
     /// cut at the right edge.
     pub fn wraps(&self) -> bool {
@@ -1317,9 +1434,24 @@ impl App {
     /// When the selected line gets folded away, its entry's first line takes its
     /// place.
     pub fn apply(&mut self, action: Action) {
+        self.dispatch(action);
+        if self.shows_details {
+            self.track_details_entry();
+        }
+    }
+
+    fn dispatch(&mut self, action: Action) {
         self.pending_step = None;
         if let Some(panel) = self.panel.take() {
             self.apply_in_panel(panel, action);
+            return;
+        }
+        let moves = matches!(
+            action,
+            Action::Up | Action::Down | Action::PageUp | Action::PageDown
+        );
+        if moves && self.focus == Focus::Details {
+            self.scroll_details(action);
             return;
         }
         if matches!(
@@ -1346,6 +1478,13 @@ impl App {
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
+            Action::CycleFocus if self.shows_details => {
+                self.focus = match self.focus {
+                    Focus::Table => Focus::Details,
+                    Focus::Details => Focus::Table,
+                };
+            }
+            Action::CycleFocus => {}
             Action::ToggleLineNumbers => self.shows_line_numbers = !self.shows_line_numbers,
             Action::ToggleWrap => self.wraps = !self.wraps,
             Action::CyclePreset => self.cycle_preset(),
@@ -1390,7 +1529,8 @@ impl App {
             Action::SearchBackward => self.open_search(true),
             Action::NextMatch => self.step_search(false),
             Action::PreviousMatch => self.step_search(true),
-            Action::Confirm | Action::Cancel => {}
+            Action::Confirm => self.toggle_details(),
+            Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
     }
