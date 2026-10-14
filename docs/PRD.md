@@ -77,7 +77,7 @@ Target: Java developers, DevOps/SRE, support engineers. Open source project.
 - `cargo llvm-cov --fail-under-lines 80` (line coverage of the library crate)
 - A final aggregate job, **`ci-required`**, fails if any check job failed. This gives branch protection one stable check name to require, even if the check jobs are later split or extended.
 
-A separate **nightly** workflow runs the full `cargo mutants` suite and uploads the report as an artifact. It does not gate merges; per-change mutation runs happen locally before a change is pushed (§14.1).
+Mutation testing doesn't run in CI: on a hosted runner the full suite takes hours of paid minutes. It runs locally in the dev container before a change is pushed (§14.1).
 
 **Package job** (only `develop` and `main`; `needs: ci-required`, so it never runs on red tests):
 - Target: `x86_64-unknown-linux-musl`. The built binary is smoke-tested with `--version`.
@@ -355,7 +355,7 @@ default_class_excludes = []   # e.g. ["org.hibernate.SQL"]
 - **Integration tests** in `tests/`: fixture logs per preset (synthetic, including stack traces, midnight rollover and ANSI codes) and rotation scenarios (rename, copytruncate, delete+recreate).
 - **UI** is tested by rendering into ratatui's `TestBackend` and comparing against inline `insta` snapshots written by hand as the expected screen. App state and key handling are tested without rendering.
 - **Property tests** (`proptest`) for parsers, class abbreviation and the filter engine, e.g. "never panics on arbitrary bytes", "engine result equals a naive filter".
-- **Mutation testing** (`cargo mutants`): no surviving mutants in changed code before a change is pushed; equivalent mutants are excluded explicitly with a reason. Full run nightly.
+- **Mutation testing** (`cargo mutants`): no surviving mutants in changed code before a change is pushed; equivalent mutants are excluded explicitly with a reason. The full run is started by hand, locally.
 - **Coverage:** at least 80% line coverage, enforced in CI.
 - **Benchmarks:** `criterion` on a generated 2 GB synthetic log, run manually to verify §13; not part of CI.
 

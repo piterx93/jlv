@@ -4,7 +4,8 @@
 #   scripts/check origin/develop  mutation-test everything the branch changes
 #
 # Mutation testing covers edits to tracked files and staged new files, so new
-# Rust files must be staged first. The full mutants run happens nightly in CI.
+# Rust files must be staged first. CI runs no mutants, so this is the only place they run;
+# for all of them: scripts/dev cargo mutants --jobs 4
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
