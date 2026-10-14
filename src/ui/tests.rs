@@ -8,7 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
@@ -18,8 +18,8 @@ use crate::format::Preset;
 use crate::matcher::{self, Matcher};
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
-    hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_filter,
-    wait_for_index, wait_for_index_within, wait_for_search,
+    hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
+    wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -2583,4 +2583,77 @@ fn details_pane_ends_an_entry_longer_than_its_cap_with_an_ellipsis() {
 fn details_pane_shows_an_entry_as_long_as_its_cap_whole() {
     let last = last_details_line(super::details::DETAILS_CAP);
     assert!(last.ends_with('x'), "{last}");
+}
+
+// --- histogram ---
+
+fn spike() -> App {
+    app_in(Preset::Logback, spike_log().as_bytes())
+}
+
+/// The keys that show the histogram, focus it and select its third bucket.
+fn third_bucket_keys() -> [KeyEvent; 4] {
+    [
+        char_key('H'),
+        key(KeyCode::Tab),
+        key(KeyCode::Right),
+        key(KeyCode::Right),
+    ]
+}
+
+#[test]
+fn histogram_row_shows_a_spike_of_errors_under_the_header() {
+    assert_snapshot!(lines_after(&mut spike(), &[char_key('H')], 1..=2), @r"
+      ▁      ▂  █▅    ▁                                                     max 9/5m
+    ▶10:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn histogram_without_warnings_or_errors_is_blank_but_for_its_scale() {
+    let log = concat!(
+        "2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
+        "2026-10-07 12:00:01.000 [main] INFO  com.example.App - Working\n",
+        "2026-10-07 12:00:02.000 [main] INFO  com.example.App - Done\n",
+    );
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[char_key('H')], 1..=2), @r"
+                                                                            max 0/1s
+    ▶12:00:00.123 INFO  com.example.App          Started
+    ");
+}
+
+#[test]
+fn focused_histogram_names_the_count_and_start_of_the_selected_bucket() {
+    assert_snapshot!(lines_after(&mut spike(), &third_bucket_keys(), 1..=2), @r"
+      ▁      ▂  █▅    ▁                                                1 at 10:10:00
+    ▶10:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn focused_histogram_shows_the_selected_bucket_in_reverse_video() {
+    let terminal = terminal_after(&mut spike(), &third_bucket_keys());
+    let buffer = terminal.backend().buffer();
+    let reversed = |x: u16| buffer[(x, 1)].modifier.contains(Modifier::REVERSED);
+    assert_eq!(
+        [reversed(1), reversed(2), reversed(3)],
+        [false, true, false]
+    );
+}
+
+#[test]
+fn histogram_without_timestamps_is_hidden_with_a_notice() {
+    assert_snapshot!(lines_after(&mut hundred_lines(), &[char_key('H')], 0..=1), @r"
+    jlv ─ app.log ─ 5.1 KB ─ Raw ─ no entry has a timestamp
+    ▶12:00:00.001 [main] INFO  com.example.App - step 1
+    ");
+}
+
+#[test]
+fn too_small_terminal_shows_no_histogram() {
+    let mut app = spike();
+    app.apply(Action::ToggleHistogram);
+    let terminal = drawn(&mut app, 79, 24, Theme::Styled);
+    assert_eq!(row(&terminal, 1), TOO_SMALL);
 }

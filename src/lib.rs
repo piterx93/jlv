@@ -27,6 +27,7 @@ pub mod filter;
 pub mod fold;
 pub mod follow;
 pub mod format;
+pub mod histogram;
 pub mod index;
 pub mod matcher;
 pub mod source;

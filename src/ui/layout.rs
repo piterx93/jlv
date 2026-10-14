@@ -13,6 +13,7 @@ const MIN_PANE: u16 = 5;
 pub(super) struct Screen {
     pub header: Rect,
     pub filters: Option<Rect>,
+    pub histogram: Option<Rect>,
     pub rows: Rect,
     pub details: Option<Rect>,
     pub footer: Rect,
@@ -21,9 +22,9 @@ pub(super) struct Screen {
 }
 
 impl Screen {
-    /// Splits `area`. The filter bar and the details pane need a screen of at least
-    /// the minimum size.
-    pub fn new(area: Rect, has_filters: bool, has_details: bool) -> Self {
+    /// Splits `area`. The filter bar, the histogram row and the details pane need a
+    /// screen of at least the minimum size.
+    pub fn new(area: Rect, has_filters: bool, has_histogram: bool, has_details: bool) -> Self {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
@@ -35,6 +36,13 @@ impl Screen {
             let [bar, body] =
                 Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
             (Some(bar), body)
+        } else {
+            (None, body)
+        };
+        let (histogram, body) = if has_histogram && fits {
+            let [row, body] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+            (Some(row), body)
         } else {
             (None, body)
         };
@@ -51,6 +59,7 @@ impl Screen {
         Screen {
             header,
             filters,
+            histogram,
             rows,
             details,
             footer,

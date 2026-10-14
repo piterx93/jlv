@@ -24,6 +24,7 @@ use crate::filter::{
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
+use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::matcher::{self, Matcher};
 use crate::source::{self, Origin, Source};
@@ -55,6 +56,8 @@ pub enum Action {
     ToggleThread,
     /// Moves the [focus](App::focus) to the next pane that is shown.
     CycleFocus,
+    /// Shows the histogram ([`App::shows_histogram`]) or hides it.
+    ToggleHistogram,
     /// Shows or hides the gutter of file line numbers.
     ToggleLineNumbers,
     ToggleWrap,
@@ -127,10 +130,10 @@ pub enum Action {
 /// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
 /// and previous match, `]` and `[` the next and previous entry with an exception, `m`
 /// toggles a bookmark, `'` and `"` select the next and previous bookmark, `Tab`
-/// cycles the focus, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit.
-/// Characters ignore Shift (the character already says which case it is) but not
-/// Ctrl or Alt; other keys do nothing with any modifier. Key releases do nothing;
-/// held keys repeat.
+/// cycles the focus, `H` toggles the histogram, `Enter` confirms, `Esc` cancels and
+/// `q F10 Ctrl-c` quit. Characters ignore Shift (the character already says which
+/// case it is) but not Ctrl or Alt; other keys do nothing with any modifier. Key
+/// releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -145,6 +148,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Right, KeyModifiers::NONE) => Action::ScrollRight,
         (KeyCode::Char('F'), KeyModifiers::NONE) => Action::ToggleFollow,
         (KeyCode::Char('T'), KeyModifiers::NONE) => Action::ToggleThread,
+        (KeyCode::Char('H'), KeyModifiers::NONE) => Action::ToggleHistogram,
         (KeyCode::Char('#'), KeyModifiers::NONE) => Action::ToggleLineNumbers,
         (KeyCode::Char('w'), KeyModifiers::NONE) => Action::ToggleWrap,
         (KeyCode::Char('P'), KeyModifiers::NONE) => Action::CyclePreset,
@@ -228,6 +232,8 @@ pub enum Focus {
     Table,
     /// The details pane ([`App::shows_details`]).
     Details,
+    /// The histogram ([`App::shows_histogram`]).
+    Histogram,
 }
 
 /// The scroll of the details pane and what it was last told about its size.
@@ -762,6 +768,58 @@ impl Watch {
     }
 }
 
+/// The histogram's counts of the entries the rows come from, and what was worked out
+/// from them.
+#[derive(Debug, Default)]
+struct HistogramState {
+    counter: Counter,
+    /// How many of the entries (the filters' matches, or the index's entries without
+    /// filters) the counter took in.
+    fed: usize,
+    /// Bumped when `counter` changes, to tell when `cached` is stale.
+    version: u64,
+    cached: Option<CachedHistogram>,
+    bucket: usize,
+}
+
+#[derive(Debug)]
+struct CachedHistogram {
+    width: usize,
+    version: u64,
+    histogram: Option<Histogram>,
+}
+
+impl HistogramState {
+    /// Counts the entries again from the first, as those from `kept` on are gone or
+    /// changed.
+    fn invalidate_from(&mut self, kept: usize) {
+        if kept < self.fed {
+            self.reset();
+        }
+    }
+
+    /// Takes the entries from `from` on, which the index is about to read again, out
+    /// of the counter, as `records` has them still. With `filter`, `from` is an index
+    /// entry and the counted ones are its matches.
+    fn uncount(&mut self, filter: Option<&Filter>, records: &[Record], from: usize) {
+        let kept = filter.map_or(from, |filter| filter.matches_before(from));
+        for i in kept..self.fed {
+            let record = counted_record(filter, records, i);
+            if let Some((at, level)) = record.and_then(|r| Some((r.timestamp()?, r.level()))) {
+                self.counter.remove(at, level);
+            }
+        }
+        self.fed = self.fed.min(kept);
+        self.version += 1;
+    }
+
+    fn reset(&mut self) {
+        self.counter = Counter::default();
+        self.fed = 0;
+        self.version += 1;
+    }
+}
+
 /// A log file being viewed.
 #[derive(Debug)]
 pub struct App {
@@ -822,8 +880,10 @@ pub struct App {
     shows_line_numbers: bool,
     wraps: bool,
     shows_details: bool,
+    shows_histogram: bool,
     focus: Focus,
     details: Details,
+    histogram: HistogramState,
     panel: Option<Panel>,
     notice: Option<&'static str>,
     quit: bool,
@@ -910,8 +970,10 @@ impl App {
             viewport: Viewport::new(0, 0),
             scroll: 0,
             shows_details: false,
+            shows_histogram: false,
             focus: Focus::Table,
             details: Details::default(),
+            histogram: HistogramState::default(),
             shows_thread: false,
             shows_line_numbers: true,
             wraps: false,
@@ -1139,9 +1201,13 @@ impl App {
 
     /// Whether the app has more to take in at the next [`poll_index`](Self::poll_index)
     /// without anything happening on screen: the index isn't complete, a watcher may
-    /// report changes to the file, or the filters' results are still coming in.
+    /// report changes to the file, or the filters' results are still coming in, or the histogram shown is still counting them.
     pub(crate) fn expects_updates(&self) -> bool {
-        !self.progress.is_complete() || self.watch.is_some() || self.filtering() || self.searching()
+        !self.progress.is_complete()
+            || self.watch.is_some()
+            || self.filtering()
+            || self.searching()
+            || self.histogram_behind()
     }
 
     /// Whether the preset was detected, found none fitting and fell back to `Raw`.
@@ -1213,6 +1279,7 @@ impl App {
     /// index is complete and takes over, filtered.
     pub fn set_filters(&mut self, filters: Filters) {
         self.filters = filters;
+        self.histogram.reset();
         // The index shows as it is, which is cheaper than an engine passing every entry.
         if hides_nothing(&self.filters) {
             self.filter = None;
@@ -1375,14 +1442,25 @@ impl App {
         self.shows_details
     }
 
-    /// The pane that takes the moves. [`Action::CycleFocus`] moves it from the table
-    /// to the details pane and back while that is shown, and keeps it on the table
-    /// while it isn't; hiding the details pane gives it back to the table.
+    /// The pane that takes the moves. [`Action::CycleFocus`] moves it down the
+    /// screen to the next pane that is shown, from the last one back to the table:
+    /// table, histogram, details pane. The histogram only takes it while it is shown
+    /// and there is a histogram to show ([`histogram`](Self::histogram)). Hiding the
+    /// pane that has the focus gives it back to the table.
     ///
     /// With the focus on the details pane, `Up` and `Down` scroll it by a line and
     /// `PageUp` and `PageDown` by its height (see [`fit_details`](Self::fit_details)),
     /// stopping at its first and last lines; they neither move the selection nor stop
-    /// following. Every other action works on the table as usual.
+    /// following.
+    ///
+    /// With the focus on the histogram, [`Action::ScrollLeft`] and
+    /// [`Action::ScrollRight`] select the bucket before and after the selected one
+    /// ([`histogram_bucket`](Self::histogram_bucket)) instead of scrolling the
+    /// messages, and [`Action::Confirm`] sets the time filter to what the selected
+    /// bucket covers instead of showing the details pane (see
+    /// [`histogram_bucket`](Self::histogram_bucket)).
+    ///
+    /// Every other action works on the table as usual.
     pub fn focus(&self) -> Focus {
         self.focus
     }
@@ -1433,6 +1511,105 @@ impl App {
         }
     }
 
+    /// Takes the entries the rows come from that the counter hasn't seen into it, for
+    /// at most [`CATCH_UP`] so that a frame never waits on a big file.
+    fn feed_histogram(&mut self) {
+        let deadline = Instant::now() + CATCH_UP;
+        let index = read(&self.index);
+        let filter = self.filter.as_ref();
+        let available = histogram_sources(filter, &index.records);
+        let state = &mut self.histogram;
+        let before = state.fed;
+        while state.fed < available && Instant::now() < deadline {
+            let end = (state.fed + FILTER_CHUNK).min(available);
+            for i in state.fed..end {
+                let record = counted_record(filter, &index.records, i);
+                if let Some(at) = record.and_then(Record::timestamp) {
+                    state.counter.add(at, record.and_then(Record::level));
+                }
+            }
+            state.fed = end;
+        }
+        if state.fed > before {
+            state.version += 1;
+        }
+    }
+
+    /// Whether the histogram is shown and has entries left to count.
+    fn histogram_behind(&self) -> bool {
+        let available = histogram_sources(self.filter.as_ref(), &read(&self.index).records);
+        self.shows_histogram && self.histogram.fed < available
+    }
+
+    fn toggle_histogram(&mut self) {
+        self.shows_histogram = !self.shows_histogram;
+        if self.focus == Focus::Histogram {
+            self.focus = Focus::Table;
+        }
+        if self.shows_histogram && !self.has_histogram() && !self.histogram_behind() {
+            self.notice = Some("no entry has a timestamp");
+        }
+    }
+
+    fn has_histogram(&mut self) -> bool {
+        self.feed_histogram();
+        !self.histogram.counter.is_empty()
+    }
+
+    fn cycle_focus(&mut self) {
+        let histogram = self.shows_histogram && self.has_histogram();
+        let panes = [
+            (Focus::Table, true),
+            (Focus::Histogram, histogram),
+            (Focus::Details, self.shows_details),
+        ];
+        let shown = panes
+            .iter()
+            .filter(|(_, shown)| *shown)
+            .map(|(pane, _)| *pane);
+        let mut cycle = shown
+            .clone()
+            .chain(shown)
+            .skip_while(|&pane| pane != self.focus);
+        self.focus = cycle.nth(1).unwrap_or(Focus::Table);
+    }
+
+    fn act_on_histogram(&mut self, action: Action) {
+        let buckets = self.histogram_buckets();
+        let bucket = self.histogram.bucket;
+        match action {
+            Action::ScrollLeft => self.histogram.bucket = bucket.saturating_sub(1),
+            Action::ScrollRight => {
+                self.histogram.bucket = (bucket + 1).min(buckets.saturating_sub(1));
+            }
+            _ => self.filter_to_bucket(bucket),
+        }
+    }
+
+    fn histogram_buckets(&self) -> usize {
+        let cached = self.histogram.cached.as_ref();
+        cached
+            .and_then(|c| c.histogram.as_ref())
+            .map_or(0, |h| h.counts.len())
+    }
+
+    /// Sets the time filter to what bucket `bucket` of the last histogram covers and
+    /// selects the first bucket again.
+    fn filter_to_bucket(&mut self, bucket: usize) {
+        let cached = self.histogram.cached.as_ref();
+        let Some(histogram) = cached.and_then(|c| c.histogram.as_ref()) else {
+            return;
+        };
+        let range = histogram.range(bucket);
+        let end = range.end.unwrap_or(Timestamp::MAX);
+        let spec = TimeSpec::covering(range.start, end, &self.settings.zone);
+        self.histogram.bucket = 0;
+        self.set_time_filter(Some(TimeFilter {
+            spec,
+            base: Base::File,
+        }));
+    }
+
     fn toggle_details(&mut self) {
         self.shows_details = !self.shows_details;
         self.focus = Focus::Table;
@@ -1449,6 +1626,59 @@ impl App {
             _ => scroll,
         };
         self.details.scroll = scroll.min(self.details.max_scroll());
+    }
+
+    /// Whether the histogram row is shown, under the header and the filter bar.
+    /// [`Action::ToggleHistogram`] shows and hides it; it is hidden at first. Showing
+    /// it while there is no histogram ([`histogram`](Self::histogram)) sets the
+    /// [notice](Self::notice) `no entry has a timestamp`, and the row stays hidden until
+    /// there is one.
+    pub fn shows_histogram(&self) -> bool {
+        self.shows_histogram
+    }
+
+    /// The histogram ([`crate::histogram`]) of the index's entries that pass the
+    /// filters, in at most `width` buckets aligned on the clock of the app's zone;
+    /// `None` while none of them has a timestamp.
+    ///
+    /// The entries are counted as they come in, the index's or the filters' results
+    /// at each [`poll_index`](Self::poll_index), and counted again from the first only
+    /// when those results start over. The buckets are worked out again only when what
+    /// is counted or `width` changed since the last call, so that calling this for
+    /// every frame costs next to nothing. The selected bucket, and the time filter it
+    /// sets, are those of the histogram this last returned.
+    pub fn histogram(&mut self, width: usize) -> Option<&Histogram> {
+        self.feed_histogram();
+        let state = &mut self.histogram;
+        let stale = state
+            .cached
+            .as_ref()
+            .is_none_or(|cached| cached.width != width || cached.version != state.version);
+        if stale {
+            let histogram = state.counter.histogram(width, &self.settings.zone);
+            let last = histogram.as_ref().map_or(0, |h| h.counts.len() - 1);
+            state.bucket = state.bucket.min(last);
+            state.cached = Some(CachedHistogram {
+                width,
+                version: state.version,
+                histogram,
+            });
+        }
+        let found = state.cached.as_ref().is_some_and(|c| c.histogram.is_some());
+        if !found && self.focus == Focus::Histogram {
+            self.focus = Focus::Table;
+        }
+        self.histogram.cached.as_ref()?.histogram.as_ref()
+    }
+
+    /// The selected bucket of the histogram, 0 at first. With the focus on the
+    /// histogram, [`Action::ScrollLeft`] and [`Action::ScrollRight`] move it by one,
+    /// stopping at the first and the last bucket, and [`Action::Confirm`] sets the time
+    /// filter ([`set_time_filter`](Self::set_time_filter)) to the range the bucket
+    /// covers ([`Histogram::range`], [`TimeSpec::covering`]) and selects the first
+    /// bucket again. Before the first histogram they do nothing.
+    pub fn histogram_bucket(&self) -> usize {
+        self.histogram.bucket
     }
 
     /// Whether long messages wrap onto the following screen lines instead of being
@@ -1496,6 +1726,14 @@ impl App {
             self.scroll_details(action);
             return;
         }
+        let histogram_action = matches!(
+            action,
+            Action::ScrollLeft | Action::ScrollRight | Action::Confirm
+        );
+        if histogram_action && self.focus == Focus::Histogram {
+            self.act_on_histogram(action);
+            return;
+        }
         if matches!(
             action,
             Action::Up | Action::PageUp | Action::HalfPageUp | Action::Top
@@ -1520,13 +1758,8 @@ impl App {
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
-            Action::CycleFocus if self.shows_details => {
-                self.focus = match self.focus {
-                    Focus::Table => Focus::Details,
-                    Focus::Details => Focus::Table,
-                };
-            }
-            Action::CycleFocus => {}
+            Action::CycleFocus => self.cycle_focus(),
+            Action::ToggleHistogram => self.toggle_histogram(),
             Action::ToggleLineNumbers => self.shows_line_numbers = !self.shows_line_numbers,
             Action::ToggleWrap => self.wraps = !self.wraps,
             Action::CyclePreset => self.cycle_preset(),
@@ -1690,6 +1923,7 @@ impl App {
         // The engine reads the entries in the preset it started with.
         if self.filter.is_some() {
             self.start_filter();
+            self.histogram.reset();
         }
         self.start_search();
         self.read_tail();
@@ -1926,11 +2160,14 @@ impl App {
             Rerun::after(&slide, matches, &index.records, from).apply(matches, &self.filters);
         }
         let Some(filter) = &mut self.filter else {
+            self.histogram.invalidate_from(from);
             return;
         };
         let rerun = Rerun::after(&slide, &filter.engine, &index.records, from);
         drop(index);
         filter.rerun(&rerun, &self.filters);
+        self.histogram
+            .invalidate_from(filter.engine.filtered().entries.len());
         let total = read(&self.index).records.len();
         if total.saturating_sub(filter.engine.filtered().evaluated) <= FILTER_CHUNK {
             filter.catch_up(&self.folds, total, Instant::now() + CATCH_UP);
@@ -2036,6 +2273,8 @@ impl App {
             &index.records[appended_from(known)..],
             Count::Remove,
         );
+        self.histogram
+            .uncount(self.filter.as_ref(), &index.records, appended_from(known));
         index::append(&mut index.records, self.source.bytes(), &self.settings);
         count_levels(
             &mut self.level_counts,
@@ -2394,6 +2633,26 @@ fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usi
         if was.is_some() && unfolded(folds, entry) != was {
             folds.toggle(entry);
         }
+    }
+}
+
+/// How many entries the histogram counts: the filters' matches, or the index's
+/// entries without filters.
+fn histogram_sources(filter: Option<&Filter>, records: &[Record]) -> usize {
+    filter.map_or(records.len(), |filter| {
+        filter.engine.filtered().entries.len()
+    })
+}
+
+/// The record of the histogram's `i`th source entry, see [`histogram_sources`].
+fn counted_record<'a>(
+    filter: Option<&Filter>,
+    records: &'a [Record],
+    i: usize,
+) -> Option<&'a Record> {
+    match filter {
+        None => records.get(i),
+        Some(filter) => records.get(*filter.engine.filtered().entries.get(i)? as usize),
     }
 }
 

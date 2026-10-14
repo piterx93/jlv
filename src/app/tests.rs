@@ -3791,3 +3791,290 @@ fn a_bookmark_set_before_the_index_is_complete_stays_on_its_entry() {
     wait_for_index(&mut app);
     assert_eq!(bookmarks(&app), [4]);
 }
+
+// --- histogram ---
+
+/// The width the histogram is worked out for.
+const HISTOGRAM_WIDTH: usize = 60;
+
+/// An INFO, a WARN, an ERROR of another class and a FATAL entry, a second apart.
+const HISTOGRAM_LOG: &str = concat!(
+    "2026-10-07 10:00:00.000 [main] INFO  com.example.App - Started\n",
+    "2026-10-07 10:00:01.000 [main] WARN  com.example.App - Slow\n",
+    "2026-10-07 10:00:02.000 [main] ERROR com.example.Pay - Failed\n",
+    "2026-10-07 10:00:03.000 [main] FATAL com.example.App - Down\n",
+);
+
+fn histogram_app() -> App {
+    let mut app = app_in(Preset::Logback, HISTOGRAM_LOG.as_bytes());
+    app.resize(10);
+    app
+}
+
+fn histogram_counts(app: &mut App) -> Vec<u32> {
+    app.histogram(HISTOGRAM_WIDTH).unwrap().counts.clone()
+}
+
+/// `app` with the histogram shown and worked out.
+fn with_histogram(mut app: App) -> App {
+    app.apply(Action::ToggleHistogram);
+    app.histogram(HISTOGRAM_WIDTH);
+    app
+}
+
+/// [`histogram_app`] with the histogram shown and the focus on it.
+fn histogram_focused() -> App {
+    applied(with_histogram(histogram_app()), &[Action::CycleFocus])
+}
+
+#[test]
+fn capital_h_toggles_the_histogram() {
+    assert_eq!(action(char_key('H')), Some(Action::ToggleHistogram));
+}
+
+#[test]
+fn histogram_is_hidden_at_first() {
+    assert!(!histogram_app().shows_histogram());
+}
+
+#[test]
+fn toggle_histogram_shows_and_hides_it() {
+    let mut app = applied(histogram_app(), &[Action::ToggleHistogram]);
+    assert!(app.shows_histogram());
+    app.apply(Action::ToggleHistogram);
+    assert!(!app.shows_histogram());
+}
+
+#[test]
+fn showing_the_histogram_without_timestamps_says_so() {
+    let app = applied(hundred_lines(), &[Action::ToggleHistogram]);
+    assert_eq!(app.notice(), Some("no entry has a timestamp"));
+}
+
+#[test]
+fn histogram_counts_only_the_entries_the_filters_show() {
+    let mut app = histogram_app();
+    assert_eq!(histogram_counts(&mut app), [0, 1, 1, 1]);
+    let classes = Classes::parse(["!com.example.Pay"]).unwrap();
+    let mut app = filtered(
+        app,
+        Filters {
+            classes,
+            ..Filters::default()
+        },
+    );
+    assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1]);
+}
+
+/// An ERROR two seconds after the last entry of [`HISTOGRAM_LOG`].
+const LATER_ERROR: &str = "2026-10-07 10:00:05.000 [main] ERROR com.example.App - Again\n";
+
+/// [`HISTOGRAM_LOG`], followed, with the histogram shown and fed, grown by a line that
+/// continues its last entry and by [`LATER_ERROR`].
+fn histogram_grown(app: App) -> App {
+    let mut app = with_histogram(app);
+    assert!(app.histogram(HISTOGRAM_WIDTH).is_some());
+    grown(app, &[HISTOGRAM_LOG, EXCEPTION, LATER_ERROR].concat())
+}
+
+#[test]
+fn histogram_counts_appended_entries_once() {
+    let mut app = histogram_grown(followed(Preset::Logback, HISTOGRAM_LOG));
+    assert_eq!(histogram_counts(&mut app), [0, 1, 1, 1, 0, 1]);
+}
+
+#[test]
+fn filtered_histogram_counts_appended_entries_once() {
+    let classes = Classes::parse(["!com.example.Pay"]).unwrap();
+    let filters = Filters {
+        classes,
+        ..Filters::default()
+    };
+    let app = filtered(followed(Preset::Logback, HISTOGRAM_LOG), filters);
+    let mut app = histogram_grown(app);
+    wait_for_filter(&mut app);
+    assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1, 0, 1]);
+}
+
+#[test]
+fn histogram_counts_only_what_a_truncated_file_holds_now() {
+    let app = with_histogram(followed(Preset::Logback, HISTOGRAM_LOG));
+    let mut app = truncated(app, LATER_ERROR);
+    assert_eq!(histogram_counts(&mut app), [1]);
+}
+
+#[test]
+fn histogram_counts_only_what_a_replacing_file_holds() {
+    let app = with_histogram(followed(Preset::Logback, HISTOGRAM_LOG));
+    let replacing = test_support::source(LATER_ERROR.as_bytes());
+    let mut app = changed(app, FileChange::Replaced(replacing));
+    assert_eq!(histogram_counts(&mut app), [1]);
+}
+
+#[test]
+fn histogram_counts_each_entry_once_across_preset_cycles() {
+    let classes = Classes::parse(["!com.example.Pay"]).unwrap();
+    let filters = Filters {
+        classes,
+        ..Filters::default()
+    };
+    let mut app = with_histogram(filtered(histogram_app(), filters));
+    for _ in Preset::ALL {
+        app.histogram(HISTOGRAM_WIDTH);
+        app.apply(Action::CyclePreset);
+        wait_for_filter(&mut app);
+    }
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1]);
+}
+
+#[test]
+fn cycle_focus_goes_down_the_shown_panes_and_back_to_the_table() {
+    let mut app = applied(with_histogram(histogram_app()), &[Action::Confirm]);
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        app.apply(Action::CycleFocus);
+        seen.push(app.focus());
+    }
+    assert_eq!(seen, [Focus::Histogram, Focus::Details, Focus::Table]);
+}
+
+#[test]
+fn cycle_focus_skips_the_histogram_without_timestamps() {
+    let app = applied(with_histogram(hundred_lines()), &[Action::CycleFocus]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn hiding_the_histogram_gives_the_focus_back_to_the_table() {
+    let app = applied(histogram_focused(), &[Action::ToggleHistogram]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn right_with_the_histogram_focused_selects_the_next_bucket_instead_of_scrolling() {
+    let app = applied(histogram_focused(), &[Action::ScrollRight]);
+    assert_eq!(app.histogram_bucket(), 1);
+    assert_eq!(app.scroll(), 0);
+}
+
+#[test]
+fn left_with_the_histogram_focused_selects_the_bucket_before() {
+    let app = applied(
+        histogram_focused(),
+        &[Action::ScrollRight, Action::ScrollRight, Action::ScrollLeft],
+    );
+    assert_eq!(app.histogram_bucket(), 1);
+}
+
+#[test]
+fn bucket_selection_stops_at_the_first_and_the_last_bucket() {
+    let app = applied(histogram_focused(), &[Action::ScrollLeft]);
+    assert_eq!(app.histogram_bucket(), 0);
+    let app = applied(app, &[Action::ScrollRight; 5]);
+    assert_eq!(app.histogram_bucket(), 3);
+}
+
+#[test]
+fn down_with_the_histogram_focused_moves_the_selection() {
+    let app = applied(histogram_focused(), &[Action::Down]);
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn histogram_counts_the_filters_results_as_they_come_in() {
+    let mut app = with_histogram(histogram_app());
+    app.set_filters(Filters {
+        levels: Levels::only(&[Level::Warn, Level::Error]),
+        ..Filters::default()
+    });
+    // Before the first results.
+    app.histogram(HISTOGRAM_WIDTH);
+    wait_for_filter(&mut app);
+    assert_eq!(histogram_counts(&mut app), [1, 1]);
+}
+
+#[test]
+fn histogram_fits_a_new_width() {
+    let mut app = histogram_app();
+    app.histogram(HISTOGRAM_WIDTH);
+    // The four seconds share one 5 s bucket.
+    assert_eq!(app.histogram(1).unwrap().counts, [3]);
+}
+
+#[test]
+fn a_shown_histogram_with_entries_left_to_count_expects_updates() {
+    let mut app = unindexed_app(Preset::Logback, HISTOGRAM_LOG.as_bytes());
+    app.apply(Action::ToggleHistogram);
+    wait_for_index(&mut app);
+    assert!(app.expects_updates());
+    app.histogram(HISTOGRAM_WIDTH);
+    assert!(!app.expects_updates());
+}
+
+#[test]
+fn showing_a_histogram_with_timestamps_sets_no_notice() {
+    let mut app = histogram_app();
+    app.key(char_key('H'));
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn the_selected_bucket_stays_within_a_narrower_histogram() {
+    let mut app = applied(histogram_focused(), &[Action::ScrollRight; 3]);
+    app.apply(Action::ToggleLevel(Level::Fatal));
+    wait_for_filter(&mut app);
+    assert_eq!(app.histogram(HISTOGRAM_WIDTH).unwrap().counts.len(), 3);
+    assert_eq!(app.histogram_bucket(), 2);
+}
+
+#[test]
+fn confirming_a_bucket_without_entries_gives_the_focus_back_to_the_table() {
+    let log = [HISTOGRAM_LOG, LATER_ERROR].concat();
+    let app = with_histogram(app_in(Preset::Logback, log.as_bytes()));
+    // The fifth bucket, 10:00:04, has no entry.
+    let mut app = applied(
+        app,
+        &[
+            Action::CycleFocus,
+            Action::ScrollRight,
+            Action::ScrollRight,
+            Action::ScrollRight,
+            Action::ScrollRight,
+            Action::Confirm,
+        ],
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(app.histogram(HISTOGRAM_WIDTH), None);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+/// [`histogram_focused`] after setting the time filter to the third bucket.
+fn third_bucket_confirmed() -> App {
+    applied(
+        histogram_focused(),
+        &[Action::ScrollRight, Action::ScrollRight, Action::Confirm],
+    )
+}
+
+#[test]
+fn confirm_with_the_histogram_focused_sets_the_time_filter_to_the_selected_bucket() {
+    let app = third_bucket_confirmed();
+    assert_eq!(
+        app.time_filter().map(ToString::to_string).as_deref(),
+        Some("2026-10-07 10:00:02..2026-10-07 10:00:02")
+    );
+    assert_eq!(
+        app.filters().time,
+        Some(TimeRange {
+            start: "2026-10-07T10:00:02Z".parse().unwrap(),
+            end: Some("2026-10-07T10:00:03Z".parse().unwrap()),
+        })
+    );
+    assert!(!app.shows_details());
+}
+
+#[test]
+fn confirming_a_bucket_selects_the_first_bucket_again() {
+    assert_eq!(third_bucket_confirmed().histogram_bucket(), 0);
+}

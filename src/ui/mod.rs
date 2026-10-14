@@ -19,6 +19,7 @@ use layout::Screen;
 
 mod abbrev;
 mod details;
+mod histogram;
 mod layout;
 mod table;
 
@@ -149,6 +150,20 @@ const TAB_STOP: usize = 4;
 /// [`App::details_scroll`] says, and tells the app its inner height and how many
 /// wrapped lines the entry takes ([`App::fit_details`]).
 ///
+/// While the app [shows the histogram](App::shows_histogram) and has one, the line
+/// below the filter bar, or below the header without one, is the histogram row, taken
+/// from the body. Its first columns, all but the last 20, show the histogram
+/// ([`App::histogram`] for that many columns), one column per bucket from the left:
+/// blank for a bucket without entries, otherwise one of `▁▂▃▄▅▆▇█` for its count in
+/// eighths of the largest count, rounded up, so that the largest gets `█` and every
+/// other bucket with an entry at least `▁`. Right-aligned at the end of the line is
+/// the largest count and the bucket size, as `max 9/5m` (sizes as `1s`, `10m`, `6h`,
+/// `1d`, and merged days as `37d`). While the histogram has the [focus](App::focus),
+/// the selected bucket ([`App::histogram_bucket`]) is in reverse video and the end of
+/// the line is its count and its start in the app's zone, as `1 at 10:10:00`, or as
+/// `1 at 2026-10-07` for buckets of a day or more. Below 80×24 there is no histogram
+/// row.
+///
 /// While the app has a search, the header has ` ─ match k/N` ([`App::match_count`])
 /// after the status and before the notice.
 ///
@@ -167,7 +182,13 @@ const TAB_STOP: usize = 4;
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
     let filters = filter_bar(app);
-    let screen = Screen::new(area, filters.is_some(), app.shows_details());
+    let histogram = histogram::row(app, area, theme);
+    let screen = Screen::new(
+        area,
+        filters.is_some(),
+        histogram.is_some(),
+        app.shows_details(),
+    );
     let Screen {
         header,
         rows: body,
@@ -218,6 +239,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let fits = screen.fits;
     if let (Some(bar), Some(filters)) = (screen.filters, filters) {
         frame.render_widget(Line::from(filters), bar);
+    }
+    if let (Some(area), Some(row)) = (screen.histogram, histogram) {
+        frame.render_widget(row, area);
     }
     if !fits {
         frame.render_widget(Line::from(TOO_SMALL), body);

@@ -266,6 +266,28 @@ impl TimeSpec {
         };
         filter.range(last, last, zone).start
     }
+
+    /// The dated range of whole seconds from `start` up to `end`, exclusive, as the
+    /// clock in `zone` reads them: `2026-10-07 10:10:00..2026-10-07 10:14:59` for five
+    /// minutes from 10:10. Parts of a second are dropped from both.
+    pub fn covering(start: Timestamp, end: Timestamp, zone: &TimeZone) -> TimeSpec {
+        let whole =
+            |at: Timestamp| zone.to_datetime(Timestamp::from_second(at.as_second()).unwrap_or(at));
+        let point = |at: DateTime| Point {
+            date: Some(at.date()),
+            time: at.time(),
+            seconds: true,
+        };
+        let start = whole(start);
+        // The range states its end as the last second it takes in.
+        let last = whole(end)
+            .checked_sub(SignedDuration::from_secs(1))
+            .unwrap_or(start);
+        TimeSpec(Spec::Range {
+            start: point(start),
+            end: Some(point(last.max(start))),
+        })
+    }
 }
 
 impl TimeFilter {
