@@ -2624,3 +2624,308 @@ fn level_counters_take_in_appended_entries() {
         counters(&[(Level::Info, 1), (Level::Warn, 1), (Level::Error, 1)])
     );
 }
+
+// --- jumps ---
+
+/// `app` after opening the prompt `opener` opens, typing `text` and pressing Enter.
+fn jumped(app: App, opener: char, text: &str) -> App {
+    let app = pressed(app, &[char_key(opener)]);
+    jump_prompt(&app);
+    let mut keys = typing(text);
+    keys.push(key(KeyCode::Enter));
+    pressed(app, &keys)
+}
+
+/// The text of the selected row of `app`.
+fn selected_row(app: &App) -> String {
+    app.line(app.viewport().selected().unwrap()).into_owned()
+}
+
+/// The open jump prompt of `app`; fails the test if it is closed.
+fn jump_prompt(app: &App) -> &JumpPrompt {
+    match app.panel() {
+        Some(Panel::Jump(prompt)) => prompt,
+        other => panic!("no jump prompt is open: {other:?}"),
+    }
+}
+
+/// [`STARTED`] on line 1, [`FAILED`] on 2 with its folded stack trace on 3 and 4,
+/// [`DONE`] on 5 with its folded stack trace on 6.
+fn traces() -> App {
+    let mut app = logback(&TWO_TRACES);
+    app.resize(10);
+    app
+}
+
+/// [`traces`] with `level` hidden and the filter's results in.
+fn traces_without(level: Level) -> App {
+    let mut app = applied(traces(), &[Action::ToggleLevel(level)]);
+    wait_for_filter(&mut app);
+    app
+}
+
+/// A Logback entry whose timestamp can't be read, an hour 99.
+const UNDATED: &str = "2026-10-07 99:00:00.000 [main] INFO  com.example.App - undated\n";
+
+#[test]
+fn colon_and_t_open_empty_line_and_time_prompts() {
+    for (opener, to, opens) in [
+        (':', Jump::Line, Action::LinePrompt),
+        ('t', Jump::Time, Action::TimePrompt),
+    ] {
+        assert_eq!(action(char_key(opener)), Some(opens));
+        let app = pressed(hundred_lines(), &[char_key(opener)]);
+        assert_eq!(
+            *jump_prompt(&app),
+            JumpPrompt {
+                to,
+                text: String::new(),
+                error: None,
+            }
+        );
+    }
+}
+
+#[test]
+fn jump_prompt_text_is_typed_and_deleted_not_acted_on() {
+    let mut keys = vec![char_key(':')];
+    keys.extend(typing("q1jG"));
+    keys.extend([key(KeyCode::Backspace); 5]);
+    keys.extend(typing("42"));
+    let app = pressed(hundred_lines(), &keys);
+    assert_eq!(jump_prompt(&app).text, "42");
+    assert!(!app.should_quit());
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert_eq!(app.filters().levels, Levels::default());
+}
+
+#[test]
+fn esc_closes_a_jump_prompt_without_jumping() {
+    let mut keys = vec![char_key(':')];
+    keys.extend(typing("50"));
+    keys.push(key(KeyCode::Esc));
+    let app = pressed(hundred_lines(), &keys);
+    assert_eq!(app.panel(), None);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn ctrl_c_quits_while_a_jump_prompt_is_open() {
+    let app = pressed(hundred_lines(), &[char_key('t')]);
+    jump_prompt(&app);
+    let app = pressed(app, &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn enter_on_a_blank_jump_prompt_closes_it_without_moving() {
+    let app = jumped(applied(hundred_lines(), &[Action::Down]), ':', " ");
+    assert_eq!(app.panel(), None);
+    assert_eq!(pos(&app), (0, Some(1)));
+}
+
+#[test]
+fn a_jump_stops_following() {
+    let mut app = twenty_lines_followed();
+    assert!(app.following());
+    app = jumped(app, ':', "3");
+    assert!(!app.following());
+    assert_eq!(app.viewport().selected(), Some(2));
+}
+
+#[test]
+fn a_jump_in_a_file_without_rows_does_nothing() {
+    for (opener, text) in [(':', "1"), ('t', "12:00")] {
+        let app = jumped(app(b""), opener, text);
+        assert_eq!(app.panel(), None);
+        assert_eq!(app.viewport().selected(), None);
+    }
+}
+
+#[test]
+fn line_jump_selects_the_entry_of_that_line() {
+    for line in ["5", " 5 "] {
+        let app = jumped(traces(), ':', line);
+        assert_eq!(app.viewport().selected(), Some(2), "{line:?}");
+        assert_eq!(selected_row(&app), DONE.trim_end(), "{line:?}");
+    }
+}
+
+#[test]
+fn line_jump_while_the_tail_is_shown_stays_and_says_so() {
+    let mut app = following_app(Preset::Logback, TWO_TRACES.concat().as_bytes());
+    app.resize(10);
+    let before = pos(&app);
+    let app = jumped(app, ':', "1");
+    assert_eq!(app.panel(), None);
+    assert_eq!(pos(&app), before);
+    assert!(app.following());
+    assert_eq!(
+        app.notice(),
+        Some("line numbers are not known until the file is indexed")
+    );
+}
+
+#[test]
+fn line_jump_into_a_folded_stack_trace_selects_its_entry_and_keeps_it_folded() {
+    let app = jumped(traces(), ':', "4");
+    assert_eq!(selected_row(&app), FAILED.trim_end());
+    assert_eq!(app.viewport().total(), 3);
+}
+
+#[test]
+fn line_jump_into_an_unfolded_stack_trace_selects_that_line() {
+    let app = applied(traces(), &[Action::Down, Action::ToggleFold, Action::Top]);
+    let app = jumped(app, ':', "4");
+    assert_eq!(app.viewport().selected(), Some(3));
+    assert_eq!(selected_row(&app), FRAME.trim_end());
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn line_zero_selects_the_first_row() {
+    let app = jumped(applied(traces(), &[Action::Bottom]), ':', "0");
+    assert_eq!(app.viewport().selected(), Some(0));
+}
+
+#[test]
+fn a_line_past_the_end_selects_the_last_row() {
+    for line in ["7", "99999999999999999999999"] {
+        let app = jumped(traces(), ':', line);
+        assert_eq!(app.viewport().selected(), Some(2), "{line}");
+    }
+}
+
+#[test]
+fn a_line_number_that_is_not_one_keeps_the_prompt_open_with_the_reason() {
+    for text in ["-1", "abc", "4.5"] {
+        let app = jumped(traces(), ':', text);
+        assert_eq!(
+            *jump_prompt(&app),
+            JumpPrompt {
+                to: Jump::Line,
+                text: text.to_string(),
+                error: Some(format!("'{text}' is not a line number")),
+            }
+        );
+        assert_eq!(pos(&app), (0, Some(0)), "{text}");
+    }
+}
+
+#[test]
+fn line_jump_into_an_entry_the_filters_hide_selects_the_next_entry_they_show() {
+    let app = jumped(traces_without(Level::Error), ':', "3");
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn line_jump_past_the_last_entry_the_filters_show_selects_it() {
+    for line in ["5", "99"] {
+        let app = jumped(traces_without(Level::Warn), ':', line);
+        assert_eq!(app.viewport().selected(), Some(1), "{line}");
+        assert_eq!(selected_row(&app), FAILED.trim_end(), "{line}");
+    }
+}
+
+#[test]
+fn time_jump_selects_the_first_entry_at_or_after_the_time() {
+    let times = [
+        "11:00:00.000",
+        "12:29:59.999",
+        "12:30:00.000",
+        "12:30:30.000",
+        "13:00:00.000",
+    ];
+    let app = applied(
+        app_in(Preset::Logback, log_at(&times).as_bytes()),
+        &[Action::Bottom],
+    );
+    let app = jumped(app, 't', "12:30");
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.viewport().selected(), Some(2));
+}
+
+#[test]
+fn a_time_without_a_date_is_on_the_date_of_the_last_entry() {
+    let log = [
+        on("2026-10-06", "23:00:00.000"),
+        on("2026-10-07", "01:00:00.000"),
+        on("2026-10-07", "12:00:00.000"),
+    ]
+    .concat();
+    let app = jumped(app_in(Preset::Logback, log.as_bytes()), 't', "00:30");
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn a_time_before_the_first_entry_selects_the_first_entry_with_a_timestamp() {
+    let log = [
+        "starting up\n".to_string(),
+        log_at(&["11:00:00.000", "12:00:00.000"]),
+    ]
+    .concat();
+    let app = applied(app_in(Preset::Logback, log.as_bytes()), &[Action::Bottom]);
+    let app = jumped(app, 't', "00:00");
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn a_time_after_the_last_entry_selects_the_last_row() {
+    let log = log_at(&["11:00:00.000", "12:00:00.000", "13:00:00.000"]);
+    let app = jumped(app_in(Preset::Logback, log.as_bytes()), 't', "23:00");
+    assert_eq!(app.viewport().selected(), Some(2));
+}
+
+#[test]
+fn an_entry_without_a_timestamp_counts_as_the_time_of_the_one_before_it() {
+    let log = [at("12:00:00.000"), UNDATED.to_string(), at("12:30:00.000")].concat();
+    let app = jumped(app_in(Preset::Logback, log.as_bytes()), 't', "12:10");
+    assert_eq!(selected_row(&app), at("12:30:00.000").trim_end());
+}
+
+#[test]
+fn time_jump_passes_over_entries_the_filters_hide() {
+    let error = "2026-10-07 12:40:00.000 [main] ERROR com.example.App - boom\n";
+    let log = [
+        at("11:00:00.000"),
+        at("12:30:00.000"),
+        error.to_string(),
+        at("13:00:00.000"),
+    ]
+    .concat();
+    let mut app = applied(
+        app_in(Preset::Logback, log.as_bytes()),
+        &[Action::ToggleLevel(Level::Error)],
+    );
+    wait_for_filter(&mut app);
+    let app = jumped(app, 't', "12:35");
+    assert_eq!(selected_row(&app), at("13:00:00.000").trim_end());
+}
+
+#[test]
+fn a_time_that_does_not_parse_keeps_the_prompt_open_with_the_reason() {
+    let app = jumped(hundred_lines(), 't', "soon");
+    assert_eq!(
+        jump_prompt(&app).error,
+        Some(TimeSpec::parse("soon").unwrap_err())
+    );
+}
+
+#[test]
+fn time_jump_in_a_log_without_timestamps_stays_and_says_so() {
+    let app = jumped(applied(hundred_lines(), &[Action::Down]), 't', "12:00");
+    assert_eq!(app.panel(), None);
+    assert_eq!(pos(&app), (0, Some(1)));
+    assert_eq!(app.notice(), Some("no entry has a timestamp"));
+}
+
+proptest! {
+    #[test]
+    fn any_text_in_a_jump_prompt_never_panics(
+        opener in prop::sample::select(vec![':', 't']),
+        text in prop_oneof![any::<String>(), "[0-9: .dhm-]{0,24}"],
+    ) {
+        let log = [at("12:00:00.000"), UNDATED.to_string(), at("12:30:00.000")].concat();
+        jumped(app_in(Preset::Logback, log.as_bytes()), opener, &text);
+    }
+}

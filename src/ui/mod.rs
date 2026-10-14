@@ -11,7 +11,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ClassPanel, LevelPanel, Panel, Prompt, TimePanel};
+use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::format::Level;
 use crate::source::Origin;
@@ -124,6 +124,10 @@ const TAB_STOP: usize = 4;
 /// Tab Ignore case  Enter Apply  Esc Cancel`, or the prompt's
 /// [error](crate::app::Prompt::error).
 ///
+/// While a jump prompt is open, the footer shows it in place of the key hints: `:`
+/// and the text typed for a line, `t ` and the text for a time, followed by ` ─ `
+/// and the prompt's [error](crate::app::JumpPrompt::error) while it has one.
+///
 /// While the app has a [notice](App::notice), the header ends with ` ─ ` and it.
 /// The level counters ([`App::level_counts`]) are right-aligned on the header line,
 /// FATAL to TRACE as `F:1 E:37 W:212 I:5000 D:12 T:3`, levels with no entries left
@@ -222,6 +226,14 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
                 render_text_prompt(frame, prompt, body);
             }
             panel_hints(prompt.error.as_deref(), TEXT_PROMPT_HINTS)
+        }
+        Some(Panel::Jump(prompt)) => {
+            let opener = match prompt.to {
+                Jump::Line => ":",
+                Jump::Time => "t ",
+            };
+            let error = prompt.error.as_deref().map(|error| format!(" ─ {error}"));
+            format!("{opener}{}{}", prompt.text, error.unwrap_or_default()).into()
         }
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);

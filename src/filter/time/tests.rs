@@ -349,4 +349,18 @@ proptest! {
             }
         }
     }
+
+    #[test]
+    fn a_spec_starts_where_its_range_counted_from_the_file_starts(
+        written in spec_like(),
+        last in any_timestamp(),
+        now in any_timestamp(),
+        hours in -12i8..=14,
+    ) {
+        if let Ok(spec) = TimeSpec::parse(&written) {
+            let zone = TimeZone::fixed(tz::offset(hours));
+            let range = TimeFilter { spec: spec.clone(), base: Base::File }.range(last, now, &zone);
+            prop_assert_eq!(spec.start(last, &zone), range.start);
+        }
+    }
 }

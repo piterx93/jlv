@@ -547,6 +547,25 @@ fn filter_bar_names_the_options_of_the_text_filter() {
 }
 
 #[test]
+fn the_footer_shows_a_jump_prompt_as_typed() {
+    for (opener, footer) in [(':', ":42"), ('t', "t 42")] {
+        let keys = [char_key(opener), char_key('4'), char_key('2')];
+        let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+        assert_eq!(row(&terminal, 23), footer);
+    }
+}
+
+#[test]
+fn a_jump_prompt_error_follows_its_text_in_the_footer() {
+    let keys = [':', 'a', 'b', 'c'].map(char_key);
+    let terminal = terminal_after_pressing(
+        &mut hundred_lines(),
+        &[&keys[..], &[key(KeyCode::Enter)]].concat(),
+    );
+    assert_eq!(row(&terminal, 23), ":abc ─ 'abc' is not a line number");
+}
+
+#[test]
 fn header_ends_with_the_notice_about_the_last_key() {
     let mut app = hundred_lines();
     let mut terminal = drawn(&mut app, 80, 24, Theme::Styled);

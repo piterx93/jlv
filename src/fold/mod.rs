@@ -48,6 +48,11 @@ impl Folds {
         self.exception_ends.truncate(kept);
     }
 
+    /// How many entries there are.
+    pub fn entries(&self) -> usize {
+        self.line_ends.len()
+    }
+
     /// How many rows the entries take: one per entry, plus the continuation lines of
     /// the unfolded ones.
     pub fn row_count(&self) -> usize {

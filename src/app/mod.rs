@@ -78,6 +78,10 @@ pub enum Action {
     TextPanel,
     /// Clears every filter: the level, class, time and text filters.
     ClearFilters,
+    /// Opens the prompt for a file line number to jump to ([`App::panel`]).
+    LinePrompt,
+    /// Opens the prompt for a time to jump to ([`App::panel`]).
+    TimePrompt,
     /// Applies what the open panel edits and closes it.
     Confirm,
     /// Closes the open panel without applying its edits.
@@ -94,10 +98,11 @@ pub enum Action {
 /// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
 /// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
 /// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
-/// class panel, `x` clears every filter, `Enter` confirms, `Esc` cancels and `q F10
-/// Ctrl-c` quit. Characters ignore Shift (the character already says which case it
-/// is) but not Ctrl or Alt; other keys do nothing with any modifier. Key releases do
-/// nothing; held keys repeat.
+/// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
+/// prompt, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
+/// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
+/// other keys do nothing with any modifier. Key releases do nothing; held keys
+/// repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -128,6 +133,8 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::F(5), KeyModifiers::NONE) => Action::TimePanel,
         (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
         (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ClearFilters,
+        (KeyCode::Char(':'), KeyModifiers::NONE) => Action::LinePrompt,
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::TimePrompt,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
@@ -361,6 +368,47 @@ impl Prompt {
     }
 }
 
+/// What a jump prompt jumps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    /// The entry holding a file line, by its number in the gutter.
+    Line,
+    /// The first entry at or after a time.
+    Time,
+}
+
+/// A jump prompt while it is open: what it jumps to, the text typed so far, and why
+/// the text last confirmed says nothing to jump to, if it doesn't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JumpPrompt {
+    pub to: Jump,
+    pub text: String,
+    pub error: Option<String>,
+}
+
+impl JumpPrompt {
+    fn new(to: Jump) -> JumpPrompt {
+        JumpPrompt {
+            to,
+            text: String::new(),
+            error: None,
+        }
+    }
+
+    /// Edits the text as `key` asks, or returns the action it stands for here.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        match typed(key)? {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.text.push(c),
+            Typed::Backspace => {
+                self.text.pop();
+            }
+            Typed::Other(_) => {}
+        }
+        None
+    }
+}
+
 /// The panel open over the rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
@@ -369,6 +417,7 @@ pub enum Panel {
     Time(TimePanel),
     /// The text filter prompt.
     Text(Prompt),
+    Jump(JumpPrompt),
 }
 
 impl Panel {
@@ -376,7 +425,7 @@ impl Panel {
         match self {
             Panel::Levels(panel) => panel.edit(action),
             // Their text is edited through `App::key`, not actions.
-            Panel::Classes(_) | Panel::Time(_) | Panel::Text(_) => {}
+            Panel::Classes(_) | Panel::Time(_) | Panel::Text(_) | Panel::Jump(_) => {}
         }
     }
 }
@@ -1118,6 +1167,9 @@ impl App {
     /// filter's pattern and options ([`Matcher::pattern`](crate::matcher::Matcher::pattern),
     /// [`Matcher::options`](crate::matcher::Matcher::options)), or an empty plain,
     /// case-sensitive pattern without one. [`App::key`] edits it.
+    ///
+    /// [`Action::LinePrompt`] and [`Action::TimePrompt`] open an empty jump prompt
+    /// for a line or a time. [`App::key`] edits it.
     pub fn panel(&self) -> Option<&Panel> {
         self.panel.as_ref()
     }
@@ -1213,6 +1265,8 @@ impl App {
                 self.last_dated = None;
                 self.set_filters(Filters::default());
             }
+            Action::LinePrompt => self.panel = Some(Panel::Jump(JumpPrompt::new(Jump::Line))),
+            Action::TimePrompt => self.panel = Some(Panel::Jump(JumpPrompt::new(Jump::Time))),
             Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
@@ -1245,6 +1299,26 @@ impl App {
     /// clears it for an empty pattern; an invalid regex keeps the prompt open with
     /// the [error](Prompt::error).
     ///
+    /// A jump prompt is edited like the time panel, without `Tab` and the presets.
+    /// `Enter` closes it and jumps, or only closes it while its text is blank; text
+    /// that says nothing to jump to keeps it open with the [error](JumpPrompt::error).
+    /// Either jump stops following and selects the first line of the entry it lands
+    /// on, folding nothing and unfolding nothing; in a file without rows it selects
+    /// nothing.
+    ///
+    /// - [`Jump::Line`]: a whole number `n`, the gutter's line numbers, lands on the
+    ///   entry holding file line `n`, or on the line itself while that entry is
+    ///   unfolded. If the filters hide that entry, it lands on the next entry they
+    ///   show; past the last one, on the last one. `0` lands on the first row, a
+    ///   number past the end on the last. Anything else is the error `'<text>' is not
+    ///   a line number`.
+    /// - [`Jump::Time`]: a [`TimeSpec`] lands on the first entry the filters show,
+    ///   in file order, whose timestamp is at or after the spec's
+    ///   [start](TimeSpec::start), dated by the last entry with a timestamp. Past the
+    ///   last such entry it lands on the last row. With no entry with a timestamp it
+    ///   stays where it is, and the [notice](Self::notice) says `no entry has a
+    ///   timestamp`.
+    ///
     /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
@@ -1252,6 +1326,7 @@ impl App {
             Some(Panel::Classes(panel)) => panel.key(key),
             Some(Panel::Time(panel)) => panel.key(key),
             Some(Panel::Text(prompt)) => prompt.key(key),
+            Some(Panel::Jump(prompt)) => prompt.key(key),
             _ => action(key),
         };
         if let Some(action) = action {
@@ -1539,6 +1614,12 @@ impl App {
                         self.panel = Some(Panel::Text(prompt));
                     }
                 },
+                Panel::Jump(mut prompt) => {
+                    if let Err(error) = self.jump(prompt.to, &prompt.text) {
+                        prompt.error = Some(error);
+                        self.panel = Some(Panel::Jump(prompt));
+                    }
+                }
             },
             Action::Cancel => {}
             Action::Quit => {
@@ -1550,6 +1631,96 @@ impl App {
                 self.panel = Some(panel);
             }
         }
+    }
+
+    /// Jumps as a prompt for `to` asks with `text` typed into it. A blank text jumps
+    /// nowhere; an error says why `text` names nothing to jump to.
+    fn jump(&mut self, to: Jump, text: &str) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        let row = match to {
+            Jump::Line => self.line_row(text)?,
+            Jump::Time => self.time_row(text)?,
+        };
+        if let Some(row) = row {
+            self.following = false;
+            self.viewport.goto(row);
+        }
+        Ok(())
+    }
+
+    /// The row of file line `text`, `None` to stay where the viewer is.
+    fn line_row(&mut self, text: &str) -> Result<Option<usize>, String> {
+        let text = text.trim();
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("'{text}' is not a line number"));
+        }
+        // Too many digits for a `u64` is a line past the end of any file.
+        let line: u64 = text.parse().unwrap_or(u64::MAX);
+        if matches!(self.opening, Opening::Tail(..)) {
+            self.notice = Some("line numbers are not known until the file is indexed");
+            return Ok(None);
+        }
+        let folds = self.shown_folds();
+        let entries = folds.entries();
+        if entries == 0 {
+            return Ok(None);
+        }
+        if line == 0 {
+            return Ok(Some(0));
+        }
+        let first = |entry: usize| self.shown_record(entry).line().unwrap_or(0);
+        // The first entry that has the line or comes after it; the last one past the end.
+        let ends_before = |entry: usize| {
+            let last = first(entry) + folds.continuation_lines(entry) as u64;
+            last < line
+        };
+        let entry = partition_point(entries, ends_before).min(entries - 1);
+        let inside = if folds.hidden_lines(entry) > 0 {
+            0
+        } else {
+            let last = folds.continuation_lines(entry) as u64;
+            line.saturating_sub(first(entry)).min(last) as usize
+        };
+        Ok(Some(self.lead_rows() + folds.row_of(entry, inside)))
+    }
+
+    /// The row of the first entry shown at or after the time `text` says, `None` to
+    /// stay where the viewer is.
+    fn time_row(&mut self, text: &str) -> Result<Option<usize>, String> {
+        let spec = TimeSpec::parse(text)?;
+        let entries = self.shown_folds().entries();
+        if entries == 0 {
+            return Ok(None);
+        }
+        // One guard for the whole scan: taking it per entry would stall the UI behind
+        // a pending writer.
+        let index = read(&self.index);
+        let (records, filtered) = match (&self.opening, &self.filter) {
+            (Opening::Tail(records, _), _) => (records.as_slice(), None),
+            (_, filter) => (index.records.as_slice(), filter.as_ref()),
+        };
+        let Some((_, last)) = last_dated(records, 0, None) else {
+            self.notice = Some("no entry has a timestamp");
+            return Ok(None);
+        };
+        let start = spec.start(last, &self.settings.zone);
+        let at_or_after = |record: &Record| record.timestamp().is_some_and(|at| at >= start);
+        // The engine may know of matches the fold state doesn't yet.
+        let found = match filtered {
+            Some(filter) => filter
+                .engine
+                .filtered()
+                .entries
+                .iter()
+                .take(entries)
+                .position(|&entry| at_or_after(&records[entry as usize])),
+            None => records.iter().take(entries).position(at_or_after),
+        };
+        Ok(Some(found.map_or(self.row_count() - 1, |entry| {
+            self.lead_rows() + self.shown_folds().row_of(entry, 0)
+        })))
     }
 
     /// Sets the level filter to `levels`, keeping the other filters.
@@ -1768,6 +1939,21 @@ fn count_levels(counts: &mut [u32; 6], records: &[Record], count: Count) {
             Count::Remove => n.saturating_sub(1),
         };
     }
+}
+
+/// The first of `0..len` that `before` is false for, `before` being true for a
+/// prefix of them: what `slice::partition_point` is for a range.
+fn partition_point(len: usize, before: impl Fn(usize) -> bool) -> usize {
+    let (mut low, mut high) = (0, len);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if before(middle) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
 }
 
 /// Whether `entry` shows its continuation lines, `None` if it has none.

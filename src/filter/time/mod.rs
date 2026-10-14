@@ -255,6 +255,19 @@ impl fmt::Display for Point {
     }
 }
 
+impl TimeSpec {
+    /// Where the spec starts, `last` being the timestamp of the last entry, in
+    /// `zone`: the start of the [range](TimeFilter::range) it covers counted from the
+    /// file.
+    pub fn start(&self, last: Timestamp, zone: &TimeZone) -> Timestamp {
+        let filter = TimeFilter {
+            spec: self.clone(),
+            base: Base::File,
+        };
+        filter.range(last, last, zone).start
+    }
+}
+
 impl TimeFilter {
     /// What the filter covers, `last` being the timestamp of the last entry and
     /// `now` the wall clock, in `zone`. "The last N" starts N before `last`, or
