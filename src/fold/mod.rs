@@ -126,6 +126,16 @@ impl Folds {
         }
     }
 
+    /// No entries, in the mode of `self`: the entries pushed fold as they would here.
+    pub fn empty_like(&self) -> Folds {
+        Folds {
+            line_ends: Vec::new(),
+            unfolded: self.unfolded,
+            exceptions: Vec::new(),
+            exception_ends: Vec::new(),
+        }
+    }
+
     /// Folds every entry, and the entries pushed from now on.
     pub fn fold_all(&mut self) {
         self.set_mode(false);

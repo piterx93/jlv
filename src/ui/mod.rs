@@ -52,6 +52,7 @@ impl Theme {
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
 const TOO_SMALL: &str = "terminal too small (80×24 needed)";
+const NO_MATCHES: &str = "no entries match the current filters";
 const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
 const TAB_STOP: usize = 4;
 
@@ -89,7 +90,9 @@ const TAB_STOP: usize = 4;
 /// The lines in between follow the frame's height, so this resizes `app`.
 ///
 /// Below 80×24 the lines are replaced by `terminal too small (80×24 needed)` and `app`
-/// keeps its size, so a briefly small terminal doesn't move the view.
+/// keeps its size, so a briefly small terminal doesn't move the view. They are
+/// replaced by `no entries match the current filters` once the filters' results are
+/// in and no entry passes ([`App::nothing_matches`]).
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
     let [header, body, footer] = Layout::vertical([
@@ -123,6 +126,8 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         frame.render_widget(Line::from(TOO_SMALL), body);
+    } else if app.nothing_matches() {
+        frame.render_widget(Line::from(NO_MATCHES), body);
     } else {
         table::render(frame, app, theme, body);
     }

@@ -10,11 +10,15 @@ use proptest::prelude::*;
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
+use crate::filter::{Filters, TimeRange};
+use crate::format::Level;
 use crate::index::Progress;
+use crate::matcher::{self, Matcher};
 use crate::test_support;
 use crate::test_support::{
     INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
-    key, named_app, numbered_log, unindexed_app, wait_for_index, wait_for_index_within,
+    key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
+    wait_for_index_within,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -1185,5 +1189,267 @@ proptest! {
             expected.insert(0, "── file truncated ──".to_string());
         }
         prop_assert_eq!(all_lines(&app), expected);
+    }
+}
+
+// --- filters ---
+
+/// Filters showing only entries whose message contains `word`.
+fn text_filter(word: &str) -> Filters {
+    Filters {
+        text: Some(Matcher::new(word, matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    }
+}
+
+/// `app` with `filters` set and their results in.
+fn filtered(mut app: App, filters: Filters) -> App {
+    app.set_filters(filters);
+    wait_for_filter(&mut app);
+    app
+}
+
+/// Every row of `app` as [`App::line`] shows it.
+fn rows(app: &App) -> Vec<String> {
+    (0..app.viewport().total())
+        .map(|i| app.line(i).into_owned())
+        .collect()
+}
+
+#[test]
+fn filters_show_only_matching_entries() {
+    let app = filtered(
+        logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]),
+        text_filter("Failed"),
+    );
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+}
+
+#[test]
+fn filters_are_kept_as_set() {
+    let mut app = logback(&[STARTED]);
+    let mut filters = Filters::default();
+    filters.classes.include = vec!["com.example".to_string()];
+    app.set_filters(filters);
+    assert_eq!(app.filters().classes.include, ["com.example"]);
+}
+
+#[test]
+fn a_matching_entry_unfolds_in_the_filtered_rows() {
+    let mut app = filtered(
+        logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]),
+        text_filter("Failed"),
+    );
+    app.resize(10);
+    app.apply(Action::ToggleFold);
+    assert_eq!(
+        rows(&app),
+        [FAILED.trim_end(), EXCEPTION.trim_end(), FRAME.trim_end()]
+    );
+}
+
+#[test]
+fn new_filters_select_the_first_row() {
+    let mut app = logback(&[STARTED, FAILED, DONE]);
+    app.resize(10);
+    app.apply(Action::Bottom);
+    app.apply(Action::Up);
+    let mut filters = Filters::default();
+    filters.levels.set(Level::Info, false);
+    let app = filtered(app, filters);
+    assert_eq!(rows(&app), [FAILED.trim_end(), DONE.trim_end()]);
+    assert_eq!(app.viewport().selected(), Some(0));
+}
+
+#[test]
+fn the_last_line_number_counts_entries_the_filters_hide() {
+    let app = filtered(
+        logback(&[STARTED, FAILED, EXCEPTION, FRAME, DONE]),
+        text_filter("Started"),
+    );
+    assert_eq!(app.last_line_number(), Some(5));
+}
+
+#[test]
+fn appended_entries_are_filtered_while_following() {
+    let app = filtered(
+        followed(Preset::Logback, &[STARTED, FAILED].concat()),
+        text_filter("boom"),
+    );
+    assert_eq!(app.viewport().total(), 0);
+    // The exception continues the last entry, which matches now; the next doesn't.
+    let mut app = grown(app, &[STARTED, FAILED, EXCEPTION, DONE].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+    assert_eq!(app.viewport().selected(), Some(0));
+    assert!(app.following());
+}
+
+#[test]
+fn a_partial_line_that_joins_the_entry_before_is_filtered_with_it() {
+    // Cut short, the last line looks like the start of an entry; written out, it
+    // continues the one before.
+    let partial = "2026-10-07 12:00:02.000 [main] INFO  com.example.App -";
+    let app = filtered(
+        followed(Preset::Logback, &[FAILED, partial].concat()),
+        text_filter("boom"),
+    );
+    let mut app = grown(app, &[FAILED, partial, "boom\n"].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+}
+
+#[test]
+fn a_truncated_file_is_filtered_from_its_start() {
+    let app = filtered(
+        followed(Preset::Logback, &[STARTED, FAILED, DONE].concat()),
+        text_filter("Failed"),
+    );
+    let mut app = truncated(app, &[DONE, FAILED].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), ["── file truncated ──", FAILED.trim_end()]);
+}
+
+/// Filters `log`, in a time-only preset, by a time range that holds all of it, and
+/// returns how many rows pass and whether the filters were seen to catch up with the
+/// undated entries while indexing went on.
+fn filter_while_indexing(log: &str) -> (usize, bool) {
+    let mut app = unindexed_app(Preset::LogbackBasic, log.as_bytes());
+    app.set_filters(Filters {
+        time: Some(TimeRange {
+            start: "2026-10-01T00:00:00Z".parse().unwrap(),
+            end: None,
+        }),
+        ..Filters::default()
+    });
+    let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
+    let mut caught_up_while_indexing = false;
+    loop {
+        app.poll_index();
+        let progress = app.progress();
+        if progress.is_complete() && !app.filtering() {
+            return (app.viewport().total(), caught_up_while_indexing);
+        }
+        caught_up_while_indexing |=
+            !progress.is_complete() && progress.indexed > 0 && !app.filtering();
+        assert!(Instant::now() < deadline, "{progress:?}");
+        // Polling without a pause gives the most chances to see the filters catch up.
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn time_only_entries_are_filtered_by_their_dates_once_indexed() {
+    // Some 2 MiB, indexed in many chunks: the entries come in undated, and only the
+    // complete index dates them. Whether the filters catch up with them before that
+    // depends on the threads, so it is tried a few times.
+    let n = 38_000;
+    let log: String = (0..n)
+        .map(|i| format!("12:00:00.000 [main] INFO  com.example.App - step {i}\n"))
+        .collect();
+    let mut caught_up = false;
+    for _ in 0..10 {
+        let (total, caught_up_this_time) = filter_while_indexing(&log);
+        assert_eq!(total, n);
+        caught_up = caught_up_this_time;
+        if caught_up {
+            break;
+        }
+    }
+    assert!(caught_up, "the filters never caught up while indexing");
+}
+
+#[test]
+fn growth_keeps_the_selected_match_while_paused() {
+    // More entries than the engine evaluates in one chunk.
+    let mut app = filtered(app(numbered_log(2_000).as_bytes()), text_filter("step"));
+    app.resize(10);
+    app.apply(Action::Bottom);
+    app.apply(Action::Up);
+    let mut app = grown(app, &numbered_log(2_001));
+    assert_eq!(app.viewport().selected(), Some(1_998));
+    wait_for_filter(&mut app);
+    assert_eq!(app.viewport().total(), 2_001);
+    assert_eq!(app.viewport().selected(), Some(1_998));
+    assert_eq!(app.line(1_998), numbered_log(1_999).lines().last().unwrap());
+}
+
+/// Two entries with continuation lines between INFO entries, so that hiding INFO
+/// leaves them.
+const TWO_TRACES: [&str; 6] = [STARTED, FAILED, EXCEPTION, FRAME, DONE, FRAME];
+
+fn without_info() -> Filters {
+    let mut filters = Filters::default();
+    filters.levels.set(Level::Info, false);
+    filters
+}
+
+/// The rows of [`TWO_TRACES`] without INFO, every entry unfolded.
+fn unfolded_traces() -> [&'static str; 5] {
+    [FAILED, EXCEPTION, FRAME, DONE, FRAME].map(str::trim_end)
+}
+
+#[test]
+fn an_unfolded_match_stays_unfolded_under_new_filters() {
+    let mut app = filtered(logback(&TWO_TRACES), text_filter("Failed"));
+    app.resize(10);
+    app.apply(Action::ToggleFold);
+    let app = filtered(app, without_info());
+    assert_eq!(
+        rows(&app),
+        [FAILED, EXCEPTION, FRAME, DONE].map(str::trim_end)
+    );
+}
+
+#[test]
+fn unfolding_all_while_filtered_unfolds_the_matches_of_new_filters() {
+    let mut app = filtered(logback(&TWO_TRACES), text_filter("Started"));
+    app.resize(10);
+    app.apply(Action::UnfoldAll);
+    let app = filtered(app, without_info());
+    assert_eq!(rows(&app), unfolded_traces());
+}
+
+#[test]
+fn unfolding_all_while_the_tail_is_shown_unfolds_the_matches() {
+    let mut app = following_app(Preset::Logback, TWO_TRACES.concat().as_bytes());
+    app.set_filters(without_info());
+    app.resize(10);
+    app.apply(Action::UnfoldAll);
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), unfolded_traces());
+}
+
+#[test]
+fn another_preset_is_filtered_anew() {
+    // Under Raw the whole line is the message; under Logback `INFO` is the level.
+    let mut app = filtered(app_in(Preset::Raw, STARTED.as_bytes()), text_filter("INFO"));
+    assert_eq!(rows(&app), [STARTED.trim_end()]);
+    app.apply(Action::CyclePreset);
+    wait_for_filter(&mut app);
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert!(app.nothing_matches());
+}
+
+#[test]
+fn an_empty_file_is_no_case_of_nothing_matching() {
+    let app = filtered(named_app("/var/log/empty.log", b""), text_filter("boom"));
+    assert!(!app.nothing_matches());
+}
+
+#[test]
+fn nothing_matches_only_once_the_index_and_the_results_are_complete() {
+    let mut app = unindexed_app(Preset::Raw, numbered_log(5_000).as_bytes());
+    app.set_filters(text_filter("boom"));
+    let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
+    loop {
+        let done = app.progress().is_complete() && !app.filtering();
+        assert_eq!(app.nothing_matches(), done, "{:?}", app.progress());
+        if done {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        app.poll_index();
+        thread::sleep(Duration::from_millis(1));
     }
 }

@@ -37,4 +37,16 @@ exclude_re = [
     'src/source/mod\.rs:\d+:\d+: replace <impl Iterator for Lines<.a>>::next -> Option<&.a\[u8\]> with Some\(.*\)$',
     # The same goes for not stepping past the newline, which yields the same line again.
     'src/source/mod\.rs:\d+:\d+: replace \+ with [-*] in <impl Iterator for Lines<.a>>::next$',
+    # Without class rules every class passes, so reading the first line for its class
+    # only costs time; skipping it is a shortcut.
+    'src/filter/mod\.rs:\d+:\d+: replace Classes::is_empty -> bool with false$',
+    # Waiting for the engine once it has evaluated enough only waits for one more update
+    # or the deadline, which costs at most the deadline and changes no result.
+    'src/filter/mod\.rs:\d+:\d+: replace < with <= in Engine::poll_until$',
+    # With no entries found, having the engine evaluate from the end of the index on
+    # restarts it where it is, which only costs time.
+    'src/app/mod\.rs:\d+:\d+: replace > with >= in App::poll_index$',
+    # Entries pushed through a filter's catch-up are toggled to the index's fold state
+    # one by one, so starting it in the index's mode only saves memory.
+    'src/fold/mod\.rs:\d+:\d+: replace Folds::empty_like -> Folds with Default::default\(\)$',
 ]

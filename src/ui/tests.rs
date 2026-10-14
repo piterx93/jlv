@@ -13,11 +13,13 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, FileChange, action};
+use crate::filter::Filters;
 use crate::format::Preset;
+use crate::matcher::{self, Matcher};
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, detected_app, following_app,
-    hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_index,
-    wait_for_index_within,
+    hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_filter,
+    wait_for_index, wait_for_index_within,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -165,6 +167,42 @@ fn empty_file_shows_an_empty_body() {
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "jlv ─ empty.log ─ 0 B ─ Raw                                                     "
     "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn no_matching_entries_shows_a_notice_in_place_of_the_rows() {
+    let mut app = app(numbered_log(3).as_bytes());
+    app.set_filters(Filters {
+        text: Some(Matcher::new("nothing", matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    });
+    wait_for_filter(&mut app);
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 153 B ─ Raw                                                     "
+    "no entries match the current filters                                            "
     "                                                                                "
     "                                                                                "
     "                                                                                "

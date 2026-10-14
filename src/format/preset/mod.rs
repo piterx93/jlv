@@ -118,7 +118,7 @@ impl EntryParser {
     }
 
     /// Room for [`parse_with`](Self::parse_with) to find the columns in.
-    pub(in crate::format) fn locations(self) -> CaptureLocations {
+    pub(crate) fn locations(self) -> CaptureLocations {
         self.pattern.regex.capture_locations()
     }
 
@@ -126,7 +126,7 @@ impl EntryParser {
     /// gave and which are reused from line to line. Fresh ones cost an allocation and
     /// an update of a reference count that every thread parsing with this preset
     /// shares, which keeps parsing on many threads at once from getting any faster.
-    pub(in crate::format) fn parse_with(
+    pub(crate) fn parse_with(
         self,
         line: &[u8],
         locations: &mut CaptureLocations,

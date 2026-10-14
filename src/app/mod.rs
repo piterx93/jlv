@@ -7,7 +7,8 @@ use std::fs::File;
 use std::io;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -15,6 +16,7 @@ use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::filter::{self, Engine, Filters, Indexed};
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Preset, detect};
@@ -113,6 +115,76 @@ const TAIL_WINDOW: usize = 65_536;
 /// the viewer gives up on the tail and waits for the whole index.
 const TAIL_LIMIT: usize = 4_194_304;
 
+/// How many entries the filter engine evaluates per chunk. It holds the index for a
+/// chunk at a time, and taking in what the followed file appends has to wait for it.
+const FILTER_CHUNK: usize = 1024;
+
+/// How long the viewer waits for the filter engine to evaluate the few entries that
+/// changed with the index, so that the matches among them don't leave the rows until
+/// the next poll: the last rows would flicker, and a selection on them would move.
+const CATCH_UP: Duration = Duration::from_millis(10);
+
+/// The index, shared with the filter engine. Only `App` writes it.
+type SharedIndex = Arc<RwLock<Indexed<Source>>>;
+
+/// The filters at work on the index: their engine, and the fold state of the entries
+/// that pass, entry `i` being the engine's `i`th match. Each match folds as the
+/// index's fold state says when it comes in; after that, folding changes both.
+#[derive(Debug)]
+struct Filter {
+    engine: Engine,
+    folds: Folds,
+}
+
+impl Filter {
+    /// The filter of `index`, read in `preset`, whose matches fold as `all`, the
+    /// index's fold state, folds them.
+    fn spawn(index: &SharedIndex, preset: Preset, filters: Filters, all: &Folds) -> Self {
+        let options = filter::Options {
+            chunk: FILTER_CHUNK,
+        };
+        Filter {
+            engine: Engine::spawn(Arc::clone(index), preset, filters, options),
+            // In the index's mode, only the matches it excepts are exceptions here.
+            folds: all.empty_like(),
+        }
+    }
+
+    /// The index entry that is match `i`.
+    fn entry(&self, i: usize) -> usize {
+        self.engine.filtered().entries[i] as usize
+    }
+
+    /// Takes in the matches the engine found since the last call, folded as `all`,
+    /// the index's fold state, folds them.
+    fn take_in(&mut self, all: &Folds) {
+        self.catch_up(all, 0, Instant::now());
+    }
+
+    /// [`take_in`](Self::take_in), but waiting for the engine until it evaluated the
+    /// first `evaluated` entries or `deadline` passed.
+    fn catch_up(&mut self, all: &Folds, evaluated: usize, deadline: Instant) {
+        let known = self.engine.filtered().entries.len();
+        let entries = &self.engine.poll_until(evaluated, deadline).entries[known..];
+        for (i, &entry) in (known..).zip(entries) {
+            let entry = entry as usize;
+            self.folds.push(all.continuation_lines(entry));
+            if self.folds.hidden_lines(i) != all.hidden_lines(entry) {
+                self.folds.toggle(i);
+            }
+        }
+    }
+
+    /// Drops the matches from index entry `from` on, which the index read again or
+    /// dropped, and has the engine evaluate the entries from there.
+    fn reread(&mut self, from: usize) {
+        let entries = &self.engine.filtered().entries;
+        let kept = entries.partition_point(|&entry| (entry as usize) < from);
+        self.engine.reread(from);
+        self.folds.truncate(kept);
+    }
+}
+
 /// Which records the rows are while the viewer opens.
 #[derive(Debug)]
 enum Opening {
@@ -157,7 +229,7 @@ pub struct ShownLine<'a> {
     /// The line as in the file, without its line ending.
     pub line: &'a [u8],
     /// The record of the line's entry.
-    pub record: &'a Record,
+    pub record: Record,
     /// Whether the line is its entry's first, not a continuation line.
     pub first: bool,
     /// The line's number in the file, `None` while it isn't known (see
@@ -232,9 +304,13 @@ pub struct App {
     name: String,
     source: Arc<Source>,
     indexer: Indexer,
-    records: Vec<Record>,
-    /// The fold state of `records`.
+    /// The records of the file's entries, and `source` again for the filter engine.
+    index: SharedIndex,
+    /// The fold state of the index's entries.
     folds: Folds,
+    filters: Filters,
+    /// At work since the first [`set_filters`](Self::set_filters).
+    filter: Option<Filter>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
@@ -313,12 +389,18 @@ impl App {
             indexed: 0,
             total: source.bytes().len() as u64,
         };
+        let index = Indexed {
+            records: Vec::new(),
+            bytes: Arc::clone(&source),
+        };
         Self {
             name: name.to_string_lossy().into_owned(),
             indexer: Indexer::spawn(Arc::clone(&source), settings.clone()),
             source,
-            records: Vec::new(),
+            index: Arc::new(RwLock::new(index)),
             folds: Folds::default(),
+            filters: Filters::default(),
+            filter: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
             opens_at_end: follow,
@@ -351,6 +433,11 @@ impl App {
     /// While a file is [watched](Self::watch), it also takes in what happened to the
     /// file since the last call, as [`file_changed`](Self::file_changed) does.
     pub fn poll_index(&mut self) {
+        // Before the index changes, which starts the engine over from the first entry
+        // it changes and drops what it found past it.
+        if let Some(filter) = &mut self.filter {
+            filter.take_in(&self.folds);
+        }
         let changes = self.watch.as_mut().map_or_else(Vec::new, Watch::changes);
         for change in changes {
             self.file_changed(change);
@@ -363,12 +450,28 @@ impl App {
         }
         // Once complete, the index is kept up to date by `grow`, not by the indexer.
         if !self.progress.is_complete() {
-            let known = self.records.len();
-            self.progress = self.indexer.poll(&mut self.records);
-            let found = &self.records[known..];
+            let mut index = write(&self.index);
+            let known = index.records.len();
+            self.progress = self.indexer.poll(&mut index.records);
+            let found = &index.records[known..];
             push_entries(&mut self.folds, self.source.bytes(), found);
+            let found = found.len();
+            drop(index);
             if self.index_brings_new {
-                self.count_new(found.len());
+                self.count_new(found);
+            }
+            // A time-only preset's entries get their timestamps once the index is
+            // complete, all of them at once.
+            let dated = self.progress.is_complete()
+                && self
+                    .settings
+                    .preset
+                    .entry_parser()
+                    .is_some_and(|parser| !parser.has_date());
+            if dated {
+                self.reread(0);
+            } else if found > 0 {
+                self.reread(known);
             }
         }
         if self.progress.is_complete() {
@@ -419,11 +522,11 @@ impl App {
     /// unfolded one. `None` for the row that marks a truncation (see
     /// [`FileChange::Truncated`]). Panics if `i` is not below `viewport().total()`.
     pub fn row(&self, i: usize) -> Option<ShownLine<'_>> {
-        let (records, folds) = self.shown();
+        let folds = self.shown_folds();
         let (entry, line) = folds.line_at(self.fold_row(i)?);
-        let record = &records[entry];
+        let record = self.shown_record(entry);
         Some(ShownLine {
-            line: self.entry_line(record, line),
+            line: self.entry_line(&record, line),
             record,
             first: line == 0,
             number: record.line().map(|first| first + line as u64),
@@ -511,10 +614,10 @@ impl App {
     }
 
     /// Whether the app has more to take in at the next [`poll_index`](Self::poll_index)
-    /// without anything happening on screen: the index isn't complete, or a watcher
-    /// may report changes to the file.
+    /// without anything happening on screen: the index isn't complete, a watcher may
+    /// report changes to the file, or the filters' results are still coming in.
     pub(crate) fn expects_updates(&self) -> bool {
-        !self.progress.is_complete() || self.watch.is_some()
+        !self.progress.is_complete() || self.watch.is_some() || self.filtering()
     }
 
     /// Whether the preset was detected, found none fitting and fell back to `Raw`.
@@ -557,13 +660,61 @@ impl App {
         self.shows_line_numbers
     }
 
-    /// The number in the file of the last line of the entries the rows show, `None`
-    /// while there are none or their numbers aren't known.
+    /// The number in the file of the last line of the last entry: of the index, or
+    /// of the file's last entries while they are shown. `None` while there are none
+    /// or their numbers aren't known. Entries the filters hide count too, so that the
+    /// gutter keeps its width while the filters change.
     pub fn last_line_number(&self) -> Option<u64> {
-        let (records, folds) = self.shown();
+        let index;
+        let (records, folds) = match &self.opening {
+            Opening::Tail(records, folds) => (records, folds),
+            Opening::Index | Opening::AtEnd => {
+                index = read(&self.index);
+                (&index.records, &self.folds)
+            }
+        };
         let last = records.len().checked_sub(1)?;
         let first = records[last].line()?;
         Some(first + folds.continuation_lines(last) as u64)
+    }
+
+    /// Shows only the entries that pass `filters` (see [`crate::filter`]), as their
+    /// results come in from the background at each [`poll_index`](Self::poll_index):
+    /// entries appended to the file are filtered as they come, and an entry read
+    /// again is filtered again. The rows are the matching entries, folded or unfolded
+    /// as before, with the truncation row still first. The first row is selected, the
+    /// last one while following.
+    ///
+    /// Opened at the end, the file's last entries are shown unfiltered until the
+    /// index is complete and takes over, filtered.
+    pub fn set_filters(&mut self, filters: Filters) {
+        self.filters = filters;
+        self.start_filter();
+        self.viewport = Viewport::new(0, self.viewport.height());
+        self.update_rows();
+    }
+
+    /// The filters [`set_filters`](Self::set_filters) set; none at first.
+    pub fn filters(&self) -> &Filters {
+        &self.filters
+    }
+
+    /// Whether the filters' results aren't complete yet: entries the index has are
+    /// still to be evaluated.
+    pub fn filtering(&self) -> bool {
+        self.filter.as_ref().is_some_and(|filter| {
+            filter.engine.filtered().evaluated < read(&self.index).records.len()
+        })
+    }
+
+    /// Whether the rows would be the entries that pass the filters, but none does:
+    /// the index is complete and has entries, and the filters' results are in.
+    pub fn nothing_matches(&self) -> bool {
+        self.progress.is_complete()
+            && !self.filtering()
+            && self.filter.as_ref().is_some_and(|filter| {
+                filter.engine.filtered().entries.is_empty() && !read(&self.index).records.is_empty()
+            })
     }
 
     /// Whether long messages wrap onto the following screen lines instead of being
@@ -648,20 +799,45 @@ impl App {
             self.opens_at_end
         };
         self.index_again(Opening::new(at_end));
+        // The engine reads the entries in the preset it started with.
+        if self.filter.is_some() {
+            self.start_filter();
+        }
         self.read_tail();
+    }
+
+    /// Starts evaluating the filters over the index, in place of any engine at work.
+    fn start_filter(&mut self) {
+        let filters = self.filters.clone();
+        let preset = self.settings.preset;
+        self.filter = Some(Filter::spawn(&self.index, preset, filters, &self.folds));
     }
 
     /// Indexes the source from the start, the rows opening as `opening` says.
     fn index_again(&mut self, opening: Opening) {
         // Dropping the old indexer stops it.
         self.indexer = Indexer::spawn(Arc::clone(&self.source), self.settings.clone());
-        self.records.clear();
+        write(&self.index).records.clear();
+        self.reread(0);
         self.progress = Progress {
             indexed: 0,
             total: self.size(),
         };
         self.opening = opening;
         self.viewport = Viewport::new(0, self.viewport.height());
+    }
+
+    /// Has the filters evaluate the index's entries from `from` on again, after they
+    /// changed, and waits for them when there are only a few left to evaluate.
+    fn reread(&mut self, from: usize) {
+        let Some(filter) = &mut self.filter else {
+            return;
+        };
+        filter.reread(from);
+        let total = read(&self.index).records.len();
+        if total.saturating_sub(filter.engine.filtered().evaluated) <= FILTER_CHUNK {
+            filter.catch_up(&self.folds, total, Instant::now() + CATCH_UP);
+        }
     }
 
     /// Selects the last row and follows the file from there.
@@ -708,7 +884,7 @@ impl App {
     }
 
     fn row_count(&self) -> usize {
-        self.lead_rows() + self.shown().1.row_count()
+        self.lead_rows() + self.shown_folds().row_count()
     }
 
     /// The rows before the entries: the truncation row, if there is one.
@@ -724,6 +900,7 @@ impl App {
 
     fn set_source(&mut self, source: Source) {
         self.source = Arc::new(source);
+        write(&self.index).bytes = Arc::clone(&self.source);
         // The mark points into the old mapping, whose bytes may be gone.
         self.line_mark.take();
     }
@@ -734,10 +911,14 @@ impl App {
             return;
         }
         self.set_source(source);
-        let known = self.records.len();
-        index::append(&mut self.records, self.source.bytes(), &self.settings);
-        push_appended(&mut self.folds, self.source.bytes(), &self.records, known);
-        self.count_new(self.records.len().saturating_sub(known));
+        let mut index = write(&self.index);
+        let known = index.records.len();
+        index::append(&mut index.records, self.source.bytes(), &self.settings);
+        push_appended(&mut self.folds, self.source.bytes(), &index.records, known);
+        let found = index.records.len().saturating_sub(known);
+        drop(index);
+        self.count_new(found);
+        self.reread(appended_from(known));
         self.progress = Progress {
             indexed: self.size(),
             total: self.size(),
@@ -756,25 +937,42 @@ impl App {
         self.index_again(Opening::Index);
     }
 
-    /// The records of the entries shown and their fold state.
-    fn shown(&self) -> (&[Record], &Folds) {
-        match &self.opening {
-            Opening::Tail(tail, folds) => (tail, folds),
-            Opening::Index | Opening::AtEnd => (&self.records, &self.folds),
+    /// The fold state of the entries the rows show: the file's last entries, the
+    /// matches of the filters or the index.
+    fn shown_folds(&self) -> &Folds {
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(_, folds), _) => folds,
+            (_, Some(filter)) => &filter.folds,
+            (_, None) => &self.folds,
         }
     }
 
     fn shown_folds_mut(&mut self) -> &mut Folds {
-        match &mut self.opening {
-            Opening::Tail(_, folds) => folds,
-            Opening::Index | Opening::AtEnd => &mut self.folds,
+        match (&mut self.opening, &mut self.filter) {
+            (Opening::Tail(_, folds), _) => folds,
+            (_, Some(filter)) => &mut filter.folds,
+            (_, None) => &mut self.folds,
+        }
+    }
+
+    /// The record of the rows' `entry`th entry.
+    fn shown_record(&self, entry: usize) -> Record {
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(records, _), _) => records[entry],
+            (_, Some(filter)) => read(&self.index).records[filter.entry(entry)],
+            (_, None) => read(&self.index).records[entry],
         }
     }
 
     fn toggle_fold(&mut self) {
         if let Some(row) = self.viewport.selected().and_then(|row| self.fold_row(row)) {
-            let (entry, _) = self.shown().1.line_at(row);
+            let (entry, _) = self.shown_folds().line_at(row);
             self.refold(|folds| folds.toggle(entry));
+            // The index keeps the fold state of a match for when the filters change.
+            if let (Opening::Index | Opening::AtEnd, Some(filter)) = (&self.opening, &self.filter) {
+                let entry = filter.entry(entry);
+                self.folds.toggle(entry);
+            }
         }
     }
 
@@ -784,12 +982,13 @@ impl App {
         } else {
             Folds::unfold_all
         };
-        // The index behind the last entries takes the mode too, so that it holds
-        // once the index takes over.
-        if matches!(self.opening, Opening::Tail(..)) {
-            set(&mut self.folds);
-        }
         self.refold(set);
+        // The fold states not shown take the mode too, so that it holds once they
+        // are. Setting it again on the one shown changes nothing.
+        set(&mut self.folds);
+        if let Some(filter) = &mut self.filter {
+            set(&mut filter.folds);
+        }
     }
 
     /// Changes the fold state of the entries shown, keeping the selected line on its
@@ -797,7 +996,7 @@ impl App {
     fn refold(&mut self, change: impl FnOnce(&mut Folds)) {
         let viewport = &self.viewport;
         let selected = viewport.selected().and_then(|row| {
-            let line = self.shown().1.line_at(self.fold_row(row)?);
+            let line = self.shown_folds().line_at(self.fold_row(row)?);
             Some((line, row - viewport.top()))
         });
         let lead = self.lead_rows();
@@ -867,9 +1066,7 @@ fn push_entries(folds: &mut Folds, bytes: &[u8], records: &[Record]) {
 /// after [`index::append`] added to `records`. The entries read again keep their
 /// fold state.
 fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usize) {
-    // `append` reads the last entry again, and a partial last line that looked like a
-    // header can turn out to continue the entry before it.
-    let from = known.saturating_sub(2);
+    let from = appended_from(known);
     let was: Vec<_> = (from..known).map(|entry| unfolded(folds, entry)).collect();
     folds.truncate(from);
     push_entries(folds, bytes, &records[from..]);
@@ -878,6 +1075,23 @@ fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usi
             folds.toggle(entry);
         }
     }
+}
+
+/// The first of `known` records that [`index::append`] may have changed.
+fn appended_from(known: usize) -> usize {
+    // `append` reads the last entry again, and a partial last line that looked like a
+    // header can turn out to continue the entry before it.
+    known.saturating_sub(2)
+}
+
+// Only `App` writes the index, so only a panic of its own can poison it, and that
+// ends the viewer.
+fn read(index: &SharedIndex) -> RwLockReadGuard<'_, Indexed<Source>> {
+    index.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write(index: &SharedIndex) -> RwLockWriteGuard<'_, Indexed<Source>> {
+    index.write().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether `entry` shows its continuation lines, `None` if it has none.
