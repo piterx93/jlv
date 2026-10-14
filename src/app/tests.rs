@@ -3483,3 +3483,142 @@ fn append_to_the_shown_entry_keeps_the_details_scroll_and_adds_its_lines() {
     assert_eq!(app.details_scroll(), 1);
     assert_eq!(app.details_entry(), Some(longer.as_bytes()));
 }
+
+// --- exception jumps ---
+
+const RETRYING: &str = "2026-10-07 12:00:01.700 [main] INFO  com.example.App - Retrying\n";
+const STOPPED: &str = "2026-10-07 12:00:03.000 [main] INFO  com.example.App - Stopped\n";
+
+/// Five entries, of which [`FAILED`] (entry 1) and [`DONE`] (entry 3) have a stack
+/// trace.
+const EXCEPTIONS: [&str; 8] = [
+    STARTED, FAILED, EXCEPTION, FRAME, RETRYING, DONE, FRAME, STOPPED,
+];
+
+/// [`EXCEPTIONS`] on a 10-line screen, every entry folded, with row `row` selected.
+fn exceptions_at(row: usize) -> App {
+    let mut app = logback(&EXCEPTIONS);
+    app.resize(10);
+    applied(app, &vec![Action::Down; row])
+}
+
+/// [`EXCEPTIONS`] with the `hidden` levels hidden, the filter's results in.
+fn exceptions_without(hidden: &[Level]) -> App {
+    let mut filters = Filters::default();
+    for &level in hidden {
+        filters.levels.set(level, false);
+    }
+    filtered(exceptions_at(0), filters)
+}
+
+/// The selected row of `app` and what its notice says.
+fn landed(app: &App) -> (Option<usize>, Option<&str>) {
+    (selected(app), app.notice())
+}
+
+#[test]
+fn closing_bracket_selects_the_next_entry_with_an_exception() {
+    let app = pressed(exceptions_at(0), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn opening_bracket_selects_the_previous_entry_with_an_exception() {
+    let app = pressed(exceptions_at(4), &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(3), None));
+}
+
+#[test]
+fn from_an_entry_with_an_exception_the_jumps_go_past_it() {
+    let app = pressed(exceptions_at(1), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(3), None));
+    let app = pressed(app, &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn closing_bracket_past_the_last_exception_wraps_to_the_first_with_a_notice() {
+    let app = pressed(exceptions_at(3), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(1), Some("exceptions wrapped")));
+}
+
+#[test]
+fn opening_bracket_before_the_first_exception_wraps_to_the_last_with_a_notice() {
+    let app = pressed(exceptions_at(0), &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(3), Some("exceptions wrapped")));
+}
+
+#[test]
+fn from_inside_an_unfolded_trace_a_jump_selects_the_first_line_of_the_next_exception() {
+    let unfolded = [Action::UnfoldAll, Action::Down, Action::Down, Action::Down];
+    let app = applied(exceptions_at(0), &unfolded);
+    assert_eq!(selected_row(&app), FRAME.trim_end());
+    let app = pressed(app, &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(5), None));
+    assert_eq!(selected_row(&app), DONE.trim_end());
+    assert_eq!(app.viewport().total(), 8);
+}
+
+#[test]
+fn exception_jumps_pass_over_the_entries_the_filters_hide() {
+    let app = pressed(exceptions_without(&[Level::Error]), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(2), None));
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn the_only_exception_in_view_wraps_onto_itself_with_a_notice() {
+    let app = pressed(exceptions_without(&[Level::Warn]), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(1), None));
+    for bracket in [']', '['] {
+        let app = pressed(
+            exceptions_without(&[Level::Warn]),
+            &[char_key(']'), char_key(bracket)],
+        );
+        assert_eq!(
+            landed(&app),
+            (Some(1), Some("exceptions wrapped")),
+            "{bracket}"
+        );
+    }
+}
+
+#[test]
+fn without_an_exception_in_view_the_jumps_say_no_exceptions_and_stay() {
+    let without_traces = || applied(hundred_lines(), &[Action::Down; 3]);
+    let traces_hidden = || {
+        applied(
+            exceptions_without(&[Level::Error, Level::Warn]),
+            &[Action::Down],
+        )
+    };
+    let cases: [(&dyn Fn() -> App, usize); 2] = [(&without_traces, 3), (&traces_hidden, 1)];
+    for (app, row) in cases {
+        for bracket in [']', '['] {
+            let app = pressed(app(), &[char_key(bracket)]);
+            assert_eq!(
+                landed(&app),
+                (Some(row), Some("no exceptions")),
+                "{bracket}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_exception_jump_stops_following() {
+    let app = followed(Preset::Logback, &EXCEPTIONS.concat());
+    assert_eq!(selected(&app), Some(4));
+    let app = pressed(app, &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(3), None));
+    assert!(!app.following());
+}
+
+#[test]
+fn exception_jumps_cover_the_last_entries_shown_before_the_index_is_complete() {
+    let mut app = following_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    assert_eq!(selected(&app), Some(4));
+    let app = pressed(app, &[char_key('['), char_key('[')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}

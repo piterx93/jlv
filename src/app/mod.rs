@@ -93,6 +93,10 @@ pub enum Action {
     NextMatch,
     /// Selects the next matching entry against the direction of the search.
     PreviousMatch,
+    /// Selects the next entry the rows show that has an exception.
+    NextException,
+    /// Selects the previous entry the rows show that has an exception.
+    PreviousException,
     /// Applies what the open panel edits and closes it. With no panel open, opens
     /// the details pane ([`App::shows_details`]), or closes it.
     Confirm,
@@ -112,7 +116,8 @@ pub enum Action {
 /// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
 /// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
 /// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
-/// and previous match, `Tab` cycles the focus, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
+/// and previous match, `]` and `[` the next and previous entry with an exception,
+/// `Tab` cycles the focus, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys
 /// repeat.
@@ -152,6 +157,8 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('?'), KeyModifiers::NONE) => Action::SearchBackward,
         (KeyCode::Char('n'), KeyModifiers::NONE) => Action::NextMatch,
         (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
+        (KeyCode::Char(']'), KeyModifiers::NONE) => Action::NextException,
+        (KeyCode::Char('['), KeyModifiers::NONE) => Action::PreviousException,
         (KeyCode::Tab, KeyModifiers::NONE) => Action::CycleFocus,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
@@ -1529,6 +1536,8 @@ impl App {
             Action::SearchBackward => self.open_search(true),
             Action::NextMatch => self.step_search(false),
             Action::PreviousMatch => self.step_search(true),
+            Action::NextException => self.jump_exception(false),
+            Action::PreviousException => self.jump_exception(true),
             Action::Confirm => self.toggle_details(),
             Action::Cancel => {}
             Action::Quit => self.quit = true,
@@ -1713,6 +1722,60 @@ impl App {
                 }
             },
         }
+    }
+
+    /// Selects the next entry with an exception among those the rows show, up the rows
+    /// if `backward`, wrapping around with the notice `exceptions wrapped`, or says
+    /// `no exceptions`. It walks the shown entries rather than the index so that it
+    /// also covers the file's last entries shown before the index is complete.
+    fn jump_exception(&mut self, backward: bool) {
+        let found = {
+            let folds = self.shown_folds();
+            let count = folds.entries();
+            let current = self
+                .viewport
+                .selected()
+                .and_then(|row| self.fold_row(row))
+                .map(|row| folds.line_at(row).0);
+            let split = if backward {
+                current.unwrap_or(count)
+            } else {
+                current.map_or(0, |entry| entry + 1)
+            };
+            // One guard for the whole scan: a lock per entry would queue behind the indexer.
+            let index = read(&self.index);
+            let has_exception = |entry: &usize| {
+                let record = match (&self.opening, &self.filter) {
+                    (Opening::Tail(records, _), _) => &records[*entry],
+                    (_, Some(filter)) => &index.records[filter.entry(*entry)],
+                    (_, None) => &index.records[*entry],
+                };
+                record.has_exception()
+            };
+            let find = |mut entries: Range<usize>| {
+                if backward {
+                    entries.rfind(has_exception)
+                } else {
+                    entries.find(has_exception)
+                }
+            };
+            let (first, second) = if backward {
+                (0..split, split..count)
+            } else {
+                (split..count, 0..split)
+            };
+            find(first)
+                .map(|entry| (entry, false))
+                .or_else(|| find(second).map(|entry| (entry, true)))
+                .map(|(entry, wrapped)| (self.lead_rows() + folds.row_of(entry, 0), wrapped))
+        };
+        let Some((row, wrapped)) = found else {
+            self.notice = Some("no exceptions");
+            return;
+        };
+        self.following = false;
+        self.viewport.goto(row);
+        self.notice = wrapped.then_some("exceptions wrapped");
     }
 
     /// The index entry that viewport row `row` shows, `None` for the truncation row and
