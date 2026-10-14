@@ -26,6 +26,8 @@ pub struct Options {
 #[derive(Debug, Clone)]
 pub struct Matcher {
     regex: regex::bytes::Regex,
+    pattern: String,
+    options: Options,
 }
 
 impl Matcher {
@@ -41,7 +43,11 @@ impl Matcher {
             .case_insensitive(options.ignore_case)
             .build()
             .map_err(|error| format!("invalid regex: {}", last_line(&error.to_string())))?;
-        Ok(Self { regex })
+        Ok(Self {
+            regex,
+            pattern: pattern.to_owned(),
+            options,
+        })
     }
 
     /// The byte ranges of the matches in `line`, a single line without its line
@@ -49,6 +55,16 @@ impl Matcher {
     /// the start and end of the line.
     pub fn find(&self, line: &[u8]) -> Vec<Range<usize>> {
         self.matches(line).collect()
+    }
+
+    /// The pattern as given to [`new`](Self::new).
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// The options given to [`new`](Self::new).
+    pub fn options(&self) -> Options {
+        self.options
     }
 
     /// Whether [`find`](Self::find) would find anything in `line`.

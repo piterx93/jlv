@@ -13,11 +13,11 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, FileChange, action};
-use crate::filter::{Classes, Filters, TimeSpec};
+use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
 use crate::test_support::{
-    self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, detected_app, following_app,
+    self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
     hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_filter,
     wait_for_index, wait_for_index_within,
 };
@@ -202,8 +202,8 @@ fn no_matching_entries_shows_a_notice_in_place_of_the_rows() {
     wait_for_filter(&mut app);
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "jlv ─ app.log ─ 153 B ─ Raw                                                     "
+    "Filters: text[nothing]                                                          "
     "no entries match the current filters                                            "
-    "                                                                                "
     "                                                                                "
     "                                                                                "
     "                                                                                "
@@ -387,6 +387,165 @@ fn time_panel_error_replaces_the_key_hints_in_the_footer() {
     assert_eq!(row(&terminal, 23), TimeSpec::parse("soon").unwrap_err());
 }
 
+/// The keys that open the text filter prompt, type `pattern` into it and toggle
+/// regex.
+fn regex_prompt_keys(pattern: &str) -> Vec<KeyEvent> {
+    let mut keys = vec![key(KeyCode::F(4))];
+    keys.extend(pattern.chars().map(char_key));
+    keys.push(ctrl('r'));
+    keys
+}
+
+#[test]
+fn text_prompt_shows_the_pattern_and_its_options_over_the_rows() {
+    let keys = regex_prompt_keys("time.*out");
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.example.App - step 8                             "
+    " 12:00:00.009 [main] INFO  com.example.App - step 9                             "
+    " 12:00:00.┌ Text filter ─────────────────────────────────────────────┐          "
+    " 12:00:00.│ ▶time.*out                                               │          "
+    " 12:00:00.│  [x] regex  [ ] ignore case                              │          "
+    " 12:00:00.└──────────────────────────────────────────────────────────┘          "
+    " 12:00:00.014 [main] INFO  com.example.App - step 14                            "
+    " 12:00:00.015 [main] INFO  com.example.App - step 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel                          "
+    "#);
+}
+
+#[test]
+fn text_prompt_error_replaces_the_key_hints_in_the_footer() {
+    let mut keys = regex_prompt_keys("(");
+    keys.push(key(KeyCode::Enter));
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+    let options = matcher::Options {
+        regex: true,
+        ignore_case: false,
+    };
+    assert_eq!(row(&terminal, 23), Matcher::new("(", options).unwrap_err());
+}
+
+// --- level counters and the filter bar ---
+
+/// Entries of four levels and three classes, five minutes apart at most, most of
+/// them about a timeout.
+const FILTER_LOG: &str = concat!(
+    "2026-10-07 12:04:00.000 [main] WARN  com.myco.pay.PayClient - Retry 1/3 after timeout\n",
+    "2026-10-07 12:05:00.000 [main] ERROR com.myco.pay.PayClient - Payment timeout\n",
+    "2026-10-07 12:06:00.000 [main] INFO  com.myco.pay.PayClient - Payment retried after timeout\n",
+    "2026-10-07 12:07:00.000 [main] DEBUG com.myco.db.Sql - select timeout\n",
+    "2026-10-07 12:08:00.000 [main] ERROR com.myco.order.Orders - Order 43 failed\n",
+    "2026-10-07 12:09:00.000 [main] WARN  org.hibernate.SQL - Slow query timeout\n",
+    "2026-10-07 12:10:00.000 [main] WARN  com.myco.pay.PayClient - Retry 2/3 after timeout\n",
+);
+
+#[test]
+fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_bar() {
+    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 565 B ─ Logback                                  E:2 W:3 I:1 D:1"
+    "▶12:04:00.000 WARN  com.myco.pay.PayClient   Retry 1/3 after timeout            "
+    " 12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
+    " 12:06:00.000 INFO  com.myco.pay.PayClient   Payment retried after timeout      "
+    " 12:07:00.000 DEBUG com.myco.db.Sql          select timeout                     "
+    " 12:08:00.000 ERROR com.myco.order.Orders    Order 43 failed                    "
+    " 12:09:00.000 WARN  org.hibernate.SQL        Slow query timeout                 "
+    " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+/// The counters count the INFO entry the level filter hides, but none of the entries
+/// the other filters hide.
+#[test]
+fn filter_bar_shows_every_active_filter_under_the_header() {
+    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    app.set_filters(Filters {
+        levels: Levels::only(&[Level::Warn, Level::Error, Level::Fatal]),
+        classes: Classes::parse(["com.myco.*", "!Sql"]).unwrap(),
+        text: Some(Matcher::new("time", matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    });
+    app.set_time_filter(Some(TimeFilter {
+        spec: TimeSpec::parse("5m").unwrap(),
+        base: Base::File,
+    }));
+    wait_for_filter(&mut app);
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 565 B ─ Logback                                      E:1 W:1 I:1"
+    "Filters: level[W E F]  class[com.myco.* !Sql]  time[last 5m (file)]  text[time] "
+    "▶12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
+    " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn filter_bar_names_the_options_of_the_text_filter() {
+    let mut app = hundred_lines();
+    let options = matcher::Options {
+        regex: true,
+        ignore_case: true,
+    };
+    app.set_filters(Filters {
+        text: Some(Matcher::new("Time.*out", options).unwrap()),
+        ..Filters::default()
+    });
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "Filters: text[Time.*out (regex, ignore case)]"
+    );
+}
+
 #[test]
 fn header_ends_with_the_notice_about_the_last_key() {
     let mut app = hundred_lines();
@@ -396,6 +555,41 @@ fn header_ends_with_the_notice_about_the_last_key() {
     assert_eq!(
         row(&terminal, 0),
         "jlv ─ app.log ─ 5.1 KB ─ Raw ─ the selected entry has no class"
+    );
+}
+
+/// A headless entry, selected, then an entry of each level from TRACE to ERROR.
+const HEADLESS_FIRST_LOG: &str = concat!(
+    "starting up\n",
+    "2026-10-07 12:00:00.000 [main] TRACE com.example.App - trace\n",
+    "2026-10-07 12:00:01.000 [main] DEBUG com.example.App - debug\n",
+    "2026-10-07 12:00:02.000 [main] INFO  com.example.App - info\n",
+    "2026-10-07 12:00:03.000 [main] WARN  com.example.App - warn\n",
+    "2026-10-07 12:00:04.000 [main] ERROR com.example.App - error\n",
+);
+
+/// The header at `width` columns after `c` on the headless entry, which has no class.
+fn header_with_a_notice(width: u16) -> String {
+    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    let mut terminal = drawn(&mut app, width, 24, Theme::Styled);
+    app.key(char_key('c'));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    row(&terminal, 0)
+}
+
+#[test]
+fn level_counters_take_the_columns_the_title_leaves_after_a_space() {
+    assert_eq!(
+        header_with_a_notice(85),
+        "jlv ─ app.log ─ 315 B ─ Logback ─ the selected entry has no class E:1 W:1 I:1 D:1 T:1"
+    );
+}
+
+#[test]
+fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
+    assert_eq!(
+        header_with_a_notice(84),
+        "jlv ─ app.log ─ 315 B ─ Logback ─ the selected entry has no class"
     );
 }
 
@@ -437,7 +631,10 @@ fn header_names_the_preset_the_file_is_read_in() {
         b"2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
     );
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
-    assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 63 B ─ Logback");
+    assert_eq!(
+        row(&terminal, 0),
+        "jlv ─ app.log ─ 63 B ─ Logback                                               I:1"
+    );
 }
 
 #[test]
@@ -461,6 +658,17 @@ fn too_small_terminal_says_so_instead_of_showing_lines() {
     "                                                            "
     "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom"
     "#);
+}
+
+#[test]
+fn too_small_terminal_shows_no_filter_bar() {
+    let mut app = hundred_lines();
+    app.set_filters(Filters {
+        text: Some(Matcher::new("step", matcher::Options::default()).unwrap()),
+        ..Filters::default()
+    });
+    let terminal = drawn(&mut app, 60, 9, Theme::Styled);
+    assert_eq!(row(&terminal, 1), TOO_SMALL);
 }
 
 /// The buffer's debug view lists every change of style: the header in bold reverse
@@ -576,7 +784,7 @@ fn plain_theme_draws_the_table_without_any_style() {
     Buffer {
         area: Rect { x: 0, y: 0, width: 80, height: 24 },
         content: [
-            "jlv ─ app.log ─ 500 B ─ Logback                                                 ",
+            "jlv ─ app.log ─ 500 B ─ Logback                          F:1 E:1 W:1 I:1 D:1 T:1",
             "▶12:00:00.100 TRACE com.example.App          Tick                               ",
             " 12:00:00.200 DEBUG com.example.App          Config loaded                      ",
             " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   ",

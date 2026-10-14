@@ -14,7 +14,8 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 /// The `width`×`height` screen of the fixture `name` read in `preset`, opened at the
-/// top with the whole file indexed, without line numbers. Timestamps are shown in
+/// top with the whole file indexed, without line numbers. The header ends with the
+/// level counters of the whole file. Timestamps are shown in
 /// Warsaw time, the offset the Spring Boot 3 fixture writes; time-only logs are
 /// dated from a modification time on the morning of 2026-10-08.
 fn screen(preset: Preset, name: &str, width: u16, height: u16) -> String {
@@ -48,7 +49,7 @@ fn screen(preset: Preset, name: &str, width: u16, height: u16) -> String {
 fn logback_at_80_by_24() {
     let screen = screen(Preset::Logback, "logback.log", 80, 24);
     assert_snapshot!(screen, @r#"
-    "jlv ─ logback.log ─ 4.7 KB ─ Logback                                            "
+    "jlv ─ logback.log ─ 4.7 KB ─ Logback                        E:3 W:4 I:11 D:3 T:1"
     "▶09:14:02.118 INFO  c.e.shop.ShopApplication Starting ShopApplication v1.4.2 usi"
     " 09:14:02.121 DEBUG c.e.shop.ShopApplication Running with Spring Boot v3.3.4, Sp"
     " 09:14:03.502 INFO  o.s.b.w.e.t.TomcatWebSe… Tomcat initialized with port 8080 ("
@@ -79,7 +80,7 @@ fn logback_at_80_by_24() {
 fn logback_at_120_by_30() {
     let screen = screen(Preset::Logback, "logback.log", 120, 30);
     assert_snapshot!(screen, @r#"
-    "jlv ─ logback.log ─ 4.7 KB ─ Logback                                                                                    "
+    "jlv ─ logback.log ─ 4.7 KB ─ Logback                                                                E:3 W:4 I:11 D:3 T:1"
     "▶2026-10-07 09:14:02.118 INFO  com.example.shop.ShopApplication     Starting ShopApplication v1.4.2 using Java 21.0.4 wi"
     " 2026-10-07 09:14:02.121 DEBUG com.example.shop.ShopApplication     Running with Spring Boot v3.3.4, Spring v6.1.13     "
     " 2026-10-07 09:14:03.502 INFO  o.s.b.w.e.tomcat.TomcatWebServer     Tomcat initialized with port 8080 (http)            "
@@ -116,7 +117,7 @@ fn logback_at_120_by_30() {
 fn logback_basic_at_80_by_24() {
     let screen = screen(Preset::LogbackBasic, "logback-basic.log", 80, 24);
     assert_snapshot!(screen, @r#"
-    "jlv ─ logback-basic.log ─ 3.0 KB ─ Logback basic                                "
+    "jlv ─ logback-basic.log ─ 3.0 KB ─ Logback basic            E:2 W:2 I:11 D:6 T:1"
     "▶23:58:41.007 INFO  c.example.batch.BatchApp Starting nightly import            "
     " 23:58:41.093 DEBUG c.e.b.c.ImportConfig     Source directory: /data/inbox      "
     " 23:58:41.102 DEBUG c.e.b.c.ImportConfig     Batch size: 500                    "
@@ -147,7 +148,7 @@ fn logback_basic_at_80_by_24() {
 fn logback_basic_at_120_by_30() {
     let screen = screen(Preset::LogbackBasic, "logback-basic.log", 120, 30);
     assert_snapshot!(screen, @r#"
-    "jlv ─ logback-basic.log ─ 3.0 KB ─ Logback basic                                                                        "
+    "jlv ─ logback-basic.log ─ 3.0 KB ─ Logback basic                                                    E:2 W:2 I:11 D:6 T:1"
     "▶2026-10-07 23:58:41.007 INFO  com.example.batch.BatchApp           Starting nightly import                             "
     " 2026-10-07 23:58:41.093 DEBUG c.e.batch.config.ImportConfig        Source directory: /data/inbox                       "
     " 2026-10-07 23:58:41.102 DEBUG c.e.batch.config.ImportConfig        Batch size: 500                                     "
@@ -184,7 +185,7 @@ fn logback_basic_at_120_by_30() {
 fn spring3_at_80_by_24() {
     let screen = screen(Preset::Spring3, "spring3.log", 80, 24);
     assert_snapshot!(screen, @r#"
-    "jlv ─ spring3.log ─ 6.3 KB ─ Spring Boot 3                                      "
+    "jlv ─ spring3.log ─ 6.3 KB ─ Spring Boot 3                  E:3 W:3 I:19 D:1 T:2"
     "▶                                             [+9]                              "
     " 09:14:02.118 INFO  c.e.shop.ShopApplication Starting ShopApplication v1.4.2 usi"
     " 09:14:02.121 DEBUG c.e.shop.ShopApplication Running with Spring Boot v3.3.4, Sp"
@@ -215,7 +216,7 @@ fn spring3_at_80_by_24() {
 fn spring3_at_120_by_30() {
     let screen = screen(Preset::Spring3, "spring3.log", 120, 30);
     assert_snapshot!(screen, @r#"
-    "jlv ─ spring3.log ─ 6.3 KB ─ Spring Boot 3                                                                              "
+    "jlv ─ spring3.log ─ 6.3 KB ─ Spring Boot 3                                                          E:3 W:3 I:19 D:1 T:2"
     "▶                                                                    [+9]                                               "
     " 2026-10-07 09:14:02.118 INFO  com.example.shop.ShopApplication     Starting ShopApplication v1.4.2 using Java 21.0.4 wi"
     " 2026-10-07 09:14:02.121 DEBUG com.example.shop.ShopApplication     Running with Spring Boot v3.3.4, Spring v6.1.13     "
@@ -252,7 +253,7 @@ fn spring3_at_120_by_30() {
 fn spring2_at_80_by_24() {
     let screen = screen(Preset::Spring2, "spring2.log", 80, 24);
     assert_snapshot!(screen, @r#"
-    "jlv ─ spring2.log ─ 4.2 KB ─ Spring Boot 2                                      "
+    "jlv ─ spring2.log ─ 4.2 KB ─ Spring Boot 2                  E:2 W:2 I:14 D:2 T:1"
     "▶09:14:02.118 INFO  c.e.shop.ShopApplication Starting ShopApplication v1.2.0 usi"
     " 09:14:02.121 DEBUG c.e.shop.ShopApplication Running with Spring Boot v2.7.18, S"
     " 09:14:02.122 INFO  c.e.shop.ShopApplication No active profile set, falling back"
@@ -283,7 +284,7 @@ fn spring2_at_80_by_24() {
 fn spring2_at_120_by_30() {
     let screen = screen(Preset::Spring2, "spring2.log", 120, 30);
     assert_snapshot!(screen, @r#"
-    "jlv ─ spring2.log ─ 4.2 KB ─ Spring Boot 2                                                                              "
+    "jlv ─ spring2.log ─ 4.2 KB ─ Spring Boot 2                                                          E:2 W:2 I:14 D:2 T:1"
     "▶2026-10-07 09:14:02.118 INFO  com.example.shop.ShopApplication     Starting ShopApplication v1.2.0 using Java 11.0.24 o"
     " 2026-10-07 09:14:02.121 DEBUG com.example.shop.ShopApplication     Running with Spring Boot v2.7.18, Spring v5.3.31    "
     " 2026-10-07 09:14:02.122 INFO  com.example.shop.ShopApplication     No active profile set, falling back to 1 default pro"
@@ -320,7 +321,7 @@ fn spring2_at_120_by_30() {
 fn wildfly_at_80_by_24() {
     let screen = screen(Preset::Wildfly, "wildfly.log", 80, 24);
     assert_snapshot!(screen, @r#"
-    "jlv ─ wildfly.log ─ 5.3 KB ─ WildFly                                            "
+    "jlv ─ wildfly.log ─ 5.3 KB ─ WildFly                        E:4 W:4 I:17 D:1 T:1"
     "▶09:13:51.202 INFO  org.jboss.modules        JBoss Modules version 2.1.5.Final  "
     " 09:13:51.804 INFO  org.jboss.msc            JBoss MSC version 1.5.5.Final      "
     " 09:13:51.813 INFO  org.jboss.threads        JBoss Threads version 2.4.0.Final  "
@@ -351,7 +352,7 @@ fn wildfly_at_80_by_24() {
 fn wildfly_at_120_by_30() {
     let screen = screen(Preset::Wildfly, "wildfly.log", 120, 30);
     assert_snapshot!(screen, @r#"
-    "jlv ─ wildfly.log ─ 5.3 KB ─ WildFly                                                                                    "
+    "jlv ─ wildfly.log ─ 5.3 KB ─ WildFly                                                                E:4 W:4 I:17 D:1 T:1"
     "▶2026-10-07 09:13:51.202 INFO  org.jboss.modules                    JBoss Modules version 2.1.5.Final                   "
     " 2026-10-07 09:13:51.804 INFO  org.jboss.msc                        JBoss MSC version 1.5.5.Final                       "
     " 2026-10-07 09:13:51.813 INFO  org.jboss.threads                    JBoss Threads version 2.4.0.Final                   "
@@ -388,7 +389,7 @@ fn wildfly_at_120_by_30() {
 fn wildfly_console_at_80_by_24() {
     let screen = screen(Preset::WildflyConsole, "wildfly-console.log", 80, 24);
     assert_snapshot!(screen, @r#"
-    "jlv ─ wildfly-console.log ─ 5.6 KB ─ WildFly console                            "
+    "jlv ─ wildfly-console.log ─ 5.6 KB ─ WildFly console            E:3 W:2 I:18 D:1"
     "▶                                            ============================= [+11]"
     " 23:59:56.102 INFO  org.jboss.modules        JBoss Modules version 2.1.5.Final  "
     " 23:59:56.690 INFO  org.jboss.msc            JBoss MSC version 1.5.5.Final      "
@@ -419,7 +420,7 @@ fn wildfly_console_at_80_by_24() {
 fn wildfly_console_at_120_by_30() {
     let screen = screen(Preset::WildflyConsole, "wildfly-console.log", 120, 30);
     assert_snapshot!(screen, @r#"
-    "jlv ─ wildfly-console.log ─ 5.6 KB ─ WildFly console                                                                    "
+    "jlv ─ wildfly-console.log ─ 5.6 KB ─ WildFly console                                                    E:3 W:2 I:18 D:1"
     "▶                                                                   ============================================== [+11]"
     " 2026-10-07 23:59:56.102 INFO  org.jboss.modules                    JBoss Modules version 2.1.5.Final                   "
     " 2026-10-07 23:59:56.690 INFO  org.jboss.msc                        JBoss MSC version 1.5.5.Final                       "

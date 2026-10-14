@@ -23,6 +23,7 @@ use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::index::{self, Indexer, Progress, Record, Settings};
+use crate::matcher::{self, Matcher};
 use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
 
@@ -73,6 +74,10 @@ pub enum Action {
     ClassPanel,
     /// Opens the time panel ([`App::panel`]).
     TimePanel,
+    /// Opens the text filter prompt ([`App::panel`]).
+    TextPanel,
+    /// Clears every filter: the level, class, time and text filters.
+    ClearFilters,
     /// Applies what the open panel edits and closes it.
     Confirm,
     /// Closes the open panel without applying its edits.
@@ -88,10 +93,11 @@ pub enum Action {
 /// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
 /// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
 /// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
-/// hides it, `F5` opens the time panel, `F6` the class panel, `Enter` confirms, `Esc`
-/// cancels and `q F10 Ctrl-c` quit. Characters ignore Shift (the character already
-/// says which case it is) but not Ctrl or Alt; other keys do nothing with any
-/// modifier. Key releases do nothing; held keys repeat.
+/// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
+/// class panel, `x` clears every filter, `Enter` confirms, `Esc` cancels and `q F10
+/// Ctrl-c` quit. Characters ignore Shift (the character already says which case it
+/// is) but not Ctrl or Alt; other keys do nothing with any modifier. Key releases do
+/// nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -118,8 +124,10 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
         (KeyCode::Char('c'), KeyModifiers::NONE) => Action::OnlyClass,
         (KeyCode::Char('C'), KeyModifiers::NONE) => Action::HideClass,
+        (KeyCode::F(4) | KeyCode::Char('&'), KeyModifiers::NONE) => Action::TextPanel,
         (KeyCode::F(5), KeyModifiers::NONE) => Action::TimePanel,
         (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
+        (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ClearFilters,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
@@ -296,12 +304,71 @@ impl TimePanel {
     }
 }
 
+/// A pattern prompt while it is open: the pattern as typed so far and how it is
+/// read, not applied yet, and why the pattern last confirmed doesn't compile, if it
+/// doesn't. The text filter prompt is one; search reads its pattern the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub pattern: String,
+    pub options: matcher::Options,
+    pub error: Option<String>,
+}
+
+impl Prompt {
+    /// Opens on `matcher`'s pattern and options, or on an empty plain,
+    /// case-sensitive pattern without one.
+    fn new(matcher: Option<&Matcher>) -> Prompt {
+        Prompt {
+            pattern: matcher.map_or_else(String::new, |matcher| matcher.pattern().to_owned()),
+            options: matcher.map_or_else(matcher::Options::default, Matcher::options),
+            error: None,
+        }
+    }
+
+    /// Edits the prompt as `key` asks, or returns the action it stands for here.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Before `typed`, which has no use for keys with Ctrl but `Ctrl-c`.
+        match normalized(key) {
+            Some((KeyCode::Char('r'), KeyModifiers::CONTROL)) => {
+                self.options.regex = !self.options.regex;
+                return None;
+            }
+            Some(
+                (KeyCode::Char('i'), KeyModifiers::CONTROL) | (KeyCode::Tab, KeyModifiers::NONE),
+            ) => {
+                self.options.ignore_case = !self.options.ignore_case;
+                return None;
+            }
+            _ => {}
+        }
+        match typed(key)? {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.pattern.push(c),
+            Typed::Backspace => {
+                self.pattern.pop();
+            }
+            Typed::Other(_) => {}
+        }
+        None
+    }
+
+    /// The text filter the prompt sets, `None` for an empty pattern.
+    fn matcher(&self) -> Result<Option<Matcher>, String> {
+        if self.pattern.is_empty() {
+            return Ok(None);
+        }
+        Matcher::new(&self.pattern, self.options).map(Some)
+    }
+}
+
 /// The panel open over the rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
     Levels(LevelPanel),
     Classes(ClassPanel),
     Time(TimePanel),
+    /// The text filter prompt.
+    Text(Prompt),
 }
 
 impl Panel {
@@ -309,7 +376,7 @@ impl Panel {
         match self {
             Panel::Levels(panel) => panel.edit(action),
             // Their text is edited through `App::key`, not actions.
-            Panel::Classes(_) | Panel::Time(_) => {}
+            Panel::Classes(_) | Panel::Time(_) | Panel::Text(_) => {}
         }
     }
 }
@@ -553,6 +620,8 @@ pub struct App {
     index: SharedIndex,
     /// The fold state of the index's entries.
     folds: Folds,
+    /// Per level, the entries of the index, as of the last change to it.
+    level_counts: [u32; 6],
     filters: Filters,
     /// What `filters.time` is made of while set.
     time_filter: Option<TimeFilter>,
@@ -652,6 +721,7 @@ impl App {
             source,
             index: Arc::new(RwLock::new(index)),
             folds: Folds::default(),
+            level_counts: [0; 6],
             filters: Filters::default(),
             time_filter: None,
             last_dated: None,
@@ -713,6 +783,7 @@ impl App {
             self.progress = self.indexer.poll(&mut index.records);
             let found = &index.records[known..];
             push_entries(&mut self.folds, self.source.bytes(), found);
+            count_levels(&mut self.level_counts, found, Count::Add);
             let found = found.len();
             drop(index);
             if self.index_brings_new {
@@ -947,7 +1018,12 @@ impl App {
     /// index is complete and takes over, filtered.
     pub fn set_filters(&mut self, filters: Filters) {
         self.filters = filters;
-        self.start_filter();
+        // The index shows as it is, which is cheaper than an engine passing every entry.
+        if hides_nothing(&self.filters) {
+            self.filter = None;
+        } else {
+            self.start_filter();
+        }
         self.viewport = Viewport::new(0, self.viewport.height());
         self.update_rows();
     }
@@ -1002,9 +1078,24 @@ impl App {
             })
     }
 
+    /// The header's level counters, indexed by `Level as usize`: per level, the
+    /// entries of that level that pass every filter but the level filter, so that a
+    /// hidden level doesn't drop to zero. Entries without a level aren't counted.
+    ///
+    /// Without a class, time or text filter they are the index's entries per level
+    /// as of the last [`poll_index`](Self::poll_index), counted as the index takes
+    /// them in. With one, they come in with the filters' results, as
+    /// [`filtering`](Self::filtering) says.
+    pub fn level_counts(&self) -> [u32; 6] {
+        match &self.filter {
+            Some(filter) if narrows_beyond_levels(&self.filters) => filter.engine.filtered().counts,
+            _ => self.level_counts,
+        }
+    }
+
     /// The open panel, if any: [`Panel::Levels`] while the level panel is open,
     /// [`Panel::Classes`] while the class panel is, [`Panel::Time`] while the time
-    /// panel is.
+    /// panel is, [`Panel::Text`] while the text filter prompt is.
     ///
     /// [`Action::LevelPanel`] opens the level panel with the
     /// current level filter and the cursor on TRACE. While it is open, up and down
@@ -1022,6 +1113,11 @@ impl App {
     /// [`Action::TimePanel`] opens the time panel with the current time filter's spec
     /// and base, or an empty spec counted from the file without one. [`App::key`]
     /// edits it.
+    ///
+    /// [`Action::TextPanel`] opens the text filter prompt with the current text
+    /// filter's pattern and options ([`Matcher::pattern`](crate::matcher::Matcher::pattern),
+    /// [`Matcher::options`](crate::matcher::Matcher::options)), or an empty plain,
+    /// case-sensitive pattern without one. [`App::key`] edits it.
     pub fn panel(&self) -> Option<&Panel> {
         self.panel.as_ref()
     }
@@ -1108,6 +1204,15 @@ impl App {
             Action::TimePanel => {
                 self.panel = Some(Panel::Time(TimePanel::new(self.time_filter.as_ref())));
             }
+            Action::TextPanel => {
+                let prompt = Prompt::new(self.filters.text.as_ref());
+                self.panel = Some(Panel::Text(prompt));
+            }
+            Action::ClearFilters => {
+                self.time_filter = None;
+                self.last_dated = None;
+                self.set_filters(Filters::default());
+            }
             Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
@@ -1133,12 +1238,20 @@ impl App {
     /// or clears it for a blank spec; one that doesn't parse keeps the panel open with
     /// the [error](TimePanel::error).
     ///
+    /// The text filter prompt is edited like the time panel, except that `Ctrl-r`
+    /// toggles [regex](crate::matcher::Options::regex) and `Tab` or `Ctrl-i`
+    /// [ignore case](crate::matcher::Options::ignore_case). `Enter` sets the text
+    /// filter to the pattern read as the options say, keeping the other filters, or
+    /// clears it for an empty pattern; an invalid regex keeps the prompt open with
+    /// the [error](Prompt::error).
+    ///
     /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
         let action = match &mut self.panel {
             Some(Panel::Classes(panel)) => panel.key(key),
             Some(Panel::Time(panel)) => panel.key(key),
+            Some(Panel::Text(prompt)) => prompt.key(key),
             _ => action(key),
         };
         if let Some(action) = action {
@@ -1196,6 +1309,7 @@ impl App {
         // Dropping the old indexer stops it.
         self.indexer = Indexer::spawn(Arc::clone(&self.source), self.settings.clone());
         write(&self.index).records.clear();
+        self.level_counts = [0; 6];
         self.reread(0);
         self.progress = Progress {
             indexed: 0,
@@ -1322,7 +1436,17 @@ impl App {
         self.set_source(source);
         let mut index = write(&self.index);
         let known = index.records.len();
+        count_levels(
+            &mut self.level_counts,
+            &index.records[appended_from(known)..],
+            Count::Remove,
+        );
         index::append(&mut index.records, self.source.bytes(), &self.settings);
+        count_levels(
+            &mut self.level_counts,
+            &index.records[appended_from(known)..],
+            Count::Add,
+        );
         push_appended(&mut self.folds, self.source.bytes(), &index.records, known);
         let found = index.records.len().saturating_sub(known);
         drop(index);
@@ -1408,6 +1532,13 @@ impl App {
                         self.panel = Some(Panel::Time(panel));
                     }
                 },
+                Panel::Text(mut prompt) => match prompt.matcher() {
+                    Ok(text) => self.set_text(text),
+                    Err(error) => {
+                        prompt.error = Some(error);
+                        self.panel = Some(Panel::Text(prompt));
+                    }
+                },
             },
             Action::Cancel => {}
             Action::Quit => {
@@ -1431,6 +1562,12 @@ impl App {
     fn set_classes(&mut self, classes: Classes) {
         let others = std::mem::take(&mut self.filters);
         self.set_filters(Filters { classes, ..others });
+    }
+
+    /// Sets the text filter to `text`, keeping the other filters.
+    fn set_text(&mut self, text: Option<Matcher>) {
+        let others = std::mem::take(&mut self.filters);
+        self.set_filters(Filters { text, ..others });
     }
 
     /// Lets `change` change the class filter with the selected entry's class, or
@@ -1605,6 +1742,32 @@ fn last_dated(
         Some(_) => dated(0..from),
         None => None,
     })
+}
+
+/// Whether `filters` let every entry through.
+fn hides_nothing(filters: &Filters) -> bool {
+    filters.levels == Levels::default() && !narrows_beyond_levels(filters)
+}
+
+/// Whether `filters` hide entries by their class, time or text.
+fn narrows_beyond_levels(filters: &Filters) -> bool {
+    filters.classes != Classes::default() || filters.time.is_some() || filters.text.is_some()
+}
+
+enum Count {
+    Add,
+    Remove,
+}
+
+/// Adds the levels of `records` to `counts`, or takes them out.
+fn count_levels(counts: &mut [u32; 6], records: &[Record], count: Count) {
+    for level in records.iter().filter_map(Record::level) {
+        let n = &mut counts[level as usize];
+        *n = match count {
+            Count::Add => *n + 1,
+            Count::Remove => n.saturating_sub(1),
+        };
+    }
 }
 
 /// Whether `entry` shows its continuation lines, `None` if it has none.

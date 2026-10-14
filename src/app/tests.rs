@@ -210,6 +210,17 @@ fn esc_cancels() {
     assert_eq!(action(key(KeyCode::Esc)), Some(Action::Cancel));
 }
 
+#[test]
+fn f4_and_ampersand_open_the_text_filter_prompt() {
+    assert_eq!(action(key(KeyCode::F(4))), Some(Action::TextPanel));
+    assert_eq!(action(char_key('&')), Some(Action::TextPanel));
+}
+
+#[test]
+fn x_clears_the_filters() {
+    assert_eq!(action(char_key('x')), Some(Action::ClearFilters));
+}
+
 // --- key mapping: quitting ---
 
 #[test]
@@ -281,7 +292,7 @@ fn letters_with_alt_are_not_plain_letters() {
 
 #[test]
 fn unbound_keys_do_nothing() {
-    assert_eq!(action(char_key('x')), None);
+    assert_eq!(action(char_key('v')), None);
     assert_eq!(action(key(KeyCode::F(1))), None);
 }
 
@@ -2231,4 +2242,385 @@ fn ctrl_c_quits_while_the_time_panel_is_open() {
     time_panel(&app);
     let app = pressed(app, &[ctrl('c')]);
     assert!(app.should_quit());
+}
+
+// --- text filter ---
+
+const REGEX: matcher::Options = matcher::Options {
+    regex: true,
+    ignore_case: false,
+};
+
+/// `app` with the text filter prompt opened and `keys` pressed in it.
+fn in_text_prompt(app: App, keys: &[KeyEvent]) -> App {
+    let app = pressed(app, &[key(KeyCode::F(4))]);
+    pressed(app, keys)
+}
+
+/// The open text filter prompt of `app`; fails the test if it is closed.
+fn text_prompt(app: &App) -> &Prompt {
+    match app.panel() {
+        Some(Panel::Text(prompt)) => prompt,
+        other => panic!("the text filter prompt is not open: {other:?}"),
+    }
+}
+
+/// The pattern and options of `app`'s text filter, if it has one.
+fn text_of(app: &App) -> Option<(String, matcher::Options)> {
+    let text = app.filters().text.as_ref()?;
+    Some((text.pattern().to_string(), text.options()))
+}
+
+#[test]
+fn text_prompt_opens_with_the_current_pattern_and_options() {
+    let options = matcher::Options {
+        regex: true,
+        ignore_case: true,
+    };
+    let mut app = hundred_lines();
+    app.set_filters(Filters {
+        text: Some(Matcher::new("Fail|Done", options).unwrap()),
+        ..Filters::default()
+    });
+    let app = in_text_prompt(app, &[]);
+    assert_eq!(
+        *text_prompt(&app),
+        Prompt {
+            pattern: "Fail|Done".to_string(),
+            options,
+            error: None,
+        }
+    );
+}
+
+#[test]
+fn characters_typed_in_the_text_prompt_go_into_its_pattern_not_to_their_actions() {
+    let app = in_text_prompt(hundred_lines(), &typing("q1x&G"));
+    assert_eq!(text_prompt(&app).pattern, "q1x&G");
+    assert!(!app.should_quit());
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert_eq!(app.filters().levels, Levels::default());
+}
+
+#[test]
+fn backspace_in_the_text_prompt_deletes_the_last_character_while_there_is_one() {
+    let mut keys = typing("ab");
+    keys.extend([key(KeyCode::Backspace); 3]);
+    keys.extend(typing("c"));
+    let app = in_text_prompt(hundred_lines(), &keys);
+    assert_eq!(text_prompt(&app).pattern, "c");
+}
+
+#[test]
+fn ctrl_r_in_the_text_prompt_toggles_regex() {
+    let app = in_text_prompt(hundred_lines(), &[ctrl('r')]);
+    assert_eq!(text_prompt(&app).options, REGEX);
+    assert_eq!(text_prompt(&app).pattern, "");
+    let app = pressed(app, &[ctrl('r')]);
+    assert_eq!(text_prompt(&app).options, matcher::Options::default());
+}
+
+#[test]
+fn tab_and_ctrl_i_in_the_text_prompt_toggle_ignore_case() {
+    let app = in_text_prompt(hundred_lines(), &[key(KeyCode::Tab)]);
+    assert!(text_prompt(&app).options.ignore_case);
+    let app = pressed(app, &[ctrl('i')]);
+    assert!(!text_prompt(&app).options.ignore_case);
+}
+
+#[test]
+fn enter_applies_the_text_prompt_on_top_of_the_other_filters_and_closes_it() {
+    let app = applied(
+        logback(&[STARTED, FAILED, DONE]),
+        &[Action::ToggleLevel(Level::Warn)],
+    );
+    let mut keys = vec![ctrl('r'), key(KeyCode::Tab)];
+    keys.extend(typing("started|done"));
+    keys.push(key(KeyCode::Enter));
+    let mut app = in_text_prompt(app, &keys);
+    wait_for_filter(&mut app);
+    assert_eq!(app.panel(), None);
+    let options = matcher::Options {
+        regex: true,
+        ignore_case: true,
+    };
+    assert_eq!(text_of(&app), Some(("started|done".to_string(), options)));
+    // DONE matches too, but its level is hidden.
+    assert_eq!(rows(&app), [STARTED.trim_end()]);
+}
+
+#[test]
+fn enter_on_an_empty_text_prompt_clears_the_text_filter() {
+    let app = filtered(logback(&[STARTED, FAILED]), text_filter("Failed"));
+    let mut keys = vec![key(KeyCode::Backspace); "Failed".len()];
+    keys.push(key(KeyCode::Enter));
+    let mut app = in_text_prompt(app, &keys);
+    wait_for_filter(&mut app);
+    assert_eq!(text_of(&app), None);
+    assert_eq!(rows(&app), [STARTED.trim_end(), FAILED.trim_end()]);
+}
+
+#[test]
+fn an_invalid_regex_keeps_the_text_prompt_open_with_the_reason() {
+    let app = in_text_prompt(
+        hundred_lines(),
+        &[ctrl('r'), char_key('('), key(KeyCode::Enter)],
+    );
+    assert_eq!(
+        text_prompt(&app).error,
+        Some(Matcher::new("(", REGEX).unwrap_err())
+    );
+    assert_eq!(text_of(&app), None);
+}
+
+#[test]
+fn esc_closes_the_text_prompt_without_applying_it() {
+    let app = filtered(logback(&[STARTED, FAILED]), text_filter("Failed"));
+    let app = in_text_prompt(app, &[char_key('x'), ctrl('r'), key(KeyCode::Esc)]);
+    assert_eq!(app.panel(), None);
+    assert_eq!(
+        text_of(&app),
+        Some(("Failed".to_string(), matcher::Options::default()))
+    );
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+}
+
+#[test]
+fn ctrl_c_quits_while_the_text_prompt_is_open() {
+    let app = in_text_prompt(hundred_lines(), &[]);
+    text_prompt(&app);
+    let app = pressed(app, &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+// --- every filter at once ---
+
+/// A Logback entry on 2026-10-07.
+fn entry(time: &str, level: &str, class: &str, message: &str) -> String {
+    format!("2026-10-07 {time} [main] {level:<5} {class} - {message}\n")
+}
+
+/// `app` with a filter of every kind set, and their results in: levels but INFO,
+/// classes `com.myco.*` but `!Sql`, the last 5 minutes of the file and, typed into
+/// the text filter prompt, the text `time`.
+fn with_every_filter(mut app: App) -> App {
+    app.set_filters(Filters {
+        levels: all_but(Level::Info),
+        classes: Classes::parse(["com.myco.*", "!Sql"]).unwrap(),
+        ..Filters::default()
+    });
+    app.set_time_filter(since("5m", Base::File));
+    let mut keys = typing("time");
+    keys.push(key(KeyCode::Enter));
+    let mut app = in_text_prompt(app, &keys);
+    wait_for_filter(&mut app);
+    app
+}
+
+#[test]
+fn every_filter_kind_applies_to_appended_entries_while_following() {
+    let first = entry("12:00:00.000", "WARN", "com.myco.pay.PayClient", "timeout");
+    let app = with_every_filter(followed(Preset::Logback, &first));
+    assert_eq!(rows(&app), [first.trim_end()]);
+    let passing = [
+        entry(
+            "12:06:00.000",
+            "WARN",
+            "com.myco.pay.PayClient",
+            "Retry after timeout",
+        ),
+        entry(
+            "12:06:40.000",
+            "ERROR",
+            "com.myco.pay.PayClient",
+            "Payment timeout",
+        ),
+    ];
+    let appended = [
+        passing[0].clone(),
+        entry(
+            "12:06:10.000",
+            "INFO",
+            "com.myco.pay.PayClient",
+            "Paid after timeout",
+        ),
+        entry("12:06:20.000", "ERROR", "org.hibernate.SQL", "Lock timeout"),
+        entry("12:06:25.000", "ERROR", "com.myco.db.Sql", "Lock timeout"),
+        entry(
+            "12:06:30.000",
+            "ERROR",
+            "com.myco.pay.PayClient",
+            "Payment failed",
+        ),
+        passing[1].clone(),
+    ];
+    // The first entry falls out of the last 5 minutes.
+    let mut app = grown(app, &[first, appended.concat()].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(
+        rows(&app),
+        passing.map(|entry| entry.trim_end().to_string())
+    );
+    assert_eq!(app.viewport().selected(), Some(1));
+    assert!(app.following());
+}
+
+// --- clearing the filters ---
+
+#[test]
+fn clearing_the_filters_clears_every_kind_for_good() {
+    let first = entry("12:00:00.000", "INFO", "org.example.App", "started");
+    let app = with_every_filter(followed(Preset::Logback, &first));
+    let mut app = applied(app, &[Action::ClearFilters]);
+    assert_eq!(app.filters().levels, Levels::default());
+    assert_eq!(app.filters().classes, Classes::default());
+    assert_eq!(app.filters().time, None);
+    assert_eq!(text_of(&app), None);
+    assert_eq!(app.time_filter(), None);
+    // A time filter left behind would come back as the last entry moves on.
+    let later = entry("13:00:00.000", "DEBUG", "org.example.App", "later");
+    app = grown(app, &[first.as_str(), &later].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [first.trim_end(), later.trim_end()]);
+}
+
+#[test]
+fn clearing_the_filters_shows_every_entry_at_once() {
+    let app = filtered(logback(&[STARTED, FAILED, DONE]), text_filter("Failed"));
+    let app = applied(app, &[Action::ClearFilters]);
+    assert!(!app.filtering());
+    assert_eq!(
+        rows(&app),
+        [STARTED.trim_end(), FAILED.trim_end(), DONE.trim_end()]
+    );
+}
+
+// --- level counters ---
+
+/// The level counters with `counts` for their levels and 0 for the others.
+fn counters(counts: &[(Level, u32)]) -> [u32; 6] {
+    let mut counters = [0; 6];
+    for &(level, count) in counts {
+        counters[level as usize] = count;
+    }
+    counters
+}
+
+/// A headless entry, then an entry of INFO, ERROR (with a stack trace) and WARN, and
+/// another WARN.
+fn counted_log() -> App {
+    logback(&[
+        "starting up\n",
+        STARTED,
+        FAILED,
+        EXCEPTION,
+        FRAME,
+        DONE,
+        DONE,
+    ])
+}
+
+#[test]
+fn level_counters_count_the_entries_of_each_level_but_not_those_without_one() {
+    assert_eq!(
+        counted_log().level_counts(),
+        counters(&[(Level::Info, 1), (Level::Warn, 2), (Level::Error, 1)])
+    );
+}
+
+#[test]
+fn level_counters_ignore_the_level_filter() {
+    let mut app = applied(counted_log(), &[Action::ToggleLevel(Level::Warn)]);
+    wait_for_filter(&mut app);
+    assert_eq!(
+        app.level_counts(),
+        counters(&[(Level::Info, 1), (Level::Warn, 2), (Level::Error, 1)])
+    );
+}
+
+#[test]
+fn level_counters_under_only_a_level_filter_are_there_before_the_filter_results() {
+    let app = applied(counted_log(), &[Action::ToggleLevel(Level::Warn)]);
+    assert_eq!(
+        app.level_counts(),
+        counters(&[(Level::Info, 1), (Level::Warn, 2), (Level::Error, 1)])
+    );
+}
+
+#[test]
+fn level_counters_count_only_the_entries_that_pass_the_other_filters() {
+    let app = filtered(counted_log(), text_filter("Done"));
+    assert_eq!(app.level_counts(), counters(&[(Level::Warn, 2)]));
+}
+
+#[test]
+fn a_last_line_completed_by_growth_is_counted_once() {
+    let cut = &FAILED[..FAILED.len() - 3];
+    let app = followed(Preset::Logback, &[STARTED, cut].concat());
+    let app = grown(app, &[STARTED, FAILED].concat());
+    assert_eq!(
+        app.level_counts(),
+        counters(&[(Level::Info, 1), (Level::Error, 1)])
+    );
+}
+
+#[test]
+fn a_last_line_that_turns_out_to_continue_the_entry_before_is_no_longer_counted() {
+    // Cut short, the last line looks like the start of an INFO entry; written out, it
+    // continues the one before.
+    let partial = "2026-10-07 12:00:02.000 [main] INFO  com.example.App -";
+    let app = followed(Preset::Logback, &[FAILED, partial].concat());
+    assert_eq!(
+        app.level_counts(),
+        counters(&[(Level::Info, 1), (Level::Error, 1)])
+    );
+    let app = grown(app, &[FAILED, partial, "boom\n"].concat());
+    assert_eq!(app.level_counts(), counters(&[(Level::Error, 1)]));
+}
+
+#[test]
+fn level_counters_start_over_with_the_content_of_a_truncated_file() {
+    let app = followed(Preset::Logback, &[STARTED, FAILED, DONE].concat());
+    let app = truncated(app, DONE);
+    assert_eq!(app.level_counts(), counters(&[(Level::Warn, 1)]));
+}
+
+#[test]
+fn level_counters_after_cycling_the_preset_are_those_of_the_new_preset() {
+    // Logback reads the first two lines, Logback basic the last one.
+    let log = [
+        STARTED,
+        FAILED,
+        "12:00:03.000 [main] WARN  com.example.App - Done\n",
+    ]
+    .concat();
+    let mut app = cycled(app_in(Preset::Logback, log.as_bytes()));
+    wait_for_index(&mut app);
+    let fresh = app_in(app.settings().preset, log.as_bytes());
+    assert_eq!(app.level_counts(), fresh.level_counts());
+    assert_eq!(app.level_counts(), counters(&[(Level::Warn, 1)]));
+}
+
+#[test]
+fn level_counters_under_a_text_filter_take_in_the_matching_appended_entries() {
+    let app = filtered(
+        followed(Preset::Logback, &[STARTED, DONE].concat()),
+        text_filter("Done"),
+    );
+    assert_eq!(app.level_counts(), counters(&[(Level::Warn, 1)]));
+    let mut app = grown(app, &[STARTED, DONE, FAILED, DONE].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(app.level_counts(), counters(&[(Level::Warn, 2)]));
+}
+
+#[test]
+fn level_counters_take_in_appended_entries() {
+    let app = grown(
+        followed(Preset::Logback, STARTED),
+        &[STARTED, FAILED, DONE].concat(),
+    );
+    assert_eq!(
+        app.level_counts(),
+        counters(&[(Level::Info, 1), (Level::Warn, 1), (Level::Error, 1)])
+    );
 }

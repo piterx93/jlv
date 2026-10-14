@@ -161,3 +161,16 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_matcher_keeps_its_pattern_and_options_as_given() {
+    let options = Options {
+        regex: true,
+        ignore_case: true,
+    };
+    let matcher = Matcher::new("time.*out", options).unwrap();
+    assert_eq!(
+        (matcher.pattern(), matcher.options()),
+        ("time.*out", options)
+    );
+}

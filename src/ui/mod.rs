@@ -9,10 +9,10 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ClassPanel, LevelPanel, Panel, TimePanel};
-use crate::filter::{TimeFilter, TimeSpec};
+use crate::app::{App, ClassPanel, LevelPanel, Panel, Prompt, TimePanel};
+use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::format::Level;
 use crate::source::Origin;
 
@@ -59,6 +59,7 @@ const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/B
 const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel";
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
+const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel";
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
@@ -117,7 +118,24 @@ const TAB_STOP: usize = 4;
 /// Preset  Tab File/now  Enter Apply  Esc Cancel`, or the panel's
 /// [error](crate::app::TimePanel::error).
 ///
+/// The text filter prompt is drawn the same way, a box 60 columns wide and 4 high
+/// titled ` Text filter `: the pattern as typed, as ` ▶time.*out`, and below it the
+/// options, as `  [x] regex  [ ] ignore case`. The footer then shows `Ctrl-r Regex
+/// Tab Ignore case  Enter Apply  Esc Cancel`, or the prompt's
+/// [error](crate::app::Prompt::error).
+///
 /// While the app has a [notice](App::notice), the header ends with ` ─ ` and it.
+/// The level counters ([`App::level_counts`]) are right-aligned on the header line,
+/// FATAL to TRACE as `F:1 E:37 W:212 I:5000 D:12 T:3`, levels with no entries left
+/// out. The title comes first: the counters only get the columns it leaves after a
+/// space, and are left out entirely when they don't fit there.
+///
+/// While a filter is active, the line below the header is the filter bar, taken from
+/// the body: `Filters: ` and the active filters two spaces apart, in this order,
+/// `level[W E F]` (the first letters of the levels shown), `class[com.myco.*
+/// !org.hibernate]` (the class rules), `time[last 10m (file)]` (the time filter) and
+/// `text[timeout]` (the pattern; `text[time.*out (regex, ignore case)]` with the
+/// options that are on). Without filters there is no bar.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
     let [header, body, footer] = Layout::vertical([
@@ -149,9 +167,29 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         follow_status(app),
     );
     let bar = Style::new().reversed();
+    let title_width = title.width();
     frame.render_widget(Line::from(title).style(theme.paint(bar.bold())), header);
+    let counters = level_counters(app.level_counts());
+    let room = usize::from(area.width).saturating_sub(title_width + 1);
+    if !counters.is_empty() && counters.width() <= room {
+        frame.render_widget(
+            Line::from(counters)
+                .right_aligned()
+                .style(theme.paint(bar.bold())),
+            header,
+        );
+    }
 
     let fits = area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT;
+    let body = match filter_bar(app) {
+        Some(filters) if fits => {
+            let [bar, body] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+            frame.render_widget(Line::from(filters), bar);
+            body
+        }
+        _ => body,
+    };
     if !fits {
         frame.render_widget(Line::from(TOO_SMALL), body);
     } else if app.nothing_matches() {
@@ -178,6 +216,12 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
                 render_time_panel(frame, panel, body);
             }
             panel_hints(panel.error.as_deref(), TIME_PANEL_HINTS)
+        }
+        Some(Panel::Text(prompt)) => {
+            if fits {
+                render_text_prompt(frame, prompt, body);
+            }
+            panel_hints(prompt.error.as_deref(), TEXT_PROMPT_HINTS)
         }
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
@@ -250,6 +294,75 @@ fn render_time_panel(frame: &mut Frame, panel: &TimePanel, body: Rect) {
         Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Time ")),
         area,
     );
+}
+
+fn render_text_prompt(frame: &mut Frame, prompt: &Prompt, body: Rect) {
+    let check = |on| if on { 'x' } else { ' ' };
+    let lines = vec![
+        Line::from(format!(" ▶{}", printable(&prompt.pattern))),
+        Line::from(format!(
+            "  [{}] regex  [{}] ignore case",
+            check(prompt.options.regex),
+            check(prompt.options.ignore_case)
+        )),
+    ];
+    let area = body.centered(Constraint::Length(60), Constraint::Length(4));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Text filter ")),
+        area,
+    );
+}
+
+/// The header's level counters, FATAL first, without the levels that have no entries.
+fn level_counters(counts: [u32; 6]) -> String {
+    let counters: Vec<String> = Level::ALL
+        .iter()
+        .rev()
+        .filter(|&&level| counts[level as usize] > 0)
+        .map(|&level| format!("{}:{}", &level.name()[..1], counts[level as usize]))
+        .collect();
+    counters.join(" ")
+}
+
+/// The filter bar: the active filters, `None` while there are none.
+fn filter_bar(app: &App) -> Option<String> {
+    let filters = app.filters();
+    let mut active = Vec::new();
+    if filters.levels != Levels::default() {
+        let shown: Vec<_> = Level::ALL
+            .iter()
+            .filter(|&&level| filters.levels.is_on(level))
+            .map(|level| &level.name()[..1])
+            .collect();
+        active.push(format!("level[{}]", shown.join(" ")));
+    }
+    if filters.classes != Classes::default() {
+        active.push(format!(
+            "class[{}]",
+            printable(&filters.classes.rules().join(" "))
+        ));
+    }
+    if let Some(time) = app.time_filter() {
+        active.push(format!("time[{time}]"));
+    }
+    if let Some(text) = &filters.text {
+        let options = text.options();
+        let named: Vec<_> = [
+            (options.regex, "regex"),
+            (options.ignore_case, "ignore case"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let named = if named.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", named.join(", "))
+        };
+        active.push(format!("text[{}{named}]", printable(text.pattern())));
+    }
+    (!active.is_empty()).then(|| format!("Filters: {}", active.join("  ")))
 }
 
 /// The follow status of the header, with the ` ─ ` before it; empty while paused
