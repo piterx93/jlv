@@ -6,7 +6,8 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
 use super::*;
-use crate::format::Preset;
+use crate::filter::Levels;
+use crate::format::{Level, Preset};
 
 fn parse(args: &[&str]) -> Result<Args, clap::Error> {
     Args::try_parse_from(std::iter::once("jlv").chain(args.iter().copied()))
@@ -17,6 +18,7 @@ fn defaults(file: &str) -> Args {
         file: PathBuf::from(file),
         format: None,
         no_follow: false,
+        level: None,
         no_mouse: false,
         config: None,
     }
@@ -168,6 +170,73 @@ fn unknown_format_error_lists_every_preset_name() {
         ),
         "{message}"
     );
+}
+
+/// The levels `-l <arg>` turns on.
+fn levels(arg: &str) -> Levels {
+    parse(&["-l", arg, "app.log"]).unwrap().level.unwrap()
+}
+
+/// The message of the usage error `-l <arg>` makes.
+fn level_error(arg: &str) -> String {
+    let err = parse(&["-l", arg, "app.log"]).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::ValueValidation, "{err}");
+    err.to_string()
+}
+
+const VALID_LEVELS: &str = "TRACE, DEBUG, INFO, WARN, ERROR, FATAL";
+
+#[test]
+fn short_l_turns_on_only_the_levels_it_lists() {
+    assert_eq!(
+        levels("WARN,ERROR"),
+        Levels::only(&[Level::Warn, Level::Error])
+    );
+}
+
+#[test]
+fn long_level_turns_on_only_the_levels_it_lists() {
+    let args = parse(&["--level", "FATAL", "app.log"]).unwrap();
+    assert_eq!(args.level, Some(Levels::only(&[Level::Fatal])));
+}
+
+#[test]
+fn level_names_ignore_case() {
+    assert_eq!(
+        levels("warn,Error"),
+        Levels::only(&[Level::Warn, Level::Error])
+    );
+}
+
+#[test]
+fn warning_means_warn() {
+    assert_eq!(levels("WARNING"), Levels::only(&[Level::Warn]));
+}
+
+#[test]
+fn empty_items_in_the_level_list_are_skipped() {
+    assert_eq!(
+        levels("WARN,,ERROR,"),
+        Levels::only(&[Level::Warn, Level::Error])
+    );
+}
+
+#[test]
+fn a_level_named_twice_counts_once() {
+    assert_eq!(levels("WARN,warn,WARNING"), Levels::only(&[Level::Warn]));
+}
+
+#[test]
+fn unknown_level_error_names_it_and_lists_the_valid_ones() {
+    let message = level_error("WARN,VERBOSE");
+    assert!(message.contains("VERBOSE"), "{message}");
+    assert!(message.contains(VALID_LEVELS), "{message}");
+}
+
+#[test]
+fn empty_level_list_is_an_error_listing_the_valid_levels() {
+    let message = level_error("");
+    assert!(message.contains(VALID_LEVELS), "{message}");
 }
 
 #[test]

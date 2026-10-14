@@ -112,6 +112,69 @@ fn counters_ignore_the_level_filter() {
     );
 }
 
+/// The levels `levels` shows, from least to most severe.
+fn shown(levels: Levels) -> Vec<Level> {
+    Level::ALL
+        .into_iter()
+        .filter(|&level| levels.is_on(level))
+        .collect()
+}
+
+#[test]
+fn toggling_a_level_hides_only_that_level() {
+    let mut levels = Levels::default();
+    levels.toggle(Level::Warn);
+    assert_eq!(
+        shown(levels),
+        [
+            Level::Trace,
+            Level::Debug,
+            Level::Info,
+            Level::Error,
+            Level::Fatal
+        ]
+    );
+}
+
+#[test]
+fn toggling_a_level_twice_shows_it_again() {
+    let mut levels = Levels::default();
+    levels.toggle(Level::Warn);
+    levels.toggle(Level::Warn);
+    assert_eq!(levels, Levels::default());
+}
+
+#[test]
+fn only_shows_just_the_levels_it_names() {
+    let levels = Levels::only(&[Level::Warn, Level::Error]);
+    assert_eq!(shown(levels), [Level::Warn, Level::Error]);
+}
+
+/// A headless line, an INFO entry and an entry whose level jlv doesn't know.
+const WITHOUT_LEVELS: &str = "\
+started
+2026-10-07 12:00:00.000 [main] INFO  com.myco.Order - created
+2026-10-07 12:00:01.000 [main] SEVERE com.myco.Order - failed
+";
+
+#[test]
+fn with_every_level_off_no_entry_matches_not_even_one_without_a_level() {
+    let filters = Filters {
+        levels: Levels::only(&[]),
+        ..Filters::default()
+    };
+    let found = filter(Preset::Logback, WITHOUT_LEVELS, filters);
+    assert_eq!(found.entries, [] as [u32; 0]);
+}
+
+#[test]
+fn entries_without_a_level_are_hidden_while_any_level_is_off() {
+    let mut filters = Filters::default();
+    filters.levels.toggle(Level::Trace);
+    let found = filter(Preset::Logback, WITHOUT_LEVELS, filters);
+    assert_eq!(found.entries, [1]);
+}
+
 #[test]
 fn raw_entries_are_matched_over_the_whole_line() {
     let filters = Filters {

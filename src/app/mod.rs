@@ -16,10 +16,10 @@ use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::filter::{self, Engine, Filters, Indexed};
+use crate::filter::{self, Engine, Filters, Indexed, Levels};
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
-use crate::format::{Anchor, Preset, detect};
+use crate::format::{Anchor, Level, Preset, detect};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
@@ -57,6 +57,14 @@ pub enum Action {
     ToggleFold,
     FoldAll,
     UnfoldAll,
+    /// Shows the level if the level filter hides it, hides it if it shows it.
+    ToggleLevel(Level),
+    /// Opens the level panel ([`App::panel`]).
+    LevelPanel,
+    /// Applies what the open panel edits and closes it.
+    Confirm,
+    /// Closes the open panel without applying its edits.
+    Cancel,
     Quit,
 }
 
@@ -66,7 +74,9 @@ pub enum Action {
 /// `g Home` go to the top, `G End` to the bottom, `← →` scroll the message column,
 /// `F` toggles follow, `T` toggles the thread column, `#` the line numbers, `w`
 /// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
-/// folds every entry, `Z` unfolds every entry and `q F10 Ctrl-c` quit. Characters
+/// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
+/// FATAL, `F2` opens the level panel, `Enter` confirms, `Esc` cancels and `q F10
+/// Ctrl-c` quit. Characters
 /// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
 /// other keys do nothing with any modifier. Key releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
@@ -96,11 +106,52 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char(' '), KeyModifiers::NONE) => Action::ToggleFold,
         (KeyCode::Char('z'), KeyModifiers::NONE) => Action::FoldAll,
         (KeyCode::Char('Z'), KeyModifiers::NONE) => Action::UnfoldAll,
+        (KeyCode::Char(digit @ '1'..='6'), KeyModifiers::NONE) => {
+            Action::ToggleLevel(Level::ALL[usize::from(digit as u8 - b'1')])
+        }
+        (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
+        (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
+        (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
         (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
         | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
         _ => return None,
     };
     Some(action)
+}
+
+/// The level panel while it is open: the level filter as edited so far, not applied
+/// yet, and the level its cursor is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelPanel {
+    pub levels: Levels,
+    pub cursor: Level,
+}
+
+impl LevelPanel {
+    fn edit(&mut self, action: Action) {
+        let cursor = self.cursor as usize;
+        match action {
+            Action::Up => self.cursor = Level::ALL[cursor.saturating_sub(1)],
+            Action::Down => self.cursor = Level::ALL[(cursor + 1).min(Level::ALL.len() - 1)],
+            Action::ToggleFold => self.levels.toggle(self.cursor),
+            Action::ToggleLevel(level) => self.levels.toggle(level),
+            _ => {}
+        }
+    }
+}
+
+/// The panel open over the rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    Levels(LevelPanel),
+}
+
+impl Panel {
+    fn edit(&mut self, action: Action) {
+        match self {
+            Panel::Levels(panel) => panel.edit(action),
+        }
+    }
 }
 
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
@@ -341,6 +392,7 @@ pub struct App {
     shows_thread: bool,
     shows_line_numbers: bool,
     wraps: bool,
+    panel: Option<Panel>,
     quit: bool,
 }
 
@@ -419,6 +471,7 @@ impl App {
             shows_thread: false,
             shows_line_numbers: true,
             wraps: false,
+            panel: None,
             quit: false,
         }
     }
@@ -717,6 +770,19 @@ impl App {
             })
     }
 
+    /// The open panel, if any: [`Panel::Levels`] while the level panel is open.
+    /// [`Action::LevelPanel`] opens it with the
+    /// current level filter and the cursor on TRACE. While it is open, up and down
+    /// (`Action::Up`, `Action::Down`) move its cursor, stopping at TRACE and FATAL,
+    /// [`Action::ToggleFold`] toggles the level under the cursor and
+    /// [`Action::ToggleLevel`] the level it names, in the panel only.
+    /// [`Action::Confirm`] sets the level filter to the panel's, keeping the other
+    /// filters, and closes it; [`Action::Cancel`] closes it and keeps the filters as
+    /// they were. [`Action::Quit`] still quits; every other action does nothing.
+    pub fn panel(&self) -> Option<&Panel> {
+        self.panel.as_ref()
+    }
+
     /// Whether long messages wrap onto the following screen lines instead of being
     /// cut at the right edge.
     pub fn wraps(&self) -> bool {
@@ -742,6 +808,10 @@ impl App {
     /// When the selected line gets folded away, its entry's first line takes its
     /// place.
     pub fn apply(&mut self, action: Action) {
+        if let Some(panel) = self.panel.take() {
+            self.apply_in_panel(panel, action);
+            return;
+        }
         if matches!(
             action,
             Action::Up | Action::PageUp | Action::HalfPageUp | Action::Top
@@ -772,6 +842,18 @@ impl App {
             Action::ToggleFold => self.toggle_fold(),
             Action::FoldAll => self.set_all_folded(true),
             Action::UnfoldAll => self.set_all_folded(false),
+            Action::ToggleLevel(level) => {
+                let mut levels = self.filters.levels;
+                levels.toggle(level);
+                self.set_levels(levels);
+            }
+            Action::LevelPanel => {
+                self.panel = Some(Panel::Levels(LevelPanel {
+                    levels: self.filters.levels,
+                    cursor: Level::Trace,
+                }));
+            }
+            Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
     }
@@ -974,6 +1056,28 @@ impl App {
                 self.folds.toggle(entry);
             }
         }
+    }
+
+    /// `action` while `panel` is open, taken out of `self.panel`: Confirm applies it,
+    /// Cancel and Quit leave it closed, anything else edits it and puts it back.
+    fn apply_in_panel(&mut self, mut panel: Panel, action: Action) {
+        match action {
+            Action::Confirm => match panel {
+                Panel::Levels(panel) => self.set_levels(panel.levels),
+            },
+            Action::Cancel => {}
+            Action::Quit => self.quit = true,
+            _ => {
+                panel.edit(action);
+                self.panel = Some(panel);
+            }
+        }
+    }
+
+    /// Sets the level filter to `levels`, keeping the other filters.
+    fn set_levels(&mut self, levels: Levels) {
+        let others = std::mem::take(&mut self.filters);
+        self.set_filters(Filters { levels, ..others });
     }
 
     fn set_all_folded(&mut self, folded: bool) {

@@ -10,7 +10,7 @@ use proptest::prelude::*;
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
-use crate::filter::{Filters, TimeRange};
+use crate::filter::{Filters, Levels, TimeRange};
 use crate::format::Level;
 use crate::index::Progress;
 use crate::matcher::{self, Matcher};
@@ -160,6 +160,40 @@ fn capital_z_unfolds_every_entry() {
     assert_eq!(action(char_key('Z')), Some(Action::UnfoldAll));
 }
 
+// --- key mapping: filters and panels ---
+
+#[test]
+fn digits_1_to_6_toggle_trace_to_fatal() {
+    for (digit, level) in ('1'..='6').zip(Level::ALL) {
+        assert_eq!(
+            action(char_key(digit)),
+            Some(Action::ToggleLevel(level)),
+            "{digit}"
+        );
+    }
+}
+
+#[test]
+fn digits_0_and_7_do_nothing() {
+    assert_eq!(action(char_key('0')), None);
+    assert_eq!(action(char_key('7')), None);
+}
+
+#[test]
+fn f2_opens_the_level_panel() {
+    assert_eq!(action(key(KeyCode::F(2))), Some(Action::LevelPanel));
+}
+
+#[test]
+fn enter_confirms() {
+    assert_eq!(action(key(KeyCode::Enter)), Some(Action::Confirm));
+}
+
+#[test]
+fn esc_cancels() {
+    assert_eq!(action(key(KeyCode::Esc)), Some(Action::Cancel));
+}
+
 // --- key mapping: quitting ---
 
 #[test]
@@ -237,8 +271,6 @@ fn letters_with_alt_are_not_plain_letters() {
 #[test]
 fn unbound_keys_do_nothing() {
     assert_eq!(action(char_key('x')), None);
-    assert_eq!(action(key(KeyCode::Enter)), None);
-    assert_eq!(action(key(KeyCode::Esc)), None);
     assert_eq!(action(key(KeyCode::F(1))), None);
 }
 
@@ -1452,4 +1484,124 @@ fn nothing_matches_only_once_the_index_and_the_results_are_complete() {
         app.poll_index();
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+// --- level filter ---
+
+/// Every level shown but `hidden`.
+fn all_but(hidden: Level) -> Levels {
+    let mut levels = Levels::default();
+    levels.toggle(hidden);
+    levels
+}
+
+/// `STARTED`, `FAILED` and `DONE` filtered to the messages with an `a`: `Started`
+/// and `Failed`.
+fn with_an_a() -> App {
+    filtered(logback(&[STARTED, FAILED, DONE]), text_filter("a"))
+}
+
+/// The open level panel of `app`; fails the test if it is closed.
+fn panel(app: &App) -> LevelPanel {
+    match app.panel() {
+        Some(&Panel::Levels(panel)) => panel,
+        None => panic!("the level panel is not open"),
+    }
+}
+
+#[test]
+fn level_key_hides_that_level_on_top_of_the_other_filters() {
+    let mut app = applied(with_an_a(), &[Action::ToggleLevel(Level::Error)]);
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [STARTED.trim_end()]);
+}
+
+#[test]
+fn level_panel_opens_with_the_current_levels_and_the_cursor_on_trace() {
+    let app = applied(
+        logback(&[STARTED]),
+        &[Action::ToggleLevel(Level::Error), Action::LevelPanel],
+    );
+    assert_eq!(
+        panel(&app),
+        LevelPanel {
+            levels: all_but(Level::Error),
+            cursor: Level::Trace,
+        }
+    );
+}
+
+#[test]
+fn panel_cursor_moves_between_trace_and_fatal() {
+    let mut app = applied(logback(&[STARTED]), &[Action::LevelPanel, Action::Up]);
+    assert_eq!(panel(&app).cursor, Level::Trace);
+    for _ in 0..7 {
+        app.apply(Action::Down);
+    }
+    assert_eq!(panel(&app).cursor, Level::Fatal);
+    app.apply(Action::Up);
+    assert_eq!(panel(&app).cursor, Level::Error);
+}
+
+#[test]
+fn moves_while_the_panel_is_open_keep_the_selected_row() {
+    let mut app = logback(&[STARTED, FAILED, DONE]);
+    app.resize(10);
+    let app = applied(app, &[Action::LevelPanel, Action::Down, Action::Bottom]);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn space_in_the_panel_toggles_the_level_under_the_cursor_in_the_panel_only() {
+    let app = applied(
+        logback(&[STARTED]),
+        &[Action::LevelPanel, Action::Down, Action::ToggleFold],
+    );
+    assert_eq!(panel(&app).levels, all_but(Level::Debug));
+    assert_eq!(app.filters().levels, Levels::default());
+}
+
+#[test]
+fn level_key_in_the_panel_toggles_that_level_in_the_panel_only() {
+    let app = applied(
+        logback(&[STARTED]),
+        &[Action::LevelPanel, Action::ToggleLevel(Level::Warn)],
+    );
+    assert_eq!(panel(&app).levels, all_but(Level::Warn));
+    assert_eq!(app.filters().levels, Levels::default());
+}
+
+#[test]
+fn confirm_applies_the_panel_levels_on_top_of_the_other_filters_and_closes_it() {
+    let mut app = applied(
+        with_an_a(),
+        &[
+            Action::LevelPanel,
+            Action::ToggleLevel(Level::Info),
+            Action::Confirm,
+        ],
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(app.panel(), None);
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+}
+
+#[test]
+fn cancel_closes_the_panel_and_keeps_the_filters() {
+    let app = applied(
+        logback(&[STARTED]),
+        &[
+            Action::LevelPanel,
+            Action::ToggleLevel(Level::Info),
+            Action::Cancel,
+        ],
+    );
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.filters().levels, Levels::default());
+}
+
+#[test]
+fn quit_quits_while_the_panel_is_open() {
+    let app = applied(logback(&[STARTED]), &[Action::LevelPanel, Action::Quit]);
+    assert!(app.should_quit());
 }

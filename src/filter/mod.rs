@@ -51,6 +51,27 @@ pub struct Levels {
 }
 
 impl Levels {
+    /// Only `levels` shown, every other level hidden; none shown for an empty slice.
+    pub fn only(levels: &[Level]) -> Levels {
+        let mut only = Levels {
+            hidden: [true; Level::ALL.len()],
+        };
+        for &level in levels {
+            only.set(level, true);
+        }
+        only
+    }
+
+    /// Whether `level` is shown.
+    pub fn is_on(&self, level: Level) -> bool {
+        !self.hidden[level as usize]
+    }
+
+    /// Hides `level` if it is shown, shows it if it is hidden.
+    pub fn toggle(&mut self, level: Level) {
+        self.set(level, !self.is_on(level));
+    }
+
     /// Shows `level` if `on`, else hides it.
     pub fn set(&mut self, level: Level, on: bool) {
         self.hidden[level as usize] = !on;
@@ -58,7 +79,7 @@ impl Levels {
 
     fn shows(&self, level: Option<Level>) -> bool {
         match level {
-            Some(level) => !self.hidden[level as usize],
+            Some(level) => self.is_on(level),
             None => !self.hidden.contains(&true),
         }
     }

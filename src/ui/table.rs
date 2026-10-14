@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{Theme, abbreviate, level_style, printable};
 use crate::app::{App, ShownLine};
-use crate::format::{EntryParser, Level, strip_ansi};
+use crate::format::{EntryParser, strip_ansi};
 use crate::source;
 
 /// The width of the `▶` marker of the selected row.
@@ -194,10 +194,9 @@ impl Columns {
             let local = app.settings().zone.to_datetime(timestamp);
             local.strftime(table.timestamp_format).to_string()
         });
-        let level = record.level().map_or_else(
-            || text(&line[head.level]),
-            |level| level_name(level).to_owned(),
-        );
+        let level = record
+            .level()
+            .map_or_else(|| text(&line[head.level]), |level| level.name().to_owned());
         let mut cells = vec![
             Span::raw(cell(&timestamp, table.timestamp) + " "),
             Span::styled(
@@ -288,17 +287,6 @@ impl Row {
 /// `bytes` as text that is safe to show.
 fn text(bytes: &[u8]) -> String {
     printable(&source::display(bytes)).into_owned()
-}
-
-fn level_name(level: Level) -> &'static str {
-    match level {
-        Level::Trace => "TRACE",
-        Level::Debug => "DEBUG",
-        Level::Info => "INFO",
-        Level::Warn => "WARN",
-        Level::Error => "ERROR",
-        Level::Fatal => "FATAL",
-    }
 }
 
 /// `text` in a column `width` wide: padded with spaces, or cut on the right with `…`

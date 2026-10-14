@@ -11,7 +11,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::Args;
-use crate::format::Preset;
+use crate::filter::Levels;
+use crate::format::{Level, Preset};
 use crate::test_support;
 
 #[test]
@@ -76,6 +77,7 @@ fn defaults(file: impl Into<PathBuf>) -> Args {
         file: file.into(),
         format: None,
         no_follow: false,
+        level: None,
         no_mouse: false,
         config: None,
     }
@@ -178,6 +180,21 @@ fn unknown_format_exits_with_2() {
 }
 
 #[test]
+fn unknown_level_exits_with_2() {
+    let dir = TempDir::new().unwrap();
+    let file = log_file(&dir, "app.log");
+    let out = jlv(&[OsStr::new("-l"), OsStr::new("VERBOSE"), file.as_os_str()]);
+    assert_eq!(out.exit_code(), Some(2));
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr
+            .contains("TRACE, DEBUG, INFO, WARN, ERROR, FATAL"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
 fn usage_errors_are_printed_as_the_parser_words_them() {
     let argv = ["jlv", "--format", "log4j", "app.log"];
     let expected = Args::try_parse_from(argv).unwrap_err().to_string();
@@ -229,6 +246,8 @@ fn every_option_is_handed_over() {
         OsStr::new("logback-basic"),
         OsStr::new("--no-follow"),
         OsStr::new("--no-mouse"),
+        OsStr::new("-l"),
+        OsStr::new("warn,error"),
         OsStr::new("--config"),
         OsStr::new("/nonexistent/config.toml"),
         file.as_os_str(),
@@ -240,6 +259,7 @@ fn every_option_is_handed_over() {
             file,
             format: Some(Preset::LogbackBasic),
             no_follow: true,
+            level: Some(Levels::only(&[Level::Warn, Level::Error])),
             no_mouse: true,
             config: Some(PathBuf::from("/nonexistent/config.toml")),
         }

@@ -16,6 +16,7 @@ use ratatui::crossterm::event::{self, Event};
 
 use crate::app::{App, action};
 use crate::cli::Args;
+use crate::filter::Filters;
 use crate::follow::Options;
 use crate::source::{OpenError, Source};
 use crate::ui::Theme;
@@ -115,7 +116,8 @@ fn open_showing_progress(path: &Path, stderr: &mut dyn Write) -> Result<Source, 
 /// It opens at the end of the file, or at the top with `--no-follow`, and watches a
 /// plain file either way, so that `F` can follow it ([`App::watch`]); a gzip file is
 /// read-only and never watched. The file is
-/// read in the preset `--format` names, detected without it. Timestamps without an
+/// read in the preset `--format` names, detected without it, and `--level` sets the
+/// level filter it starts with. Timestamps without an
 /// offset are local time in the system's time zone, and a time-only log is dated
 /// from the file's modification time. Events are read from the terminal; a wait
 /// with a timeout ends with `None` when nothing came.
@@ -134,6 +136,12 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         mtime,
         follow,
     );
+    if let Some(levels) = args.level {
+        app.set_filters(Filters {
+            levels,
+            ..Filters::default()
+        });
+    }
     app.watch(&args.file, file, Options::default())
         .map_err(|err| in_file(&args.file, err))?;
     // try_init can fail after raw mode is on; restore ignores what isn't set up.

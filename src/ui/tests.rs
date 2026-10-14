@@ -229,6 +229,42 @@ fn no_matching_entries_shows_a_notice_in_place_of_the_rows() {
 }
 
 #[test]
+fn level_panel_shows_a_checkbox_per_level_over_the_rows() {
+    let keys = [
+        key(KeyCode::F(2)),
+        char_key('j'),
+        char_key('j'),
+        char_key('4'),
+    ];
+    assert_snapshot!(screen_after(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.e┌ Levels ──────┐p 8                             "
+    " 12:00:00.009 [main] INFO  com.e│  [x] 1 TRACE │p 9                             "
+    " 12:00:00.010 [main] INFO  com.e│  [x] 2 DEBUG │p 10                            "
+    " 12:00:00.011 [main] INFO  com.e│ ▶[x] 3 INFO  │p 11                            "
+    " 12:00:00.012 [main] INFO  com.e│  [ ] 4 WARN  │p 12                            "
+    " 12:00:00.013 [main] INFO  com.e│  [x] 5 ERROR │p 13                            "
+    " 12:00:00.014 [main] INFO  com.e│  [x] 6 FATAL │p 14                            "
+    " 12:00:00.015 [main] INFO  com.e└──────────────┘p 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel                             "
+    "#);
+}
+
+#[test]
 fn header_shows_the_indexing_progress_until_the_index_is_complete() {
     let mut app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"

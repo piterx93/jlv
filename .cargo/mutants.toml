@@ -9,6 +9,8 @@ exclude_re = [
     'src/lib\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)$',
     # The same goes for the flags `run` hands to `App::new`.
     'src/lib\.rs:\d+:\d+: delete ! in run$',
+    # And the level filter of `-l` that `run` sets on the app.
+    'src/lib\.rs:\d+:\d+: delete field levels from struct Filters expression in run$',
     # `at >= start` only differs for a first character wider than the whole line; the
     # message column is at least 19 columns wide and no character is wider than 2.
     'src/ui/table\.rs:\d+:41: replace > with >= in wrap$',

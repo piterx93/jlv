@@ -5,12 +5,13 @@ use std::ffi::OsStr;
 use std::iter;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::App;
+use crate::app::{App, LevelPanel, Panel};
 use crate::format::Level;
 use crate::source::Origin;
 
@@ -54,6 +55,7 @@ const MIN_HEIGHT: u16 = 24;
 const TOO_SMALL: &str = "terminal too small (80×24 needed)";
 const NO_MATCHES: &str = "no entries match the current filters";
 const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
+const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel";
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
@@ -93,6 +95,12 @@ const TAB_STOP: usize = 4;
 /// keeps its size, so a briefly small terminal doesn't move the view. They are
 /// replaced by `no entries match the current filters` once the filters' results are
 /// in and no entry passes ([`App::nothing_matches`]).
+///
+/// While the level panel ([`App::panel`]) is open it is drawn over the middle of
+/// the body, a box 16 columns wide and 8 high titled ` Levels `: one line per level,
+/// TRACE to FATAL, as ` ▶[x] 1 TRACE ` (`▶` on the cursor's line, `[ ]` for a level
+/// the panel hides, then the key that toggles it and the name). The footer then
+/// shows the panel's keys, `j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel`.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
     let [header, body, footer] = Layout::vertical([
@@ -122,15 +130,43 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     );
     let bar = Style::new().reversed();
     frame.render_widget(Line::from(title).style(theme.paint(bar.bold())), header);
-    frame.render_widget(Line::from(KEY_HINTS).style(theme.paint(bar)), footer);
 
-    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+    let fits = area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT;
+    if !fits {
         frame.render_widget(Line::from(TOO_SMALL), body);
     } else if app.nothing_matches() {
         frame.render_widget(Line::from(NO_MATCHES), body);
     } else {
         table::render(frame, app, theme, body);
     }
+    let hints = match app.panel() {
+        None => KEY_HINTS,
+        Some(Panel::Levels(panel)) => {
+            if fits {
+                render_level_panel(frame, panel, body);
+            }
+            LEVEL_PANEL_HINTS
+        }
+    };
+    frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
+}
+
+fn render_level_panel(frame: &mut Frame, panel: &LevelPanel, body: Rect) {
+    let lines: Vec<Line> = Level::ALL
+        .iter()
+        .zip(1..)
+        .map(|(&level, key)| {
+            let cursor = if level == panel.cursor { '▶' } else { ' ' };
+            let check = if panel.levels.is_on(level) { 'x' } else { ' ' };
+            Line::from(format!(" {cursor}[{check}] {key} {:<5} ", level.name()))
+        })
+        .collect();
+    let area = body.centered(Constraint::Length(16), Constraint::Length(8));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Levels ")),
+        area,
+    );
 }
 
 /// The follow status of the header, with the ` ─ ` before it; empty while paused
