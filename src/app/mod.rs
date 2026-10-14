@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io;
 use std::ops::Range;
@@ -97,6 +98,14 @@ pub enum Action {
     NextException,
     /// Selects the previous entry the rows show that has an exception.
     PreviousException,
+    /// Bookmarks the selected entry, or removes its bookmark if it has one.
+    ToggleBookmark,
+    /// Selects the next bookmarked entry the rows show, wrapping around to the first
+    /// with the notice `bookmarks wrapped`, or says `no bookmarks`.
+    NextBookmark,
+    /// Selects the previous bookmarked entry the rows show, wrapping around to the
+    /// last with the notice `bookmarks wrapped`, or says `no bookmarks`.
+    PreviousBookmark,
     /// Applies what the open panel edits and closes it. With no panel open, opens
     /// the details pane ([`App::shows_details`]), or closes it.
     Confirm,
@@ -116,11 +125,12 @@ pub enum Action {
 /// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
 /// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
 /// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
-/// and previous match, `]` and `[` the next and previous entry with an exception,
-/// `Tab` cycles the focus, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
-/// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
-/// other keys do nothing with any modifier. Key releases do nothing; held keys
-/// repeat.
+/// and previous match, `]` and `[` the next and previous entry with an exception, `m`
+/// toggles a bookmark, `'` and `"` select the next and previous bookmark, `Tab`
+/// cycles the focus, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit.
+/// Characters ignore Shift (the character already says which case it is) but not
+/// Ctrl or Alt; other keys do nothing with any modifier. Key releases do nothing;
+/// held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -159,6 +169,9 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
         (KeyCode::Char(']'), KeyModifiers::NONE) => Action::NextException,
         (KeyCode::Char('['), KeyModifiers::NONE) => Action::PreviousException,
+        (KeyCode::Char('m'), KeyModifiers::NONE) => Action::ToggleBookmark,
+        (KeyCode::Char('\''), KeyModifiers::NONE) => Action::NextBookmark,
+        (KeyCode::Char('"'), KeyModifiers::NONE) => Action::PreviousBookmark,
         (KeyCode::Tab, KeyModifiers::NONE) => Action::CycleFocus,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
@@ -771,6 +784,8 @@ pub struct App {
     /// At work since the first [`set_filters`](Self::set_filters).
     filter: Option<Filter>,
     search: Option<Search>,
+    /// The byte offsets of the bookmarks, which hold across changes to the rows.
+    bookmarks: BTreeSet<u64>,
     /// Counts the entries the filters show that match `search`; at work while there
     /// is one.
     matches: Option<Engine>,
@@ -876,6 +891,7 @@ impl App {
             clock: Timestamp::now,
             filter: None,
             search: None,
+            bookmarks: BTreeSet::new(),
             matches: None,
             pending_step: None,
             line_mark: Cell::default(),
@@ -1021,6 +1037,25 @@ impl App {
             number: record.line().map(|first| first + line as u64),
             hidden: folds.hidden_lines(entry),
         })
+    }
+
+    /// Whether row `i` shows a line of a bookmarked entry; `false` for the row that
+    /// marks a truncation. Panics if `i` is not below `viewport().total()`.
+    ///
+    /// A bookmark is the byte offset of the entry it was set on, so it lasts through
+    /// filtering and preset cycling: the entry bookmarked is the one whose bytes hold
+    /// the offset. A truncation or another file at the path
+    /// ([`file_changed`](Self::file_changed)) removes every bookmark.
+    pub fn bookmarked(&self, i: usize) -> bool {
+        let Some(row) = self.fold_row(i) else {
+            return false;
+        };
+        let (entry, _) = self.shown_folds().line_at(row);
+        self.is_bookmarked(&self.shown_record(entry))
+    }
+
+    fn is_bookmarked(&self, record: &Record) -> bool {
+        self.bookmarks.range(record.bytes()).next().is_some()
     }
 
     /// Whether the viewer follows the file: keeps its last row selected as entries
@@ -1538,6 +1573,9 @@ impl App {
             Action::PreviousMatch => self.step_search(true),
             Action::NextException => self.jump_exception(false),
             Action::PreviousException => self.jump_exception(true),
+            Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::NextBookmark => self.jump_bookmark(false),
+            Action::PreviousBookmark => self.jump_bookmark(true),
             Action::Confirm => self.toggle_details(),
             Action::Cancel => {}
             Action::Quit => self.quit = true,
@@ -1724,58 +1762,97 @@ impl App {
         }
     }
 
-    /// Selects the next entry with an exception among those the rows show, up the rows
-    /// if `backward`, wrapping around with the notice `exceptions wrapped`, or says
-    /// `no exceptions`. It walks the shown entries rather than the index so that it
-    /// also covers the file's last entries shown before the index is complete.
     fn jump_exception(&mut self, backward: bool) {
-        let found = {
-            let folds = self.shown_folds();
-            let count = folds.entries();
-            let current = self
-                .viewport
-                .selected()
-                .and_then(|row| self.fold_row(row))
-                .map(|row| folds.line_at(row).0);
-            let split = if backward {
-                current.unwrap_or(count)
-            } else {
-                current.map_or(0, |entry| entry + 1)
-            };
-            // One guard for the whole scan: a lock per entry would queue behind the indexer.
-            let index = read(&self.index);
-            let has_exception = |entry: &usize| {
-                let record = match (&self.opening, &self.filter) {
-                    (Opening::Tail(records, _), _) => &records[*entry],
-                    (_, Some(filter)) => &index.records[filter.entry(*entry)],
-                    (_, None) => &index.records[*entry],
-                };
-                record.has_exception()
-            };
-            let find = |mut entries: Range<usize>| {
-                if backward {
-                    entries.rfind(has_exception)
-                } else {
-                    entries.find(has_exception)
-                }
-            };
-            let (first, second) = if backward {
-                (0..split, split..count)
-            } else {
-                (split..count, 0..split)
-            };
-            find(first)
-                .map(|entry| (entry, false))
-                .or_else(|| find(second).map(|entry| (entry, true)))
-                .map(|(entry, wrapped)| (self.lead_rows() + folds.row_of(entry, 0), wrapped))
-        };
-        let Some((row, wrapped)) = found else {
-            self.notice = Some("no exceptions");
+        let found = self.find_shown(backward, Record::has_exception);
+        self.land(found, "exceptions wrapped", "no exceptions");
+    }
+
+    fn jump_bookmark(&mut self, backward: bool) {
+        if self.bookmarks.is_empty() {
+            self.notice = Some("no bookmarks");
+            return;
+        }
+        let found = self.find_shown(backward, |record| self.is_bookmarked(record));
+        self.land(found, "bookmarks wrapped", "no bookmarks");
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(row) = self.viewport.selected().and_then(|row| self.fold_row(row)) else {
             return;
         };
+        let (entry, _) = self.shown_folds().line_at(row);
+        let bytes = self.shown_record(entry).bytes();
+        let inside: Vec<u64> = self.bookmarks.range(bytes.clone()).copied().collect();
+        if inside.is_empty() {
+            self.bookmarks.insert(bytes.start);
+            self.notice = Some("bookmarked");
+        } else {
+            for offset in inside {
+                self.bookmarks.remove(&offset);
+            }
+            self.notice = Some("bookmark removed");
+        }
+    }
+
+    /// Moves to the row of `found`, an entry and whether the walk wrapped to reach
+    /// it, or says `none`.
+    fn land(&mut self, found: Option<(usize, bool)>, wrapped: &'static str, none: &'static str) {
+        let Some((entry, did_wrap)) = found else {
+            self.notice = Some(none);
+            return;
+        };
+        let row = self.lead_rows() + self.shown_folds().row_of(entry, 0);
         self.following = false;
         self.viewport.goto(row);
-        self.notice = wrapped.then_some("exceptions wrapped");
+        self.notice = did_wrap.then_some(wrapped);
+    }
+
+    /// The next shown entry whose record satisfies `matches`, up the rows if
+    /// `backward`, and whether the walk wrapped around to reach it. It walks the shown
+    /// entries rather than the index so that it also covers the file's last entries
+    /// shown before the index is complete.
+    fn find_shown(
+        &self,
+        backward: bool,
+        matches: impl Fn(&Record) -> bool,
+    ) -> Option<(usize, bool)> {
+        let folds = self.shown_folds();
+        let count = folds.entries();
+        let current = self
+            .viewport
+            .selected()
+            .and_then(|row| self.fold_row(row))
+            .map(|row| folds.line_at(row).0);
+        let split = if backward {
+            current.unwrap_or(count)
+        } else {
+            current.map_or(0, |entry| entry + 1)
+        };
+        // One guard for the whole scan: a lock per entry would queue behind the indexer.
+        let index = read(&self.index);
+        let hit = |entry: &usize| {
+            let record = match (&self.opening, &self.filter) {
+                (Opening::Tail(records, _), _) => &records[*entry],
+                (_, Some(filter)) => &index.records[filter.entry(*entry)],
+                (_, None) => &index.records[*entry],
+            };
+            matches(record)
+        };
+        let find = |mut entries: Range<usize>| {
+            if backward {
+                entries.rfind(hit)
+            } else {
+                entries.find(hit)
+            }
+        };
+        let (first, second) = if backward {
+            (0..split, split..count)
+        } else {
+            (split..count, 0..split)
+        };
+        find(first)
+            .map(|entry| (entry, false))
+            .or_else(|| find(second).map(|entry| (entry, true)))
     }
 
     /// The index entry that viewport row `row` shows, `None` for the truncation row and
@@ -1985,6 +2062,7 @@ impl App {
         self.index_brings_new = true;
         self.unseen = 0;
         self.folds.truncate(0);
+        self.bookmarks.clear();
         self.index_again(Opening::Index);
     }
 

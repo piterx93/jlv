@@ -1177,6 +1177,23 @@ fn space_unfolds_the_selected_entry_under_its_message_column() {
     ");
 }
 
+/// The marker is on the entry's first line only, and the selected row shows `▶`
+/// whether or not it is bookmarked.
+#[test]
+fn bookmarked_entries_have_a_marker_in_the_gutter() {
+    // Bookmarks step 2, unfolded, then step 3 and the selected step 4.
+    let keys: Vec<KeyEvent> = "j mjjjmjm".chars().map(char_key).collect();
+    let out = lines_after(&mut traces(), &keys, 1..=6);
+    assert_snapshot!(out, @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ◆12:00:00.002 INFO  com.example.App          step 2
+                                                     at App.step(App.java:1)
+                                                     at App.step(App.java:2)
+    ◆12:00:00.003 INFO  com.example.App          step 3 [+1]
+    ▶12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
 #[test]
 fn capital_z_unfolds_every_entry() {
     let out = lines_after(&mut traces(), &[char_key('Z')], 1..=7);

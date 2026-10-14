@@ -3622,3 +3622,172 @@ fn exception_jumps_cover_the_last_entries_shown_before_the_index_is_complete() {
     let app = pressed(app, &[char_key('['), char_key('[')]);
     assert_eq!(landed(&app), (Some(1), None));
 }
+
+// --- bookmarks ---
+
+/// `app` with the entries on `rows` bookmarked, one after the other, with `m`.
+fn marked(mut app: App, rows: &[usize]) -> App {
+    for &row in rows {
+        app = applied(app, &[Action::Top]);
+        app = applied(app, &vec![Action::Down; row]);
+        app = pressed(app, &[char_key('m')]);
+    }
+    app
+}
+
+/// [`EXCEPTIONS`] on a 10-line screen with the entries on `rows` bookmarked and row
+/// `at` selected.
+fn bookmarked_at(rows: &[usize], at: usize) -> App {
+    let app = applied(marked(exceptions_at(0), rows), &[Action::Top]);
+    applied(app, &vec![Action::Down; at])
+}
+
+/// The rows of `app` that show a bookmarked entry.
+fn bookmarks(app: &App) -> Vec<usize> {
+    (0..app.viewport().total())
+        .filter(|&i| app.bookmarked(i))
+        .collect()
+}
+
+/// `app` with the ERROR entries hidden, the filter's results in.
+fn hiding_errors(app: App) -> App {
+    let mut filters = Filters::default();
+    filters.levels.set(Level::Error, false);
+    filtered(app, filters)
+}
+
+/// [`EXCEPTIONS`] in `Raw`, every line an entry, on a 10-line screen.
+fn exception_lines() -> App {
+    let mut app = app(EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    app
+}
+
+#[test]
+fn m_bookmarks_the_selected_entry() {
+    let app = pressed(exceptions_at(2), &[char_key('m')]);
+    assert_eq!(bookmarks(&app), [2]);
+    assert_eq!(landed(&app), (Some(2), Some("bookmarked")));
+}
+
+#[test]
+fn m_on_a_bookmarked_entry_removes_its_bookmark() {
+    let app = pressed(bookmarked_at(&[2], 2), &[char_key('m')]);
+    assert_eq!(bookmarks(&app), Vec::<usize>::new());
+    assert_eq!(app.notice(), Some("bookmark removed"));
+}
+
+#[test]
+fn m_on_a_stack_frame_bookmarks_its_whole_entry() {
+    let unfolded = [Action::UnfoldAll, Action::Down, Action::Down, Action::Down];
+    let app = pressed(applied(exceptions_at(0), &unfolded), &[char_key('m')]);
+    assert_eq!(bookmarks(&app), [1, 2, 3]);
+}
+
+#[test]
+fn quote_selects_the_next_bookmark() {
+    let app = pressed(bookmarked_at(&[1, 3], 1), &[char_key('\'')]);
+    assert_eq!(landed(&app), (Some(3), None));
+}
+
+#[test]
+fn double_quote_selects_the_previous_bookmark() {
+    let app = pressed(bookmarked_at(&[1, 3], 3), &[char_key('"')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn bookmark_jumps_past_the_last_or_first_bookmark_wrap_around_with_a_notice() {
+    for (at, quote, to) in [(4, '\'', 1), (0, '"', 3)] {
+        let app = pressed(bookmarked_at(&[1, 3], at), &[char_key(quote)]);
+        assert_eq!(
+            landed(&app),
+            (Some(to), Some("bookmarks wrapped")),
+            "{quote}"
+        );
+    }
+}
+
+#[test]
+fn without_a_bookmark_in_view_the_jumps_say_no_bookmarks_and_stay() {
+    let unmarked = || exceptions_at(2);
+    let marks_hidden = || applied(hiding_errors(bookmarked_at(&[1], 0)), &[Action::Top]);
+    let cases: [(&dyn Fn() -> App, usize); 2] = [(&unmarked, 2), (&marks_hidden, 0)];
+    for (app, row) in cases {
+        for quote in ['\'', '"'] {
+            let app = pressed(app(), &[char_key(quote)]);
+            assert_eq!(landed(&app), (Some(row), Some("no bookmarks")), "{quote}");
+        }
+    }
+}
+
+#[test]
+fn bookmark_jumps_pass_over_the_entries_the_filters_hide() {
+    let app = applied(hiding_errors(bookmarked_at(&[1, 3], 0)), &[Action::Top]);
+    let app = pressed(app, &[char_key('\'')]);
+    assert_eq!(landed(&app), (Some(2), None));
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn a_bookmark_the_filters_hide_is_kept_for_when_they_show_it_again() {
+    let app = hiding_errors(bookmarked_at(&[1, 3], 0));
+    assert_eq!(bookmarks(&app), [2]);
+    let app = filtered(app, Filters::default());
+    assert_eq!(bookmarks(&app), [1, 3]);
+}
+
+#[test]
+fn a_bookmark_jump_stops_following() {
+    let app = applied(
+        followed(Preset::Logback, &EXCEPTIONS.concat()),
+        &[Action::Up],
+    );
+    let app = pressed(app, &[char_key('m'), char_key('F')]);
+    assert!(app.following());
+    let app = pressed(app, &[char_key('"')]);
+    assert_eq!(landed(&app), (Some(3), None));
+    assert!(!app.following());
+}
+
+#[test]
+fn cycling_the_preset_moves_a_bookmark_to_the_entry_that_holds_its_offset() {
+    // Under `Raw` row 2 is the exception line, which Logback reads as part of entry 1;
+    // row 5 starts entry 3.
+    let mut app = cycled(marked(exception_lines(), &[2, 5]));
+    wait_for_index(&mut app);
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(bookmarks(&app), [1, 3]);
+}
+
+#[test]
+fn unbookmarking_an_entry_removes_every_bookmark_inside_it() {
+    let mut app = cycled(marked(exception_lines(), &[2, 3]));
+    wait_for_index(&mut app);
+    assert_eq!(bookmarks(&app), [1]);
+    let app = applied(app, &[Action::Top, Action::Down]);
+    let app = pressed(app, &[char_key('m')]);
+    assert_eq!(bookmarks(&app), Vec::<usize>::new());
+}
+
+#[test]
+fn truncation_and_another_file_at_the_path_remove_every_bookmark() {
+    let content = EXCEPTIONS.concat();
+    let changes: [fn(Source) -> FileChange; 2] = [FileChange::Truncated, FileChange::Replaced];
+    for change in changes {
+        let app = pressed(followed(Preset::Logback, &content), &[char_key('m')]);
+        assert_eq!(bookmarks(&app), [4]);
+        let app = changed(app, change(test_support::source(content.as_bytes())));
+        assert_eq!(bookmarks(&app), Vec::<usize>::new());
+    }
+}
+
+#[test]
+fn a_bookmark_set_before_the_index_is_complete_stays_on_its_entry() {
+    let mut app = following_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    let mut app = pressed(app, &[char_key('m')]);
+    assert_eq!(bookmarks(&app), [4]);
+    wait_for_index(&mut app);
+    assert_eq!(bookmarks(&app), [4]);
+}

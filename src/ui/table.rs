@@ -175,6 +175,7 @@ impl Columns {
             None => Row::new(Vec::new(), app.line(i).into_owned(), 0),
         };
         row.number = shown.and_then(|shown| shown.number);
+        row.bookmarked = shown.is_some_and(|shown| shown.first) && app.bookmarked(i);
         if search.is_some() && app.hides_match(i) {
             // Past the space that sets the marker apart from the message.
             row.highlights.push(row.marker + 1..row.text.len());
@@ -233,6 +234,8 @@ struct Row {
     marker: usize,
     /// The line's number in the file, if known.
     number: Option<u64>,
+    /// Whether the row is the first line of a bookmarked entry.
+    bookmarked: bool,
     /// The byte ranges of `text` that the search matches, in order.
     highlights: Vec<Range<usize>>,
 }
@@ -251,6 +254,7 @@ impl Row {
             text,
             marker,
             number: None,
+            bookmarked: false,
             highlights: Vec::new(),
         }
     }
@@ -319,7 +323,11 @@ impl Row {
             let style = theme.paint(Style::new().fg(Color::DarkGray));
             Span::styled(format!("{number:>width$} "), style)
         });
-        let marker = Span::raw(if selected { "▶" } else { " " });
+        let marker = Span::raw(match (selected, self.bookmarked) {
+            (true, _) => "▶",
+            (false, true) => "◆",
+            (false, false) => " ",
+        });
         let cells = self.cells.iter().cloned();
         let first = number
             .into_iter()

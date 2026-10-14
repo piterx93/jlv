@@ -70,8 +70,9 @@ const TAB_STOP: usize = 4;
 /// preset the index reads the file in, then the follow status, then
 /// ` ─ format not recognized, showing raw` while `Raw` is shown because detection
 /// found no preset, then ` ─ indexing <percent>%` until the index is complete), the
-/// rows on screen with `▶` in front of the selected one, and the key hints in the
-/// footer.
+/// rows on screen with `▶` in front of the selected one and `◆` in front of the
+/// first line of every bookmarked entry but the selected one ([`App::bookmarked`]),
+/// and the key hints in the footer.
 ///
 /// While [`App::shows_line_numbers`], each row starts with its line number in the
 /// file, in dark gray, right-aligned as wide as the last line number of the entries
