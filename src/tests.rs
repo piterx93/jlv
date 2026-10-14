@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::Args;
-use crate::filter::{Classes, Filters, Levels};
+use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::{Level, Preset};
 use crate::test_support;
 
@@ -79,6 +79,7 @@ fn defaults(file: impl Into<PathBuf>) -> Args {
         no_follow: false,
         level: None,
         class: None,
+        since: None,
         no_mouse: false,
         config: None,
     }
@@ -292,6 +293,27 @@ fn level_and_class_together_set_both() {
 }
 
 #[test]
+fn since_sets_the_initial_time_filter_counted_from_the_file() {
+    let spec = TimeSpec::parse("10m").unwrap();
+    let args = Args {
+        since: Some(spec.clone()),
+        ..defaults("app.log")
+    };
+    assert_eq!(
+        initial_time_filter(&args),
+        Some(TimeFilter {
+            spec,
+            base: Base::File
+        })
+    );
+}
+
+#[test]
+fn without_since_there_is_no_initial_time_filter() {
+    assert_eq!(initial_time_filter(&defaults("app.log")), None);
+}
+
+#[test]
 fn every_option_is_handed_over() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, "app.log");
@@ -304,6 +326,8 @@ fn every_option_is_handed_over() {
         OsStr::new("warn,error"),
         OsStr::new("-c"),
         OsStr::new("com.myco.*,!org.hibernate"),
+        OsStr::new("-s"),
+        OsStr::new("10m"),
         OsStr::new("--config"),
         OsStr::new("/nonexistent/config.toml"),
         file.as_os_str(),
@@ -317,6 +341,7 @@ fn every_option_is_handed_over() {
             no_follow: true,
             level: Some(Levels::only(&[Level::Warn, Level::Error])),
             class: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
+            since: Some(TimeSpec::parse("10m").unwrap()),
             no_mouse: true,
             config: Some(PathBuf::from("/nonexistent/config.toml")),
         }

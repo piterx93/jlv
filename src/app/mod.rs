@@ -16,7 +16,9 @@ use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::filter::{self, Classes, Engine, Filters, Indexed, Levels, Rule};
+use crate::filter::{
+    self, Base, Classes, Engine, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange, TimeSpec,
+};
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
@@ -69,6 +71,8 @@ pub enum Action {
     HideClass,
     /// Opens the class panel ([`App::panel`]).
     ClassPanel,
+    /// Opens the time panel ([`App::panel`]).
+    TimePanel,
     /// Applies what the open panel edits and closes it.
     Confirm,
     /// Closes the open panel without applying its edits.
@@ -84,10 +88,10 @@ pub enum Action {
 /// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
 /// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
 /// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
-/// hides it, `F6` opens the class panel, `Enter` confirms, `Esc` cancels and `q F10
-/// Ctrl-c` quit. Characters
-/// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
-/// other keys do nothing with any modifier. Key releases do nothing; held keys repeat.
+/// hides it, `F5` opens the time panel, `F6` the class panel, `Enter` confirms, `Esc`
+/// cancels and `q F10 Ctrl-c` quit. Characters ignore Shift (the character already
+/// says which case it is) but not Ctrl or Alt; other keys do nothing with any
+/// modifier. Key releases do nothing; held keys repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -114,6 +118,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
         (KeyCode::Char('c'), KeyModifiers::NONE) => Action::OnlyClass,
         (KeyCode::Char('C'), KeyModifiers::NONE) => Action::HideClass,
+        (KeyCode::F(5), KeyModifiers::NONE) => Action::TimePanel,
         (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
         (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
@@ -135,6 +140,32 @@ fn normalized(key: KeyEvent) -> Option<(KeyCode, KeyModifiers)> {
         _ => key.modifiers,
     };
     Some((key.code, modifiers))
+}
+
+/// A key in a panel that is typed into.
+enum Typed {
+    /// `Enter`, `Esc` or `Ctrl-c`: what they stand for.
+    Action(Action),
+    /// A character, with or without Shift.
+    Char(char),
+    Backspace,
+    /// Any other key without modifiers.
+    Other(KeyCode),
+}
+
+/// What `key` is in a panel that is typed into, `None` for a release or a key with
+/// modifiers that means nothing there.
+fn typed(key: KeyEvent) -> Option<Typed> {
+    let typed = match normalized(key)? {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Typed::Action(Action::Quit),
+        (KeyCode::Enter, KeyModifiers::NONE) => Typed::Action(Action::Confirm),
+        (KeyCode::Esc, KeyModifiers::NONE) => Typed::Action(Action::Cancel),
+        (KeyCode::Char(c), KeyModifiers::NONE) => Typed::Char(c),
+        (KeyCode::Backspace, KeyModifiers::NONE) => Typed::Backspace,
+        (code, KeyModifiers::NONE) => Typed::Other(code),
+        _ => return None,
+    };
+    Some(typed)
 }
 
 /// The level panel while it is open: the level filter as edited so far, not applied
@@ -184,21 +215,19 @@ impl ClassPanel {
     /// Edits the panel as `key` asks, or returns the action it stands for here.
     /// `lines` is never empty, so the cursor always has a line to be on.
     fn key(&mut self, key: KeyEvent) -> Option<Action> {
-        let key = normalized(key)?;
+        let typed = typed(key)?;
         let line = &mut self.lines[self.cursor];
-        match key {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Some(Action::Quit),
-            (KeyCode::Enter, KeyModifiers::NONE) => return Some(Action::Confirm),
-            (KeyCode::Esc, KeyModifiers::NONE) => return Some(Action::Cancel),
-            (KeyCode::Char(c), KeyModifiers::NONE) => line.push(c),
-            (KeyCode::Backspace, KeyModifiers::NONE) => {
+        match typed {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => line.push(c),
+            Typed::Backspace => {
                 if line.pop().is_none() && self.lines.len() > 1 {
                     self.lines.remove(self.cursor);
                     self.cursor = self.cursor.saturating_sub(1);
                 }
             }
-            (KeyCode::Up, KeyModifiers::NONE) => self.cursor = self.cursor.saturating_sub(1),
-            (KeyCode::Down, KeyModifiers::NONE) => {
+            Typed::Other(KeyCode::Up) => self.cursor = self.cursor.saturating_sub(1),
+            Typed::Other(KeyCode::Down) => {
                 if !line.is_empty() && self.cursor + 1 == self.lines.len() {
                     self.lines.push(String::new());
                 }
@@ -210,19 +239,77 @@ impl ClassPanel {
     }
 }
 
+/// The time panel while it is open: the time spec as typed so far and the base, not
+/// applied yet, and why the spec last confirmed doesn't parse, if it doesn't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimePanel {
+    pub spec: String,
+    pub base: Base,
+    pub error: Option<String>,
+}
+
+/// What `↓` and `↑` step through in the time panel.
+const TIME_PRESETS: [&str; 6] = ["1m", "5m", "10m", "30m", "60m", "24h"];
+
+impl TimePanel {
+    /// Opens on `filter`, or on an empty spec counted from the file without one.
+    fn new(filter: Option<&TimeFilter>) -> TimePanel {
+        TimePanel {
+            spec: filter.map_or_else(String::new, |filter| filter.spec.to_string()),
+            base: filter.map_or_else(Base::default, |filter| filter.base),
+            error: None,
+        }
+    }
+
+    /// Edits the panel as `key` asks, or returns the action it stands for here.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        let preset = TIME_PRESETS.iter().position(|&preset| preset == self.spec);
+        let last = TIME_PRESETS.len() - 1;
+        match typed(key)? {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.spec.push(c),
+            Typed::Backspace => {
+                self.spec.pop();
+            }
+            Typed::Other(KeyCode::Tab) => self.base = self.base.toggled(),
+            Typed::Other(KeyCode::Down) => {
+                self.spec = TIME_PRESETS[preset.map_or(0, |i| (i + 1).min(last))].to_string();
+            }
+            Typed::Other(KeyCode::Up) => {
+                self.spec = TIME_PRESETS[preset.map_or(last, |i| i.saturating_sub(1))].to_string();
+            }
+            Typed::Other(_) => {}
+        }
+        None
+    }
+
+    /// The time filter the panel sets, `None` for an empty spec.
+    fn filter(&self) -> Result<Option<TimeFilter>, String> {
+        if self.spec.trim().is_empty() {
+            return Ok(None);
+        }
+        let spec = TimeSpec::parse(&self.spec)?;
+        Ok(Some(TimeFilter {
+            spec,
+            base: self.base,
+        }))
+    }
+}
+
 /// The panel open over the rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
     Levels(LevelPanel),
     Classes(ClassPanel),
+    Time(TimePanel),
 }
 
 impl Panel {
     fn edit(&mut self, action: Action) {
         match self {
             Panel::Levels(panel) => panel.edit(action),
-            // Its lines are edited through `App::key`, not actions.
-            Panel::Classes(_) => {}
+            // Their text is edited through `App::key`, not actions.
+            Panel::Classes(_) | Panel::Time(_) => {}
         }
     }
 }
@@ -250,6 +337,20 @@ const FILTER_CHUNK: usize = 1024;
 /// changed with the index, so that the matches among them don't leave the rows until
 /// the next poll: the last rows would flicker, and a selection on them would move.
 const CATCH_UP: Duration = Duration::from_millis(10);
+
+/// The time range of a time filter while there is no entry with a timestamp: none.
+const NO_TIME: TimeRange = TimeRange {
+    start: Timestamp::MAX,
+    end: Some(Timestamp::MAX),
+};
+
+/// How the range of the time filter changed.
+enum Slide {
+    None,
+    /// Its start moved to this later time and its end stayed.
+    Later(Timestamp),
+    Restart,
+}
 
 /// The index, shared with the filter engine. Only `App` writes it.
 type SharedIndex = Arc<RwLock<Indexed<Source>>>;
@@ -288,6 +389,12 @@ impl Filter {
         self.catch_up(all, 0, Instant::now());
     }
 
+    /// Starts over with `filters`, from no match.
+    fn restart(&mut self, filters: Filters) {
+        self.engine.set_filters(filters);
+        self.folds.truncate(0);
+    }
+
     /// [`take_in`](Self::take_in), but waiting for the engine until it evaluated the
     /// first `evaluated` entries or `deadline` passed.
     fn catch_up(&mut self, all: &Folds, evaluated: usize, deadline: Instant) {
@@ -305,10 +412,21 @@ impl Filter {
     /// Drops the matches from index entry `from` on, which the index read again or
     /// dropped, and has the engine evaluate the entries from there.
     fn reread(&mut self, from: usize) {
-        let entries = &self.engine.filtered().entries;
-        let kept = entries.partition_point(|&entry| (entry as usize) < from);
+        let kept = self.matches_before(from);
         self.engine.reread(from);
         self.folds.truncate(kept);
+    }
+
+    /// Like [`reread`](Self::reread), with `filters` that only drop entries.
+    fn refilter_from(&mut self, filters: Filters, from: usize) {
+        let kept = self.matches_before(from);
+        self.engine.set_filters_from(filters, from);
+        self.folds.truncate(kept);
+    }
+
+    fn matches_before(&self, entry: usize) -> usize {
+        let entries = &self.engine.filtered().entries;
+        entries.partition_point(|&match_| (match_ as usize) < entry)
     }
 }
 
@@ -436,6 +554,12 @@ pub struct App {
     /// The fold state of the index's entries.
     folds: Folds,
     filters: Filters,
+    /// What `filters.time` is made of while set.
+    time_filter: Option<TimeFilter>,
+    /// The last entry of the index with a timestamp, and that timestamp, kept while
+    /// there is a time filter.
+    last_dated: Option<(usize, Timestamp)>,
+    clock: fn() -> Timestamp,
     /// At work since the first [`set_filters`](Self::set_filters).
     filter: Option<Filter>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
@@ -529,6 +653,9 @@ impl App {
             index: Arc::new(RwLock::new(index)),
             folds: Folds::default(),
             filters: Filters::default(),
+            time_filter: None,
+            last_dated: None,
+            clock: Timestamp::now,
             filter: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
@@ -825,6 +952,33 @@ impl App {
         self.update_rows();
     }
 
+    /// Sets the time filter, keeping the other filters, or clears it with `None`.
+    /// It covers what [`TimeFilter::range`] says for the last entry with a timestamp
+    /// and the [clock](Self::set_clock), in the app's zone; while there is no such
+    /// entry, it lets none through. As entries come in, or get their dates once a
+    /// time-only log is indexed, it covers what it says for the new last entry: the
+    /// last N slides along, and the entries that fall out of it are no longer shown.
+    /// Entries without a timestamp are hidden while it is set.
+    pub fn set_time_filter(&mut self, filter: Option<TimeFilter>) {
+        self.time_filter = filter;
+        self.filters.time = None;
+        self.last_dated = None;
+        self.slide_time_filter(0);
+        let filters = std::mem::take(&mut self.filters);
+        self.set_filters(filters);
+    }
+
+    /// The time filter [`set_time_filter`](Self::set_time_filter) set; none at first.
+    pub fn time_filter(&self) -> Option<&TimeFilter> {
+        self.time_filter.as_ref()
+    }
+
+    /// Reads the wall clock from `now` from here on, for a time filter on
+    /// [`Base::Now`](crate::filter::Base::Now). It is the system clock at first.
+    pub fn set_clock(&mut self, now: fn() -> Timestamp) {
+        self.clock = now;
+    }
+
     /// The filters [`set_filters`](Self::set_filters) set; none at first.
     pub fn filters(&self) -> &Filters {
         &self.filters
@@ -849,7 +1003,8 @@ impl App {
     }
 
     /// The open panel, if any: [`Panel::Levels`] while the level panel is open,
-    /// [`Panel::Classes`] while the class panel is.
+    /// [`Panel::Classes`] while the class panel is, [`Panel::Time`] while the time
+    /// panel is.
     ///
     /// [`Action::LevelPanel`] opens the level panel with the
     /// current level filter and the cursor on TRACE. While it is open, up and down
@@ -863,6 +1018,10 @@ impl App {
     /// [`Action::ClassPanel`] opens the class panel with the current class rules, one
     /// per line ([`Classes::rules`](crate::filter::Classes::rules)), and an empty line
     /// after them with the cursor on it. [`App::key`] edits it.
+    ///
+    /// [`Action::TimePanel`] opens the time panel with the current time filter's spec
+    /// and base, or an empty spec counted from the file without one. [`App::key`]
+    /// edits it.
     pub fn panel(&self) -> Option<&Panel> {
         self.panel.as_ref()
     }
@@ -946,6 +1105,9 @@ impl App {
             Action::ClassPanel => {
                 self.panel = Some(Panel::Classes(ClassPanel::new(&self.filters.classes)));
             }
+            Action::TimePanel => {
+                self.panel = Some(Panel::Time(TimePanel::new(self.time_filter.as_ref())));
+            }
             Action::Confirm | Action::Cancel => {}
             Action::Quit => self.quit = true,
         }
@@ -963,11 +1125,20 @@ impl App {
     /// they were. `Esc` closes the panel without applying it, `Ctrl-c` quits, and
     /// other keys do nothing.
     ///
+    /// The time panel is edited the same way, its one line being the spec, except
+    /// that `Backspace` only deletes, `↓ ↑` step through the presets `1m 5m 10m 30m
+    /// 60m 24h`, stopping at the ends (from a spec that is none of them, `↓` goes to
+    /// the first and `↑` to the last), and `Tab` toggles the base. `Enter` sets the
+    /// time filter ([`set_time_filter`](Self::set_time_filter)) to the spec and base,
+    /// or clears it for a blank spec; one that doesn't parse keeps the panel open with
+    /// the [error](TimePanel::error).
+    ///
     /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
         let action = match &mut self.panel {
             Some(Panel::Classes(panel)) => panel.key(key),
+            Some(Panel::Time(panel)) => panel.key(key),
             _ => action(key),
         };
         if let Some(action) = action {
@@ -1037,13 +1208,44 @@ impl App {
     /// Has the filters evaluate the index's entries from `from` on again, after they
     /// changed, and waits for them when there are only a few left to evaluate.
     fn reread(&mut self, from: usize) {
+        let slide = self.slide_time_filter(from);
         let Some(filter) = &mut self.filter else {
             return;
         };
-        filter.reread(from);
+        match slide {
+            Slide::Restart => filter.restart(self.filters.clone()),
+            Slide::Later(start) => {
+                // Only matches dated before the new start drop out; the others stay.
+                let from = first_dropped(&filter.engine, &read(&self.index).records, start)
+                    .map_or(from, |entry| entry.min(from));
+                filter.refilter_from(self.filters.clone(), from);
+            }
+            Slide::None => filter.reread(from),
+        }
         let total = read(&self.index).records.len();
         if total.saturating_sub(filter.engine.filtered().evaluated) <= FILTER_CHUNK {
             filter.catch_up(&self.folds, total, Instant::now() + CATCH_UP);
+        }
+    }
+
+    /// Brings the time range of the time filter, if any, up to date with the index,
+    /// whose entries from `from` on are new or read again. How it changed.
+    fn slide_time_filter(&mut self, from: usize) -> Slide {
+        let Some(time_filter) = &self.time_filter else {
+            return Slide::None;
+        };
+        self.last_dated = last_dated(&read(&self.index).records, from, self.last_dated);
+        let range = match self.last_dated {
+            Some((_, last)) => time_filter.range(last, (self.clock)(), &self.settings.zone),
+            None => NO_TIME,
+        };
+        let old = self.filters.time.replace(range);
+        match old {
+            Some(old) if old == range => Slide::None,
+            Some(old) if old.end == range.end && old.start <= range.start => {
+                Slide::Later(range.start)
+            }
+            _ => Slide::Restart,
         }
     }
 
@@ -1199,6 +1401,13 @@ impl App {
                         }
                     }
                 }
+                Panel::Time(mut panel) => match panel.filter() {
+                    Ok(filter) => self.set_time_filter(filter),
+                    Err(error) => {
+                        panel.error = Some(error);
+                        self.panel = Some(Panel::Time(panel));
+                    }
+                },
             },
             Action::Cancel => {}
             Action::Quit => {
@@ -1362,6 +1571,40 @@ fn read(index: &SharedIndex) -> RwLockReadGuard<'_, Indexed<Source>> {
 
 fn write(index: &SharedIndex) -> RwLockWriteGuard<'_, Indexed<Source>> {
     index.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The first of the engine's matches dated before `start`.
+fn first_dropped(engine: &Engine, records: &[Record], start: Timestamp) -> Option<usize> {
+    let mut entries = engine
+        .filtered()
+        .entries
+        .iter()
+        .map(|&entry| entry as usize);
+    entries.find(|&entry| {
+        let dated = records.get(entry).and_then(Record::timestamp);
+        dated.is_some_and(|at| at < start)
+    })
+}
+
+/// The last of `records` with a timestamp, and that timestamp. `known` is what this
+/// was before the records from `from` on changed, so only those are looked at again
+/// unless it was among them.
+fn last_dated(
+    records: &[Record],
+    from: usize,
+    known: Option<(usize, Timestamp)>,
+) -> Option<(usize, Timestamp)> {
+    let from = from.min(records.len());
+    let dated = |entries: Range<usize>| {
+        entries
+            .rev()
+            .find_map(|entry| Some((entry, records[entry].timestamp()?)))
+    };
+    dated(from..records.len()).or_else(|| match known {
+        Some((entry, _)) if entry < from => known,
+        Some(_) => dated(0..from),
+        None => None,
+    })
 }
 
 /// Whether `entry` shows its continuation lines, `None` if it has none.

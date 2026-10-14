@@ -6,7 +6,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
 use super::*;
-use crate::filter::{Classes, Levels};
+use crate::filter::{Classes, Levels, TimeSpec};
 use crate::format::{Level, Preset};
 
 fn parse(args: &[&str]) -> Result<Args, clap::Error> {
@@ -20,6 +20,7 @@ fn defaults(file: &str) -> Args {
         no_follow: false,
         level: None,
         class: None,
+        since: None,
         no_mouse: false,
         config: None,
     }
@@ -266,6 +267,22 @@ fn a_class_rule_that_does_not_parse_is_a_usage_error_naming_it() {
     let err = parse(&["-c", "com.myco.*,!", "app.log"]).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ValueValidation, "{err}");
     assert!(err.to_string().contains("'!'"), "{err}");
+}
+
+#[test]
+fn short_and_long_since_set_the_initial_time_spec() {
+    for option in ["-s", "--since"] {
+        let args = parse(&[option, "12:00-12:30", "app.log"]).unwrap();
+        assert_eq!(args.since, TimeSpec::parse("12:00-12:30").ok(), "{option}");
+    }
+}
+
+#[test]
+fn a_time_spec_that_does_not_parse_is_a_usage_error_saying_why() {
+    let err = parse(&["-s", "soon", "app.log"]).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::ValueValidation, "{err}");
+    let why = TimeSpec::parse("soon").unwrap_err();
+    assert!(err.to_string().contains(&why), "{err}");
 }
 
 #[test]

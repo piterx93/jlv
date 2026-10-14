@@ -11,7 +11,8 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, ClassPanel, LevelPanel, Panel};
+use crate::app::{App, ClassPanel, LevelPanel, Panel, TimePanel};
+use crate::filter::{TimeFilter, TimeSpec};
 use crate::format::Level;
 use crate::source::Origin;
 
@@ -57,6 +58,7 @@ const NO_MATCHES: &str = "no entries match the current filters";
 const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
 const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel";
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
+const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
 const TAB_STOP: usize = 4;
 
 /// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
@@ -108,6 +110,12 @@ const TAB_STOP: usize = 4;
 /// cursor's line). The footer then shows `↑/↓ Line (↓ at the end adds one)  Enter
 /// Apply  Esc Cancel`, or, while the panel has an [error](crate::app::ClassPanel::error),
 /// why its rules don't parse.
+///
+/// The time panel is drawn the same way, a box 40 columns wide and 4 high titled
+/// ` Time `: the spec as typed, as ` ▶10m`, and below it the filter it makes, as
+/// `  last 10m (file)`, blank while it makes none. The footer then shows `↑/↓
+/// Preset  Tab File/now  Enter Apply  Esc Cancel`, or the panel's
+/// [error](crate::app::TimePanel::error).
 ///
 /// While the app has a [notice](App::notice), the header ends with ` ─ ` and it.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
@@ -163,10 +171,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             if fits {
                 render_class_panel(frame, panel, body);
             }
-            match &panel.error {
-                Some(error) => printable(error),
-                None => CLASS_PANEL_HINTS.into(),
+            panel_hints(panel.error.as_deref(), CLASS_PANEL_HINTS)
+        }
+        Some(Panel::Time(panel)) => {
+            if fits {
+                render_time_panel(frame, panel, body);
             }
+            panel_hints(panel.error.as_deref(), TIME_PANEL_HINTS)
         }
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
@@ -210,6 +221,33 @@ fn render_class_panel(frame: &mut Frame, panel: &ClassPanel, body: Rect) {
         Paragraph::new(Text::from(lines))
             .block(Block::bordered().title(" Classes "))
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        area,
+    );
+}
+
+/// The footer of a panel: why what it edits doesn't apply, if it doesn't, else its
+/// key hints.
+fn panel_hints<'a>(error: Option<&'a str>, hints: &'static str) -> Cow<'a, str> {
+    error.map_or(hints.into(), printable)
+}
+
+fn render_time_panel(frame: &mut Frame, panel: &TimePanel, body: Rect) {
+    // What the spec makes, once it makes something.
+    let filter = TimeSpec::parse(&panel.spec).map(|spec| {
+        TimeFilter {
+            spec,
+            base: panel.base,
+        }
+        .to_string()
+    });
+    let lines = vec![
+        Line::from(format!(" ▶{}", printable(&panel.spec))),
+        Line::from(format!("  {}", filter.unwrap_or_default())),
+    ];
+    let area = body.centered(Constraint::Length(40), Constraint::Length(4));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Time ")),
         area,
     );
 }

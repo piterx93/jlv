@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, FileChange, action};
-use crate::filter::{Classes, Filters};
+use crate::filter::{Classes, Filters, TimeSpec};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
 use crate::test_support::{
@@ -338,6 +338,53 @@ fn class_panel_error_replaces_the_key_hints_in_the_footer() {
             "{rule}"
         );
     }
+}
+
+/// The keys that open the time panel and type `spec` into it.
+fn time_panel_keys(spec: &str) -> Vec<KeyEvent> {
+    let mut keys = vec![key(KeyCode::F(5))];
+    keys.extend(spec.chars().map(char_key));
+    keys
+}
+
+#[test]
+fn time_panel_shows_the_spec_and_the_filter_it_makes_over_the_rows() {
+    let mut keys = time_panel_keys("10m");
+    keys.push(key(KeyCode::Tab));
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
+    " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
+    " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
+    " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
+    " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
+    " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
+    " 12:00:00.007 [main] INFO  com.example.App - step 7                             "
+    " 12:00:00.008 [main] INFO  com.example.App - step 8                             "
+    " 12:00:00.009 [main] INFO  com.example.App - step 9                             "
+    " 12:00:00.010 [main]┌ Time ────────────────────────────────┐                    "
+    " 12:00:00.011 [main]│ ▶10m                                 │                    "
+    " 12:00:00.012 [main]│  last 10m (now)                      │                    "
+    " 12:00:00.013 [main]└──────────────────────────────────────┘                    "
+    " 12:00:00.014 [main] INFO  com.example.App - step 14                            "
+    " 12:00:00.015 [main] INFO  com.example.App - step 15                            "
+    " 12:00:00.016 [main] INFO  com.example.App - step 16                            "
+    " 12:00:00.017 [main] INFO  com.example.App - step 17                            "
+    " 12:00:00.018 [main] INFO  com.example.App - step 18                            "
+    " 12:00:00.019 [main] INFO  com.example.App - step 19                            "
+    " 12:00:00.020 [main] INFO  com.example.App - step 20                            "
+    " 12:00:00.021 [main] INFO  com.example.App - step 21                            "
+    " 12:00:00.022 [main] INFO  com.example.App - step 22                            "
+    "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel                               "
+    "#);
+}
+
+#[test]
+fn time_panel_error_replaces_the_key_hints_in_the_footer() {
+    let mut keys = time_panel_keys("soon");
+    keys.push(key(KeyCode::Enter));
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &keys);
+    assert_eq!(row(&terminal, 23), TimeSpec::parse("soon").unwrap_err());
 }
 
 #[test]

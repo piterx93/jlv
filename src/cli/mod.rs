@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::filter::{Classes, Levels};
+use crate::filter::{Classes, Levels, TimeSpec};
 use crate::format::{Level, Preset};
 
 #[cfg(test)]
@@ -33,6 +33,10 @@ pub struct Args {
     /// Initial class filter, e.g. 'com.myco.*,!org.hibernate'
     #[arg(short, long, value_name = "RULES", value_parser = parse_classes)]
     pub class: Option<Classes>,
+
+    /// Initial time filter, e.g. 10m or 12:00-12:30
+    #[arg(short, long, value_name = "SPEC", value_parser = TimeSpec::parse)]
+    pub since: Option<TimeSpec>,
 
     /// Disable mouse
     #[arg(long)]

@@ -270,6 +270,52 @@ fn results_of_entries_read_again_are_never_published_stale() {
     assert_eq!(found.entries, [2]);
 }
 
+#[test]
+fn new_filters_from_an_entry_on_keep_the_results_before_it() {
+    let line = |second: u8, message: &str| {
+        format!("2026-10-07 12:00:0{second}.000 [main] INFO  com.myco.Order - {message}\n")
+    };
+    let log = [
+        line(0, "boom"),
+        line(1, "boom"),
+        line(2, "two"),
+        line(3, "boom"),
+    ]
+    .concat();
+    let mut engine = Engine::spawn(
+        indexed(Preset::Logback, log.as_bytes()),
+        Preset::Logback,
+        Filters {
+            text: text("boom"),
+            ..Filters::default()
+        },
+        Options { chunk: 1 },
+    );
+    assert_eq!(finish(&mut engine, 4, |_| {}).entries, [0, 1, 3]);
+    engine.set_filters_from(
+        Filters {
+            text: text("two"),
+            ..Filters::default()
+        },
+        1,
+    );
+    // The first entry stays a match; from the second on only "two" matches.
+    let found = finish(&mut engine, 4, |partial| {
+        let expected: &[u32] = if partial.evaluated >= 3 {
+            &[0, 2]
+        } else {
+            &[0]
+        };
+        assert_eq!(partial.entries, expected, "{partial:?}");
+        assert_eq!(
+            partial.counts,
+            counts(&[(Level::Info, expected.len() as u32)]),
+            "{partial:?}"
+        );
+    });
+    assert_eq!(found.evaluated, 4);
+}
+
 /// Brings `indexed` up to date with `log`, the whole file after more was appended,
 /// as the viewer does.
 fn append(indexed: &RwLock<Indexed<Vec<u8>>>, preset: Preset, log: &[u8]) -> usize {

@@ -26,6 +26,10 @@ use crate::index::Record;
 use crate::matcher::Matcher;
 use crate::source;
 
+mod time;
+
+pub use time::{Base, TimeFilter, TimeSpec};
+
 #[cfg(test)]
 mod tests;
 
@@ -288,6 +292,16 @@ impl Engine {
     pub fn set_filters(&mut self, filters: Filters) {
         self.filters = Arc::new(filters);
         self.truncate(0);
+        self.start();
+    }
+
+    /// Evaluates `filters` from entry `from` on, keeping the results for the entries
+    /// before it as the filters before found them: for a change of filters that can
+    /// only drop entries from `from` on, such as a time window whose start moves
+    /// later. Results the earlier filters publish from then on are not taken in.
+    pub fn set_filters_from(&mut self, filters: Filters, from: usize) {
+        self.filters = Arc::new(filters);
+        self.truncate(from);
         self.start();
     }
 

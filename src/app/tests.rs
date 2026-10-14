@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,7 @@ use proptest::prelude::*;
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use super::*;
-use crate::filter::{Classes, Filters, Levels, Rule, TimeRange};
+use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
 use crate::format::Level;
 use crate::index::Progress;
 use crate::matcher::{self, Matcher};
@@ -1842,4 +1843,392 @@ fn rules_that_do_not_parse_keep_the_class_panel_open_with_the_reason() {
         Some(Classes::parse(["Order", "!"]).unwrap_err())
     );
     assert_eq!(app.filters().classes, Classes::default());
+}
+
+// --- time filter ---
+
+/// A Logback entry at `time` on 2026-10-07 that says when it is.
+fn at(time: &str) -> String {
+    on("2026-10-07", time)
+}
+
+/// A Logback entry at `time` on `date` that says when it is.
+fn on(date: &str, time: &str) -> String {
+    format!("{date} {time} [main] INFO  com.example.App - at {time}\n")
+}
+
+/// A Logback log of an entry at each of `times`, in that order.
+fn log_at<S: AsRef<str>>(times: &[S]) -> String {
+    times.iter().map(|time| at(time.as_ref())).collect()
+}
+
+/// The rows of the entries at `times`.
+fn rows_at<S: AsRef<str>>(times: &[S]) -> Vec<String> {
+    times
+        .iter()
+        .map(|time| at(time.as_ref()).trim_end().to_string())
+        .collect()
+}
+
+/// The time filter `spec` counted from `base`.
+fn since(spec: &str, base: Base) -> Option<TimeFilter> {
+    Some(TimeFilter {
+        spec: TimeSpec::parse(spec).unwrap(),
+        base,
+    })
+}
+
+/// `app` with the time filter `spec`, counted from the file, and its results in.
+fn timed(mut app: App, spec: &str) -> App {
+    app.set_time_filter(since(spec, Base::File));
+    wait_for_filter(&mut app);
+    app
+}
+
+/// `app` with the time panel opened and `keys` pressed in it.
+fn in_time_panel(app: App, keys: &[KeyEvent]) -> App {
+    let app = pressed(app, &[key(KeyCode::F(5))]);
+    pressed(app, keys)
+}
+
+/// The open time panel of `app`; fails the test if it is closed.
+fn time_panel(app: &App) -> &TimePanel {
+    match app.panel() {
+        Some(Panel::Time(panel)) => panel,
+        other => panic!("the time panel is not open: {other:?}"),
+    }
+}
+
+#[test]
+fn a_time_filter_shows_only_the_entries_from_its_start_to_the_end_of_its_last_minute() {
+    let log = log_at(&[
+        "11:59:59.999",
+        "12:00:00.000",
+        "12:30:59.999",
+        "12:31:00.000",
+        "13:00:00.000",
+    ]);
+    let app = timed(app_in(Preset::Logback, log.as_bytes()), "12:00-12:30");
+    assert_eq!(rows(&app), rows_at(&["12:00:00.000", "12:30:59.999"]));
+}
+
+#[test]
+fn a_range_entirely_outside_the_file_matches_nothing() {
+    let log = log_at(&["12:00:00.000", "13:00:00.000"]);
+    for spec in ["2020-01-01 12:00..2020-01-01 13:00", "03:00-04:00"] {
+        let app = timed(app_in(Preset::Logback, log.as_bytes()), spec);
+        assert!(app.nothing_matches(), "{spec}");
+    }
+}
+
+#[test]
+fn the_last_n_slides_as_entries_are_appended() {
+    let app = timed(
+        followed(Preset::Logback, &log_at(&["12:00:00.000", "12:00:30.000"])),
+        "1m",
+    );
+    assert_eq!(rows(&app), rows_at(&["12:00:00.000", "12:00:30.000"]));
+    let mut app = grown(
+        app,
+        &log_at(&["12:00:00.000", "12:00:30.000", "12:01:10.000"]),
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), rows_at(&["12:00:30.000", "12:01:10.000"]));
+    assert!(app.following());
+}
+
+/// `n` times a millisecond apart from 12:00:`second` on.
+fn millis_from(second: usize, n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("12:00:{:02}.{:03}", second + i / 1000, i % 1000))
+        .collect()
+}
+
+/// 3,000 entries within the minute before the last one, 12:00:59: the first at
+/// 12:00:10, and one at 12:00:05 ten entries before the last, out of order.
+fn long_window() -> Vec<String> {
+    let mut times = vec!["12:00:10.000".to_string()];
+    times.extend(millis_from(30, 2_989));
+    times.push("12:00:05.000".to_string());
+    times.extend(millis_from(40, 8));
+    times.push("12:00:59.000".to_string());
+    times
+}
+
+/// `times` and then `next`.
+fn and_then(times: &[String], next: &str) -> Vec<String> {
+    let mut times = times.to_vec();
+    times.push(next.to_string());
+    times
+}
+
+/// `app` right after its file grew to `content`, before it polls anything.
+fn grown_unpolled(mut app: App, content: &str) -> App {
+    app.file_changed(FileChange::Grew(test_support::source(content.as_bytes())));
+    app
+}
+
+#[test]
+fn the_last_n_drops_a_match_that_falls_out_of_it_well_before_the_appended_entries() {
+    let times = long_window();
+    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    // The window now starts at 12:00:10.
+    let mut app = grown(app, &log_at(&and_then(&times, "12:01:10.000")));
+    wait_for_filter(&mut app);
+    let mut shown = times.clone();
+    shown.retain(|time| time != "12:00:05.000");
+    shown.push("12:01:10.000".to_string());
+    assert_eq!(rows(&app), rows_at(&shown));
+}
+
+#[test]
+fn a_slide_keeps_showing_the_matches_before_the_first_one_that_drops_out() {
+    let times = long_window();
+    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    let app = grown_unpolled(app, &log_at(&and_then(&times, "12:01:10.000")));
+    let shown = app.viewport().total();
+    assert!(shown >= 2_990, "{shown} rows");
+}
+
+#[test]
+fn a_slide_that_drops_nothing_keeps_every_row_shown() {
+    let times = millis_from(30, 3_000);
+    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    // The window moves from 11:59:32.999 to 12:00:00 on.
+    let app = grown_unpolled(app, &log_at(&and_then(&times, "12:01:00.000")));
+    let shown = app.viewport().total();
+    assert!(shown >= 3_000, "{shown} rows");
+}
+
+#[test]
+fn a_window_whose_start_moves_earlier_takes_in_the_entries_it_reaches_again() {
+    let times = [
+        "11:59:30.000",
+        "12:00:30.000",
+        "12:00:40.000",
+        "12:01:00.000",
+    ];
+    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    assert_eq!(rows(&app), rows_at(&times[1..]));
+    // The last entry, out of order, moves the start back to 11:59:20.
+    let times = and_then(&times.map(String::from), "12:00:20.000");
+    let mut app = grown(app, &log_at(&times));
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), rows_at(&times));
+}
+
+#[test]
+fn a_range_without_a_date_moves_to_the_date_of_a_new_last_entry() {
+    let before = [
+        on("2026-10-08", "12:10:00.000"),
+        on("2026-10-08", "12:15:00.000"),
+        on("2026-10-07", "12:10:00.000"),
+        on("2026-10-07", "12:20:00.000"),
+    ];
+    let app = timed(followed(Preset::Logback, &before.concat()), "12:00-12:30");
+    assert_eq!(rows_of(&app), before[2..]);
+    let next = on("2026-10-08", "12:25:00.000");
+    let mut app = grown(app, &[before.concat(), next.clone()].concat());
+    wait_for_filter(&mut app);
+    assert_eq!(rows_of(&app), [before[0].clone(), before[1].clone(), next]);
+}
+
+/// The wall clock of [`the_last_n_on_the_wall_clock_follows_it_as_entries_are_appended`],
+/// in seconds since the epoch.
+static WALL_CLOCK: AtomicI64 = AtomicI64::new(0);
+
+fn wall_clock() -> Timestamp {
+    Timestamp::from_second(WALL_CLOCK.load(Ordering::SeqCst)).unwrap()
+}
+
+fn set_wall_clock(at: &str) {
+    let at: Timestamp = at.parse().unwrap();
+    WALL_CLOCK.store(at.as_second(), Ordering::SeqCst);
+}
+
+#[test]
+fn the_last_n_on_the_wall_clock_follows_it_as_entries_are_appended() {
+    set_wall_clock("2026-10-07T12:00:50Z");
+    let mut app = followed(Preset::Logback, &log_at(&["12:00:00.000", "12:00:40.000"]));
+    app.set_clock(wall_clock);
+    app.set_time_filter(since("1m", Base::Now));
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), rows_at(&["12:00:00.000", "12:00:40.000"]));
+    set_wall_clock("2026-10-07T12:01:30Z");
+    let mut app = grown(
+        app,
+        &log_at(&["12:00:00.000", "12:00:40.000", "12:01:20.000"]),
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), rows_at(&["12:00:40.000", "12:01:20.000"]));
+}
+
+#[test]
+fn a_time_filter_on_a_log_without_timestamps_matches_nothing() {
+    let app = timed(hundred_lines(), "10m");
+    assert!(app.nothing_matches());
+}
+
+#[test]
+fn entries_out_of_order_at_the_window_edge_pass_by_their_own_timestamps() {
+    // The window counts back from the last entry, 12:00:00, not from the latest
+    // timestamp, 12:00:01.
+    let log = log_at(&[
+        "11:49:59.000",
+        "11:50:00.500",
+        "11:49:59.500",
+        "12:00:01.000",
+        "12:00:00.000",
+    ]);
+    let app = timed(app_in(Preset::Logback, log.as_bytes()), "10m");
+    assert_eq!(
+        rows(&app),
+        rows_at(&["11:50:00.500", "12:00:01.000", "12:00:00.000"])
+    );
+}
+
+#[test]
+fn a_time_filter_set_while_opening_counts_back_from_the_last_entry_once_indexed() {
+    // Time-only: the entries get their dates once the index is complete.
+    let log = "11:00:00.000 [main] INFO  com.example.App - a\n\
+               11:59:30.000 [main] INFO  com.example.App - b\n\
+               12:00:00.000 [main] INFO  com.example.App - c\n";
+    let mut app = unindexed_app(Preset::LogbackBasic, log.as_bytes());
+    app.set_time_filter(since("1m", Base::File));
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), log.lines().skip(1).collect::<Vec<_>>());
+}
+
+#[test]
+fn the_time_filter_and_the_level_filter_apply_together() {
+    let error = "2026-10-07 11:59:50.000 [main] ERROR com.example.App - boom\n";
+    let log = [at("11:00:00.000"), error.to_string(), at("12:00:00.000")].concat();
+    let app = applied(
+        app_in(Preset::Logback, log.as_bytes()),
+        &[Action::ToggleLevel(Level::Info)],
+    );
+    let app = timed(app, "1m");
+    assert_eq!(rows(&app), [error.trim_end()]);
+    let mut app = applied(app, &[Action::ToggleLevel(Level::Info)]);
+    wait_for_filter(&mut app);
+    assert_eq!(
+        rows(&app),
+        [error.trim_end(), at("12:00:00.000").trim_end()]
+    );
+}
+
+#[test]
+fn f5_opens_the_time_panel() {
+    assert_eq!(action(key(KeyCode::F(5))), Some(Action::TimePanel));
+}
+
+#[test]
+fn time_panel_opens_with_the_current_spec_and_base() {
+    let mut app = hundred_lines();
+    app.set_time_filter(since("12:00 - 12:30", Base::Now));
+    let app = in_time_panel(app, &[]);
+    assert_eq!(
+        *time_panel(&app),
+        TimePanel {
+            spec: "12:00-12:30".to_string(),
+            base: Base::Now,
+            error: None,
+        }
+    );
+}
+
+#[test]
+fn characters_typed_in_the_time_panel_go_into_its_spec_not_to_their_actions() {
+    let app = in_time_panel(hundred_lines(), &typing("q1jG"));
+    assert_eq!(time_panel(&app).spec, "q1jG");
+    assert!(!app.should_quit());
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert_eq!(app.filters().levels, Levels::default());
+}
+
+#[test]
+fn backspace_in_the_time_panel_deletes_the_last_character_while_there_is_one() {
+    let mut keys = typing("10m");
+    keys.extend([key(KeyCode::Backspace); 4]);
+    keys.extend(typing("5"));
+    let app = in_time_panel(hundred_lines(), &keys);
+    assert_eq!(time_panel(&app).spec, "5");
+}
+
+#[test]
+fn tab_in_the_time_panel_toggles_the_base() {
+    let tab = key(KeyCode::Tab);
+    let app = in_time_panel(hundred_lines(), &[tab]);
+    assert_eq!(time_panel(&app).base, Base::Now);
+    let app = pressed(app, &[tab]);
+    assert_eq!(time_panel(&app).base, Base::File);
+}
+
+#[test]
+fn down_and_up_in_the_time_panel_step_through_the_presets_stopping_at_the_ends() {
+    let mut app = in_time_panel(hundred_lines(), &[]);
+    let mut specs = Vec::new();
+    for code in [[KeyCode::Down; 7].as_slice(), &[KeyCode::Up]].concat() {
+        app.key(key(code));
+        specs.push(time_panel(&app).spec.clone());
+    }
+    assert_eq!(
+        specs,
+        ["1m", "5m", "10m", "30m", "60m", "24h", "24h", "60m"]
+    );
+}
+
+#[test]
+fn enter_applies_the_time_panel_spec_and_base_and_closes_it() {
+    let log = log_at(&["11:59:00.000", "11:59:45.000", "12:00:00.000"]);
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    app.set_clock(|| "2026-10-07T12:00:30Z".parse().unwrap());
+    let mut keys = typing("1m");
+    keys.extend([key(KeyCode::Tab), key(KeyCode::Enter)]);
+    let mut app = in_time_panel(app, &keys);
+    wait_for_filter(&mut app);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.time_filter(), since("1m", Base::Now).as_ref());
+    assert_eq!(rows(&app), rows_at(&["11:59:45.000", "12:00:00.000"]));
+}
+
+#[test]
+fn enter_on_an_empty_time_panel_clears_the_time_filter() {
+    let times = ["11:00:00.000", "12:00:00.000"];
+    let app = timed(app_in(Preset::Logback, log_at(&times).as_bytes()), "12:00-");
+    let mut keys = vec![key(KeyCode::Backspace); "12:00-".len()];
+    keys.push(key(KeyCode::Enter));
+    let mut app = in_time_panel(app, &keys);
+    wait_for_filter(&mut app);
+    assert_eq!(app.time_filter(), None);
+    assert_eq!(rows(&app), rows_at(&times));
+}
+
+#[test]
+fn esc_closes_the_time_panel_without_applying_it() {
+    let mut keys = typing("10m");
+    keys.push(key(KeyCode::Esc));
+    let app = in_time_panel(hundred_lines(), &keys);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.time_filter(), None);
+}
+
+#[test]
+fn a_spec_that_does_not_parse_keeps_the_time_panel_open_with_the_reason() {
+    let mut keys = typing("soon");
+    keys.push(key(KeyCode::Enter));
+    let app = in_time_panel(hundred_lines(), &keys);
+    assert_eq!(
+        time_panel(&app).error,
+        Some(TimeSpec::parse("soon").unwrap_err())
+    );
+    assert_eq!(app.time_filter(), None);
+}
+
+#[test]
+fn ctrl_c_quits_while_the_time_panel_is_open() {
+    let app = in_time_panel(hundred_lines(), &[]);
+    time_panel(&app);
+    let app = pressed(app, &[ctrl('c')]);
+    assert!(app.should_quit());
 }
