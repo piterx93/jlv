@@ -18,6 +18,7 @@ use ratatui::crossterm::execute;
 
 use crate::app::App;
 use crate::cli::Args;
+use crate::clipboard::{Env, System};
 use crate::filter::{Base, Filters, TimeFilter};
 use crate::follow::Options;
 use crate::source::{OpenError, Source};
@@ -25,6 +26,7 @@ use crate::ui::Theme;
 
 pub mod app;
 pub mod cli;
+pub mod clipboard;
 pub mod export;
 pub mod filter;
 pub mod fold;
@@ -148,6 +150,9 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     if let Some(filter) = initial_time_filter(&args) {
         app.set_time_filter(Some(filter));
     }
+    app.set_clipboard(Box::new(System::new(Env::from_vars(|name| {
+        env::var_os(name)
+    }))));
     app.watch(&args.file, file, Options::default())
         .map_err(|err| in_file(&args.file, err))?;
     // try_init can fail after raw mode is on; restore ignores what isn't set up.

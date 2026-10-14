@@ -11,6 +11,13 @@ exclude_re = [
     'src/lib\.rs:\d+:\d+: delete ! in run$',
     # Turning mouse capture on writes to the real terminal; testing it needs a tty.
     'src/lib\.rs:\d+:\d+: replace capture_mouse -> io::Result<\(\)> with Ok\(\(\)\)$',
+    # `System` hands `copy` the real clipboard and stdout; testing it needs a display
+    # and a terminal. `copy` itself is tested with both injected.
+    'src/clipboard/mod\.rs:\d+:\d+: replace <impl Clipboard for System>::copy -> Result<Via, CopyError> with Ok\(Default::default\(\)\)$',
+    'src/clipboard/mod\.rs:\d+:\d+: replace <impl Debug for System>::fmt -> fmt::Result with Ok\(Default::default\(\)\)$',
+    # Each byte is shifted into its own 8 bits of a group that starts at 0, so OR and
+    # XOR never see two set bits in the same place.
+    'src/clipboard/mod\.rs:\d+:\d+: replace \| with \^ in base64_into$',
     # `at >= start` only differs for a first character wider than the whole line; the
     # message column is at least 19 columns wide and no character is wider than 2.
     'src/ui/table\.rs:\d+:41: replace > with >= in wrap$',

@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,6 +14,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton
 use ratatui::layout::Rect;
 
 use super::*;
+use crate::clipboard::{CopyError, Via};
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
 use crate::format::Level;
 use crate::index::Progress;
@@ -4556,4 +4559,86 @@ fn wheel_over_the_details_pane_scrolls_it_three_lines() {
     app.mouse(mouse(MouseEventKind::ScrollDown, 5, 4), Instant::now());
     assert_eq!(app.details_scroll(), 3);
     assert_eq!(app.viewport().selected(), Some(0));
+}
+
+// --- clipboard ---
+
+#[test]
+fn y_copies_the_selected_entry() {
+    assert_eq!(action(char_key('y')), Some(Action::Copy));
+}
+
+/// A clipboard that keeps the texts it is handed and answers each with `answer`.
+#[derive(Debug)]
+struct FakeClipboard {
+    handed: Rc<RefCell<Vec<String>>>,
+    answer: fn() -> Result<Via, CopyError>,
+}
+
+impl Clipboard for FakeClipboard {
+    fn copy(&mut self, text: &str) -> Result<Via, CopyError> {
+        self.handed.borrow_mut().push(text.to_owned());
+        (self.answer)()
+    }
+}
+
+/// `app` after `y` with a clipboard that answers `answer`, and the texts the
+/// clipboard was handed.
+fn copied(mut app: App, answer: fn() -> Result<Via, CopyError>) -> (App, Vec<String>) {
+    let handed = Rc::default();
+    app.set_clipboard(Box::new(FakeClipboard {
+        handed: Rc::clone(&handed),
+        answer,
+    }));
+    app.key(char_key('y'));
+    let handed = handed.borrow().clone();
+    (app, handed)
+}
+
+/// `DETAILS_LOG` on a 10-line screen, every entry folded, the first one selected.
+fn folded_details_log() -> App {
+    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    app.resize(10);
+    app.apply(Action::FoldAll);
+    app
+}
+
+#[test]
+fn copy_puts_every_line_of_the_selected_entry_on_the_clipboard() {
+    let (app, handed) = copied(folded_details_log(), || Ok(Via::Osc52));
+    assert_eq!(handed, [first_details_entry().trim_end()]);
+    assert_eq!(app.notice(), Some("copied to clipboard"));
+}
+
+#[test]
+fn copy_with_no_row_selected_copies_nothing() {
+    let mut app = app(b"");
+    app.resize(10);
+    let (app, handed) = copied(app, || Ok(Via::Native));
+    assert_eq!(handed, Vec::<String>::new());
+    assert_eq!(app.notice(), Some("nothing to copy"));
+}
+
+#[test]
+fn copy_without_a_clipboard_says_so() {
+    let mut app = folded_details_log();
+    app.key(char_key('y'));
+    assert_eq!(app.notice(), Some("no clipboard"));
+}
+
+#[test]
+fn copy_of_an_entry_too_large_for_osc52_says_so() {
+    let (app, _) = copied(folded_details_log(), || Err(CopyError::TooLarge));
+    assert_eq!(
+        app.notice(),
+        Some("entry too large for OSC 52 (over 100 KB)")
+    );
+}
+
+#[test]
+fn copy_failure_shows_in_the_notice() {
+    let (app, _) = copied(folded_details_log(), || {
+        Err(CopyError::Terminal(io::Error::other("broken pipe")))
+    });
+    assert_eq!(app.notice(), Some("copy failed: broken pipe"));
 }

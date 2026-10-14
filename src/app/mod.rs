@@ -20,6 +20,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
+use crate::clipboard::{Clipboard, CopyError, entry_text};
 use crate::export;
 use crate::filter::{
     self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
@@ -117,6 +118,13 @@ pub enum Action {
     /// Opens the export prompt ([`App::panel`]), which suggests the file name
     /// `<name>.filtered.log`, `<name>` being the viewed file's name without `.gz`.
     Export,
+    /// Puts the selected entry on the [clipboard](App::set_clipboard): every line of
+    /// it, folded or not, as [`entry_text`](crate::clipboard::entry_text) gives it.
+    /// The [notice](App::notice) says `copied to clipboard`; with no row selected it says
+    /// `nothing to copy`, without a clipboard `no clipboard`, for an entry OSC 52
+    /// refuses `entry too large for OSC 52 (over 100 KB)`, and when the terminal
+    /// can't be written `copy failed: ` and the error.
+    Copy,
     /// Applies what the open panel edits and closes it. With no panel open, opens
     /// the details pane ([`App::shows_details`]), or closes it.
     Confirm,
@@ -139,10 +147,11 @@ pub enum Action {
 /// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
 /// and previous match, `]` and `[` the next and previous entry with an exception, `m`
 /// toggles a bookmark, `'` and `"` select the next and previous bookmark, `e F8`
-/// open the export prompt, `Tab` cycles the focus, `H` toggles the histogram, `Enter`
-/// confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters ignore Shift (the
-/// character already says which case it is) but not Ctrl or Alt; other keys do
-/// nothing with any modifier. Key releases do nothing; held keys repeat.
+/// open the export prompt, `y` copies the selected entry, `Tab` cycles the focus, `H`
+/// toggles the histogram, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit.
+/// Characters ignore Shift (the character already says which case it is) but not Ctrl
+/// or Alt; other keys do nothing with any modifier. Key releases do nothing; held keys
+/// repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
     let action = match normalized(key)? {
         (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
@@ -184,6 +193,7 @@ pub fn action(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('['), KeyModifiers::NONE) => Action::PreviousException,
         (KeyCode::Char('m'), KeyModifiers::NONE) => Action::ToggleBookmark,
         (KeyCode::Char('e') | KeyCode::F(8), KeyModifiers::NONE) => Action::Export,
+        (KeyCode::Char('y'), KeyModifiers::NONE) => Action::Copy,
         (KeyCode::Char('\''), KeyModifiers::NONE) => Action::NextBookmark,
         (KeyCode::Char('"'), KeyModifiers::NONE) => Action::PreviousBookmark,
         (KeyCode::Tab, KeyModifiers::NONE) => Action::CycleFocus,
@@ -958,6 +968,8 @@ pub struct App {
     hit_map: HitMap,
     /// The row and time of the last click, until a double click uses it up.
     last_click: Option<(usize, Instant)>,
+    /// Where [`Action::Copy`] puts the selected entry.
+    clipboard: Option<Box<dyn Clipboard>>,
     quit: bool,
 }
 
@@ -1056,6 +1068,7 @@ impl App {
             current_dir: std::env::current_dir().unwrap_or_default(),
             hit_map: HitMap::default(),
             last_click: None,
+            clipboard: None,
             quit: false,
         }
     }
@@ -1408,6 +1421,29 @@ impl App {
     /// [`Base::Now`](crate::filter::Base::Now). It is the system clock at first.
     pub fn set_clock(&mut self, now: fn() -> Timestamp) {
         self.clock = now;
+    }
+
+    /// Puts what [`Action::Copy`] copies on `clipboard` from here on. There is none
+    /// at first.
+    pub fn set_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
+        self.clipboard = Some(clipboard);
+    }
+
+    fn copy_entry(&mut self) {
+        let Some(entry) = self.details_entry() else {
+            self.notice = Some(Cow::Borrowed("nothing to copy"));
+            return;
+        };
+        let text = entry_text(entry);
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            self.notice = Some(Cow::Borrowed("no clipboard"));
+            return;
+        };
+        self.notice = Some(match clipboard.copy(&text) {
+            Ok(_) => Cow::Borrowed("copied to clipboard"),
+            Err(err @ CopyError::TooLarge) => Cow::Owned(err.to_string()),
+            Err(err) => Cow::Owned(format!("copy failed: {err}")),
+        });
     }
 
     /// The filters [`set_filters`](Self::set_filters) set; none at first.
@@ -1900,6 +1936,7 @@ impl App {
             Action::NextBookmark => self.jump_bookmark(false),
             Action::PreviousBookmark => self.jump_bookmark(true),
             Action::Export => self.panel = Some(Panel::Export(self.export_prompt())),
+            Action::Copy => self.copy_entry(),
             Action::Confirm => self.toggle_details(),
             Action::Cancel => self.cancel_export(),
             Action::Quit => self.quit = true,
