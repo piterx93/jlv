@@ -17,6 +17,7 @@ use crate::app::{Action, FileChange, action};
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
+use crate::mouse::HitMap;
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
     hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
@@ -2707,4 +2708,73 @@ fn too_small_terminal_shows_no_histogram() {
     app.apply(Action::ToggleHistogram);
     let terminal = drawn(&mut app, 79, 24, Theme::Styled);
     assert_eq!(row(&terminal, 1), TOO_SMALL);
+}
+
+// --- hit map ---
+
+/// The map of an 80×24 screen whose rows are drawn from line `top` on, `height`
+/// lines high.
+fn rows_map(top: u16, height: u16, lines: impl IntoIterator<Item = usize>) -> HitMap {
+    HitMap {
+        rows: Rect::new(0, top, 80, height),
+        lines: lines.into_iter().collect(),
+        buckets: None,
+        details: None,
+    }
+}
+
+#[test]
+fn hit_map_has_the_row_drawn_on_each_line() {
+    let mut app = hundred_lines();
+    app.apply(Action::Bottom);
+    drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(*app.hit_map(), rows_map(1, 22, 78..100));
+}
+
+#[test]
+fn hit_map_lines_end_with_the_last_row() {
+    let mut app = app(numbered_log(3).as_bytes());
+    drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(*app.hit_map(), rows_map(1, 22, 0..3));
+}
+
+#[test]
+fn hit_map_has_a_wrapped_row_on_each_of_its_lines() {
+    let mut app = two_line_entries();
+    terminal_after(&mut app, &[char_key('w')]);
+    let lines: Vec<usize> = (0..11).flat_map(|i| [i, i]).collect();
+    assert_eq!(app.hit_map().lines, lines);
+}
+
+#[test]
+fn hit_map_has_the_histogram_buckets_and_the_rows_below_them() {
+    let mut app = spike();
+    terminal_after(&mut app, &[char_key('H')]);
+    assert_eq!(
+        *app.hit_map(),
+        HitMap {
+            buckets: Some(Rect::new(0, 1, 24, 1)),
+            ..rows_map(2, 21, 0..21)
+        }
+    );
+}
+
+#[test]
+fn hit_map_has_the_details_pane_below_the_rows() {
+    let mut app = hundred_lines();
+    terminal_after(&mut app, &[key(KeyCode::Enter)]);
+    assert_eq!(
+        *app.hit_map(),
+        HitMap {
+            details: Some(Rect::new(0, 15, 80, 8)),
+            ..rows_map(1, 14, 0..14)
+        }
+    );
+}
+
+#[test]
+fn hit_map_of_a_too_small_terminal_has_no_rows() {
+    let mut app = hundred_lines();
+    drawn(&mut app, 79, 24, Theme::Styled);
+    assert_eq!(app.hit_map().lines, Vec::<usize>::new());
 }

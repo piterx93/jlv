@@ -14,6 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::format::Level;
+use crate::mouse::HitMap;
 use crate::source::Origin;
 use layout::Screen;
 
@@ -187,6 +188,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
     let filters = filter_bar(app);
     let histogram = histogram::row(app, area, theme);
+    let buckets = histogram.as_ref().map(|&(_, buckets)| buckets);
     let screen = Screen::new(
         area,
         filters.is_some(),
@@ -244,16 +246,27 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     if let (Some(bar), Some(filters)) = (screen.filters, filters) {
         frame.render_widget(Line::from(filters), bar);
     }
-    if let (Some(area), Some(row)) = (screen.histogram, histogram) {
+    if let (Some(area), Some((row, _))) = (screen.histogram, histogram) {
         frame.render_widget(row, area);
     }
-    if !fits {
+    let lines = if !fits {
         frame.render_widget(Line::from(TOO_SMALL), body);
+        Vec::new()
     } else if app.nothing_matches() {
         frame.render_widget(Line::from(NO_MATCHES), body);
+        Vec::new()
     } else {
-        table::render(frame, app, theme, body);
-    }
+        table::render(frame, app, theme, body)
+    };
+    app.set_hit_map(HitMap {
+        rows: body,
+        lines,
+        buckets: screen
+            .histogram
+            .zip(buckets)
+            .map(|(row, width)| Rect { width, ..row }),
+        details: screen.details,
+    });
     if let Some(area) = screen.details {
         details::render(frame, app, area);
     }

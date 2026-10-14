@@ -32,8 +32,8 @@ const DATE_TIME: (&str, usize) = ("%Y-%m-%d %H:%M:%S%.3f", 23);
 
 /// Draws the rows on screen into `body`, reading only their entries. Sets the app's
 /// screen to the rows that fit and keeps its scroll from running past the widest
-/// message on screen.
-pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect) {
+/// message on screen. Returns the row drawn on each screen line.
+pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect) -> Vec<usize> {
     let columns = Columns::new(app, usize::from(body.width));
     let height = usize::from(body.height);
     if app.wraps() {
@@ -64,11 +64,14 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect)
             Style::new()
         };
         let lines = row.lines(&columns, app, selected, theme);
-        lines.into_iter().map(move |line| line.style(style))
+        lines.into_iter().map(move |line| (i, line.style(style)))
     });
-    for (line, area) in lines.zip(body.rows()) {
+    let mut drawn = Vec::new();
+    for ((i, line), area) in lines.zip(body.rows()) {
         frame.render_widget(line, area);
+        drawn.push(i);
     }
+    drawn
 }
 
 /// Wrapped rows take as many screen lines as their messages need, so how many rows

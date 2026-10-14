@@ -9,6 +9,8 @@ exclude_re = [
     'src/lib\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)$',
     # The same goes for the flags `run` hands to `App::new`.
     'src/lib\.rs:\d+:\d+: delete ! in run$',
+    # Turning mouse capture on writes to the real terminal; testing it needs a tty.
+    'src/lib\.rs:\d+:\d+: replace capture_mouse -> io::Result<\(\)> with Ok\(\(\)\)$',
     # `at >= start` only differs for a first character wider than the whole line; the
     # message column is at least 19 columns wide and no character is wider than 2.
     'src/ui/table\.rs:\d+:41: replace > with >= in wrap$',

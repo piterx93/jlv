@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use proptest::collection::vec;
 use proptest::prelude::*;
-use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::layout::Rect;
 
 use super::*;
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
@@ -4353,4 +4354,206 @@ fn export_failure_shows_in_the_notice() {
         Some("export failed: Permission denied (os error 13)")
     );
     assert_eq!(app.panel(), None);
+}
+
+// --- mouse ---
+
+fn mouse(kind: MouseEventKind, column: u16, line: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row: line,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn left_click(column: u16, line: u16) -> MouseEvent {
+    mouse(MouseEventKind::Down(MouseButton::Left), column, line)
+}
+
+/// Left clicks at column 5 of screen line `line`, each `ms` milliseconds after the
+/// first.
+fn clicked(mut app: App, clicks: &[(u16, u64)]) -> App {
+    let start = Instant::now();
+    for &(line, ms) in clicks {
+        app.mouse(left_click(5, line), start + Duration::from_millis(ms));
+    }
+    app
+}
+
+fn wheel(mut app: App, kind: MouseEventKind) -> App {
+    app.mouse(mouse(kind, 5, 5), Instant::now());
+    app
+}
+
+/// A map of an 80-column screen with the header on line 0 and the rows from line 1
+/// on, `lines` being the row drawn on each.
+fn rows_map(lines: impl IntoIterator<Item = usize>) -> HitMap {
+    let lines: Vec<usize> = lines.into_iter().collect();
+    let height = u16::try_from(lines.len()).unwrap();
+    HitMap {
+        rows: Rect::new(0, 1, 80, height),
+        lines,
+        ..HitMap::default()
+    }
+}
+
+/// `app` with the map of a screen showing its viewport's rows from line 1 on.
+fn mapped(mut app: App) -> App {
+    let viewport = app.viewport();
+    let shown = viewport.top()..viewport.total().min(viewport.top() + viewport.height());
+    app.set_hit_map(rows_map(shown));
+    app
+}
+
+/// [`DETAILS_LOG`], every entry folded, so that it has 2 rows, mapped from line 1.
+fn foldable() -> App {
+    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    app.resize(10);
+    mapped(app)
+}
+
+#[test]
+fn click_selects_the_row_drawn_under_it() {
+    let app = clicked(
+        mapped(applied(hundred_lines(), &[Action::Bottom])),
+        &[(3, 0)],
+    );
+    assert_eq!(pos(&app), (90, Some(92)));
+}
+
+#[test]
+fn click_stops_following_even_on_the_last_row() {
+    let app = clicked(mapped(twenty_lines_followed()), &[(10, 0)]);
+    assert_eq!(pos(&app), (10, Some(19)));
+    assert!(!app.following());
+}
+
+#[test]
+fn click_before_the_matches_are_counted_drops_the_search_move() {
+    let mut app = app(numbered_log(5000).as_bytes());
+    app.resize(10);
+    let app = search_entered(app, "step 4999");
+    let mut app = clicked(mapped(app), &[(4, 0)]);
+    wait_for_search(&mut app);
+    assert_eq!(selected(&app), Some(3));
+}
+
+#[test]
+fn click_on_a_row_gone_since_the_screen_was_drawn_does_nothing() {
+    let mut app = hundred_lines();
+    // One past the last row.
+    app.set_hit_map(rows_map([100]));
+    let app = clicked(app, &[(1, 0)]);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn right_click_does_nothing() {
+    let mut app = mapped(hundred_lines());
+    app.mouse(
+        mouse(MouseEventKind::Down(MouseButton::Right), 5, 5),
+        Instant::now(),
+    );
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn mouse_does_nothing_while_a_panel_is_open() {
+    let app = clicked(
+        mapped(applied(hundred_lines(), &[Action::LevelPanel])),
+        &[(5, 0)],
+    );
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert!(matches!(app.panel(), Some(Panel::Levels(_))));
+}
+
+#[test]
+fn second_click_on_a_row_within_400_ms_toggles_its_fold() {
+    let app = clicked(foldable(), &[(1, 0), (1, 400)]);
+    assert_eq!(app.viewport().total(), 5);
+    assert_eq!(app.viewport().selected(), Some(0));
+}
+
+#[test]
+fn second_click_after_400_ms_only_selects() {
+    let app = clicked(foldable(), &[(1, 0), (1, 401)]);
+    assert_eq!(app.viewport().total(), 2);
+}
+
+#[test]
+fn clicks_on_two_lines_of_a_wrapped_row_are_a_double_click() {
+    let mut app = foldable();
+    app.set_hit_map(rows_map([0, 0, 1]));
+    let app = clicked(app, &[(1, 0), (2, 100)]);
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn clicks_on_two_rows_are_no_double_click() {
+    let app = clicked(foldable(), &[(1, 0), (2, 100)]);
+    assert_eq!(app.viewport().total(), 2);
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn key_between_two_clicks_on_the_same_row_makes_no_double_click() {
+    let mut app = foldable();
+    let start = Instant::now();
+    app.mouse(left_click(5, 1), start);
+    // Unfolds the first entry, so the rows below it are numbered anew.
+    app.key(char_key(' '));
+    app.mouse(left_click(5, 1), start + Duration::from_millis(100));
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn click_after_a_double_click_starts_over() {
+    let app = clicked(foldable(), &[(1, 0), (1, 100), (1, 200)]);
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn click_on_a_histogram_bucket_sets_the_time_filter_to_it() {
+    let mut app = with_histogram(histogram_app());
+    app.set_hit_map(HitMap {
+        buckets: Some(Rect::new(0, 1, 4, 1)),
+        ..rows_map(0..4)
+    });
+    app.mouse(left_click(2, 1), Instant::now());
+    assert_eq!(
+        app.time_filter().map(ToString::to_string).as_deref(),
+        Some("2026-10-07 10:00:02..2026-10-07 10:00:02")
+    );
+}
+
+#[test]
+fn wheel_down_scrolls_the_screen_and_the_selection_three_rows() {
+    let app = wheel(mapped(hundred_lines()), MouseEventKind::ScrollDown);
+    assert_eq!(pos(&app), (3, Some(3)));
+}
+
+#[test]
+fn wheel_up_scrolls_the_screen_and_the_selection_three_rows() {
+    let app = mapped(applied(hundred_lines(), &[Action::Bottom]));
+    let app = wheel(app, MouseEventKind::ScrollUp);
+    assert_eq!(pos(&app), (87, Some(96)));
+}
+
+#[test]
+fn wheel_up_stops_following() {
+    let app = wheel(mapped(twenty_lines_followed()), MouseEventKind::ScrollUp);
+    assert!(!app.following());
+}
+
+#[test]
+fn wheel_over_the_details_pane_scrolls_it_three_lines() {
+    let mut app = details_shown();
+    app.set_hit_map(HitMap {
+        details: Some(Rect::new(0, 3, 80, 5)),
+        ..rows_map([0, 1])
+    });
+    app.mouse(mouse(MouseEventKind::ScrollDown, 5, 4), Instant::now());
+    assert_eq!(app.details_scroll(), 3);
+    assert_eq!(app.viewport().selected(), Some(0));
 }

@@ -16,7 +16,9 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use memchr::{memchr, memchr_iter, memrchr};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::export;
 use crate::filter::{
@@ -29,6 +31,7 @@ use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::matcher::{self, Matcher};
+use crate::mouse::{HitMap, Target};
 use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
 
@@ -578,6 +581,10 @@ const NO_CLASS: &str = "the selected entry has no class";
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
 /// message column by.
 const SCROLL_STEP: usize = 8;
+/// Rows or lines one notch of the mouse wheel scrolls.
+const WHEEL_STEP: usize = 3;
+/// The longest between two clicks on a row that make a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// How many bytes [`index::tail`] reads from the end of the file at a time, 64 KiB:
 /// a screen of entries, stack traces included, mostly fits.
@@ -948,6 +955,9 @@ pub struct App {
     path: PathBuf,
     /// What a relative export path is read from.
     current_dir: PathBuf,
+    hit_map: HitMap,
+    /// The row and time of the last click, until a double click uses it up.
+    last_click: Option<(usize, Instant)>,
     quit: bool,
 }
 
@@ -1044,6 +1054,8 @@ impl App {
             notice: None,
             path: path.to_owned(),
             current_dir: std::env::current_dir().unwrap_or_default(),
+            hit_map: HitMap::default(),
+            last_click: None,
             quit: false,
         }
     }
@@ -1975,6 +1987,7 @@ impl App {
     /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
+        self.last_click = None;
         let action = match &mut self.panel {
             Some(Panel::Classes(panel)) => panel.key(key),
             Some(Panel::Time(panel)) => panel.key(key),
@@ -1986,6 +1999,87 @@ impl App {
         };
         if let Some(action) = action {
             self.apply(action);
+        }
+    }
+
+    /// Where the last screen drew what the mouse can act on, set by
+    /// [`ui::render`](crate::ui::render); empty before the first screen.
+    pub fn hit_map(&self) -> &HitMap {
+        &self.hit_map
+    }
+
+    /// Keeps `map` as the layout of the last screen drawn.
+    pub fn set_hit_map(&mut self, map: HitMap) {
+        self.hit_map = map;
+    }
+
+    /// Acts on a mouse event that came at `at`, by what the [last screen
+    /// drawn](Self::hit_map) shows under it. Nothing happens while a panel is open,
+    /// and only the wheel and the left button do anything:
+    ///
+    /// - the wheel over the details pane scrolls it by 3 lines, like 3 times
+    ///   [`Action::Up`] or [`Action::Down`] with the focus there; anywhere else it
+    ///   scrolls the rows by 3: the screen and the selection move 3 rows together,
+    ///   like a page of 3 rows ([`Action::PageUp`], [`Action::PageDown`]), and
+    ///   scrolling up stops following the file;
+    /// - a click on a row selects it, like [`Viewport::goto`], and stops following the
+    ///   file; a row gone since the screen was drawn is left alone. A second click on
+    ///   the same row (on any of its screen lines) at most 400 ms after the first, with
+    ///   no key in between, is a double click, which also
+    ///   [toggles its fold](Action::ToggleFold); the click after a double click starts
+    ///   over;
+    /// - a click on a bucket of the histogram sets the time filter to it, as
+    ///   [`Action::Confirm`] does with the focus on the histogram
+    ///   ([`histogram_bucket`](Self::histogram_bucket));
+    /// - a click anywhere else does nothing.
+    pub fn mouse(&mut self, event: MouseEvent, at: Instant) {
+        if self.panel.is_some() {
+            return;
+        }
+        self.pending_step = None;
+        let target = self.hit_map.target(event.column, event.row);
+        match event.kind {
+            MouseEventKind::ScrollUp => self.wheel(target, true),
+            MouseEventKind::ScrollDown => self.wheel(target, false),
+            MouseEventKind::Down(MouseButton::Left) => self.click(target, at),
+            _ => {}
+        }
+        if self.shows_details {
+            self.track_details_entry();
+        }
+    }
+
+    fn wheel(&mut self, target: Option<Target>, up: bool) {
+        if target == Some(Target::Details) {
+            let action = if up { Action::Up } else { Action::Down };
+            for _ in 0..WHEEL_STEP {
+                self.scroll_details(action);
+            }
+        } else if up {
+            self.following = false;
+            self.viewport.scroll_up(WHEEL_STEP);
+        } else {
+            self.viewport.scroll_down(WHEEL_STEP);
+        }
+    }
+
+    fn click(&mut self, target: Option<Target>, at: Instant) {
+        match target {
+            Some(Target::Row(row)) if row < self.viewport.total() => {
+                let double = self.last_click.is_some_and(|(last, time)| {
+                    last == row && at.saturating_duration_since(time) <= DOUBLE_CLICK
+                });
+                self.following = false;
+                self.viewport.goto(row);
+                if double {
+                    self.toggle_fold();
+                    self.last_click = None;
+                } else {
+                    self.last_click = Some((row, at));
+                }
+            }
+            Some(Target::Bucket(bucket)) => self.filter_to_bucket(bucket),
+            _ => {}
         }
     }
 

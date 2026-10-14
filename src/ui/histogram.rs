@@ -12,8 +12,9 @@ use crate::app::{App, Focus};
 const LABEL_WIDTH: u16 = 20;
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// The row for a screen of `area`, `None` while there is no histogram to show.
-pub(super) fn row(app: &mut App, area: Rect, theme: Theme) -> Option<Line<'static>> {
+/// The row for a screen of `area` and the number of buckets it shows, `None` while
+/// there is no histogram to show.
+pub(super) fn row(app: &mut App, area: Rect, theme: Theme) -> Option<(Line<'static>, u16)> {
     let fits = area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT;
     if !fits || !app.shows_histogram() {
         return None;
@@ -49,10 +50,12 @@ pub(super) fn row(app: &mut App, area: Rect, theme: Theme) -> Option<Line<'stati
             Span::styled(bar(count, max).to_string(), style)
         })
         .collect();
+    // Fewer buckets than `area.width`, so this fits.
+    let buckets = u16::try_from(spans.len()).unwrap_or(u16::MAX);
     let pad = usize::from(area.width).saturating_sub(spans.len() + label.chars().count());
     spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::raw(label));
-    Some(Line::from(spans))
+    Some((Line::from(spans), buckets))
 }
 
 /// The bar for `count` in eighths of `max`, rounded up; blank for 0.

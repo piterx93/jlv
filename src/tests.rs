@@ -239,6 +239,20 @@ fn empty_regular_file_is_handed_over() {
     assert_eq!(launch.source.bytes(), b"");
 }
 
+#[test]
+fn mouse_is_captured_by_default() {
+    assert!(captures_mouse(&defaults("app.log")));
+}
+
+#[test]
+fn no_mouse_leaves_mouse_capture_off() {
+    let args = Args {
+        no_mouse: true,
+        ..defaults("app.log")
+    };
+    assert!(!captures_mouse(&args));
+}
+
 /// `initial_filters` for `-l` and `-c` as given, the rest of the command line at its
 /// defaults.
 fn initial(level: Option<&[Level]>, class: Option<&[&str]>) -> Option<Filters> {
@@ -603,7 +617,7 @@ mod event_loop {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
 
     use crate::app::{App, Panel};
@@ -722,6 +736,21 @@ mod event_loop {
         ];
         event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
         assert_eq!(app.viewport().selected(), Some(1));
+    }
+
+    #[test]
+    fn mouse_clicks_go_to_the_app_by_the_screen_drawn() {
+        let mut terminal = terminal();
+        let mut app = hundred_lines();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        let events = vec![Event::Mouse(click), Event::Key(char_key('q'))];
+        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        assert_eq!(app.viewport().selected(), Some(3));
     }
 
     #[test]
