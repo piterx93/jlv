@@ -26,6 +26,8 @@ toml = "1.1"
 unicode-width = "0.2"
 
 [dev-dependencies]
+# Plots and the parallel analysis would only add build time to a manual run.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 insta = "1.49"
 proptest = "1"
 
@@ -47,3 +49,11 @@ auto-req = "no"
 assets = [
     { source = "target/release/jlv", dest = "/usr/bin/jlv", mode = "755" },
 ]
+
+[[bench]]
+name = "engine"
+harness = false
+
+[[bench]]
+name = "nfr"
+harness = false
