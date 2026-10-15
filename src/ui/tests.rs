@@ -2829,6 +2829,142 @@ fn too_small_terminal_shows_no_histogram() {
     assert_eq!(row(&terminal, 1), TOO_SMALL);
 }
 
+/// A Logback log of one entry per `(timestamp, level)`.
+fn logback_log(entries: impl IntoIterator<Item = (&'static str, &'static str)>) -> String {
+    entries
+        .into_iter()
+        .map(|(at, level)| format!("{at}.000 [main] {level:<5} com.example.App - Tick\n"))
+        .collect()
+}
+
+/// A Logback viewer over one entry per `(timestamp, level)`.
+fn logback(entries: impl IntoIterator<Item = (&'static str, &'static str)>) -> App {
+    app_in(Preset::Logback, logback_log(entries).as_bytes())
+}
+
+/// Three days in 6 h buckets: 3 warnings on the 7th from 12:00, 6 on the 8th from
+/// 06:00 and 1 on the 9th from 18:00.
+fn three_days() -> App {
+    let warns = |at, n| std::iter::repeat_n((at, "WARN"), n);
+    let entries = [("2026-10-07 00:00:00", "INFO")]
+        .into_iter()
+        .chain(warns("2026-10-07 13:00:00", 3))
+        .chain(warns("2026-10-08 07:00:00", 6))
+        .chain(warns("2026-10-09 19:00:00", 1))
+        .chain([("2026-10-09 23:00:00", "INFO")]);
+    logback(entries)
+}
+
+/// `n` errors at `at` between entries at `first` and `last`.
+fn spike_between(first: &'static str, at: &'static str, n: usize, last: &'static str) -> App {
+    let errors = std::iter::repeat_n((at, "ERROR"), n);
+    let entries = [(first, "INFO")]
+        .into_iter()
+        .chain(errors)
+        .chain([(last, "INFO")]);
+    logback(entries)
+}
+
+/// 12345 errors at 12:00 on the 7th, between entries that span 57 hours: at 80
+/// columns, 1 h buckets would leave 57 columns for the 23 of `12345 at 10-07 12:00:00`,
+/// no room for a gap between the bars and the label.
+fn five_digit_spike() -> App {
+    spike_between(
+        "2026-10-07 00:00:00",
+        "2026-10-07 12:00:00",
+        12_345,
+        "2026-10-09 08:00:00",
+    )
+}
+
+#[test]
+fn focused_histogram_over_several_days_names_the_date_of_the_selected_bucket() {
+    assert_snapshot!(lines_after(&mut three_days(), &third_bucket_keys(), 1..=2), @r"
+      ▄  █     ▂                                                 3 at 10-07 12:00:00
+    ▶00:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn focused_histogram_across_midnight_names_the_date_of_the_selected_bucket() {
+    let mut app = logback([
+        ("2026-10-07 23:59:00", "INFO"),
+        ("2026-10-07 23:59:12", "WARN"),
+        ("2026-10-08 00:00:30", "ERROR"),
+        ("2026-10-08 00:00:30", "ERROR"),
+        ("2026-10-08 00:00:59", "INFO"),
+    ]);
+    assert_snapshot!(lines_after(&mut app, &third_bucket_keys(), 1..=2), @r"
+      ▄               █                                          1 at 10-07 23:59:10
+    ▶23:59:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn histogram_label_column_widens_to_fit_a_five_digit_count_with_a_date() {
+    assert_snapshot!(lines_after(&mut five_digit_spike(), &third_bucket_keys(), 1..=2), @r"
+      █                                                      12345 at 10-07 12:00:00
+    ▶00:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn focused_histogram_ending_on_the_first_buckets_date_shows_only_the_time() {
+    // 5 m buckets from 22:00 to 23:55; the bucket after the last starts the next day.
+    let mut app = logback([
+        ("2026-10-07 22:00:00", "INFO"),
+        ("2026-10-07 22:10:00", "WARN"),
+        ("2026-10-07 23:59:59", "INFO"),
+    ]);
+    assert_snapshot!(lines_after(&mut app, &third_bucket_keys(), 1..=2), @r"
+      █                                                                1 at 22:10:00
+    ▶22:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn histogram_label_column_widens_to_fit_a_six_digit_count_with_a_whole_date() {
+    // Sixty days in 1 d buckets would leave 60 columns for the 20 of
+    // `100000 at 2026-10-04`, no room for a gap, so the buckets grow to 2 d.
+    let mut app = spike_between(
+        "2026-10-01 00:00:00",
+        "2026-10-05 12:00:00",
+        100_000,
+        "2026-11-29 00:00:00",
+    );
+    assert_snapshot!(lines_after(&mut app, &third_bucket_keys(), 1..=2), @r"
+      █                                                         100000 at 2026-10-04
+    ▶00:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn histogram_label_column_is_as_wide_unfocused_as_focused() {
+    assert_snapshot!(lines_after(&mut five_digit_spike(), &[char_key('H')], 1..=2), @r"
+      █                                                                 max 12345/6h
+    ▶00:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+/// The span of `five_digit_spike` without its errors, which arrive after a draw.
+#[test]
+fn histogram_label_column_widens_when_new_entries_need_it() {
+    let log = logback_log([
+        ("2026-10-07 00:00:00", "INFO"),
+        ("2026-10-09 08:00:00", "INFO"),
+    ]);
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut terminal = terminal_after(&mut app, &[char_key('H')]);
+    let errors = std::iter::repeat_n(("2026-10-07 12:00:00", "ERROR"), 12_345);
+    let grown = format!("{log}{}", logback_log(errors));
+    let mut app = changed(
+        app,
+        FileChange::Grew(test_support::source(grown.as_bytes())),
+    );
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert_snapshot!(row(&terminal, 1), @"  █                                                                 max 12345/6h");
+}
+
 // --- hit map ---
 
 /// The map of an 80×24 screen whose rows are drawn from line `top` on, `height`

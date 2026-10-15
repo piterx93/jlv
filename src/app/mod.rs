@@ -826,7 +826,16 @@ struct HistogramState {
     /// Bumped when `counter` changes, to tell when `cached` is stale.
     version: u64,
     cached: Option<CachedHistogram>,
+    /// The label width the row settled on for a row width, valid for one `version`.
+    label_width: Option<SettledLabel>,
     bucket: usize,
+}
+
+#[derive(Debug)]
+struct SettledLabel {
+    row_width: u16,
+    version: u64,
+    width: u16,
 }
 
 #[derive(Debug)]
@@ -1923,6 +1932,22 @@ impl App {
             self.focus = Focus::Table;
         }
         self.histogram.cached.as_ref()?.histogram.as_ref()
+    }
+
+    /// The label width settled for a row of `row_width` columns, while the counted
+    /// entries are those it was settled for.
+    pub(crate) fn settled_label_width(&self, row_width: u16) -> Option<u16> {
+        let settled = self.histogram.label_width.as_ref()?;
+        let current = settled.row_width == row_width && settled.version == self.histogram.version;
+        current.then_some(settled.width)
+    }
+
+    pub(crate) fn settle_label_width(&mut self, row_width: u16, width: u16) {
+        self.histogram.label_width = Some(SettledLabel {
+            row_width,
+            version: self.histogram.version,
+            width,
+        });
     }
 
     /// The selected bucket of the histogram, 0 at first. With the focus on the
