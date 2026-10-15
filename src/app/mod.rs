@@ -21,6 +21,7 @@ use ratatui::crossterm::event::{
 };
 
 use crate::clipboard::{Clipboard, CopyError, entry_text};
+use crate::config::{Colors, Config, Ui};
 use crate::export;
 use crate::filter::{
     self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
@@ -948,6 +949,8 @@ pub struct App {
     shows_thread: bool,
     shows_line_numbers: bool,
     wraps: bool,
+    timestamps: Timestamps,
+    colors: Colors,
     shows_details: bool,
     shows_histogram: bool,
     focus: Focus,
@@ -965,6 +968,24 @@ pub struct App {
     /// Where [`Action::Copy`] puts the selected entry.
     clipboard: Option<Box<dyn Clipboard>>,
     quit: bool,
+}
+
+/// How the table shows a timestamp from 100 columns on.
+#[derive(Debug, Clone)]
+pub struct Timestamps {
+    /// In strftime syntax.
+    pub format: String,
+    /// How many columns the formatted text takes.
+    pub width: usize,
+}
+
+impl Timestamps {
+    fn of(ui: &Ui) -> Self {
+        Timestamps {
+            format: ui.timestamp_format.clone(),
+            width: ui.timestamp_width(),
+        }
+    }
 }
 
 impl App {
@@ -997,6 +1018,7 @@ impl App {
         mtime: Timestamp,
         follow: bool,
     ) -> Self {
+        let defaults = Config::default();
         let picked = format.or_else(|| detect(source::lines(source.bytes())));
         let following = follow && source.origin() == Origin::Plain;
         // A path like `..` has no last component; showing it whole is the next best thing.
@@ -1056,6 +1078,8 @@ impl App {
             shows_thread: false,
             shows_line_numbers: true,
             wraps: false,
+            timestamps: Timestamps::of(&defaults.ui),
+            colors: defaults.colors,
             panel: None,
             notice: None,
             path: path.to_owned(),
@@ -1327,6 +1351,32 @@ impl App {
     /// message on screen ends at the right edge.
     pub fn limit_scroll(&mut self, max: usize) {
         self.scroll = self.scroll.min(max);
+    }
+
+    /// Takes the `[ui]` section and the colours of `config`: whether the thread
+    /// column, the histogram ([`shows_histogram`](Self::shows_histogram)) and the
+    /// line numbers are shown and messages wrap, the timestamp format of the table
+    /// and the styles of the levels and the line numbers. The toggles still change
+    /// them afterwards. A viewer that is never configured shows the line numbers
+    /// only, with the timestamps and colours of [`Config::default`].
+    pub fn configure(&mut self, config: &Config) {
+        let Config { ui, colors, .. } = config;
+        self.shows_thread = ui.show_thread;
+        self.shows_histogram = ui.show_histogram;
+        self.shows_line_numbers = ui.show_line_numbers;
+        self.wraps = ui.wrap;
+        self.timestamps = Timestamps::of(ui);
+        self.colors = *colors;
+    }
+
+    /// The timestamp format, and the width of the column it makes, from 100 columns.
+    pub fn timestamps(&self) -> &Timestamps {
+        &self.timestamps
+    }
+
+    /// The styles of the levels and the line numbers.
+    pub fn colors(&self) -> &Colors {
+        &self.colors
     }
 
     /// Whether the thread column is shown.

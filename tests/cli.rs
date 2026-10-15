@@ -16,8 +16,12 @@ use tempfile::TempDir;
 
 const NOBODY: u32 = 65534;
 
+/// The binary, with its configuration directory pointed at one that doesn't exist,
+/// so that whatever configuration the machine has stays out of the tests.
 fn jlv() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_jlv"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_jlv"));
+    command.env("XDG_CONFIG_HOME", "/nonexistent/jlv-tests");
+    command
 }
 
 fn stdout(out: &Output) -> String {

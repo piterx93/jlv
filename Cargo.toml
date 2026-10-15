@@ -20,7 +20,9 @@ memmap2 = "0.9"
 notify = "8.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 regex = "1.11"
+serde = { version = "1", features = ["derive"] }
 tempfile = "3"
+toml = "1.1"
 unicode-width = "0.2"
 
 [dev-dependencies]

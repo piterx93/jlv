@@ -15,6 +15,7 @@ use ratatui::layout::Rect;
 
 use super::*;
 use crate::clipboard::{CopyError, Via};
+use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
 use crate::format::Level;
 use crate::index::Progress;
@@ -4766,4 +4767,24 @@ fn help_overlay_opens_again_at_its_first_line() {
 fn f1_does_nothing_in_another_panel() {
     let app = pressed(hundred_lines(), &[key(KeyCode::F(2)), key(KeyCode::F(1))]);
     assert!(matches!(app.panel(), Some(Panel::Levels(_))));
+}
+
+// --- configuration ---
+
+#[test]
+fn configure_takes_the_ui_toggles_from_the_config() {
+    for on in [true, false] {
+        let text = format!(
+            "[ui]\nshow_thread = {on}\nshow_histogram = {on}\nshow_line_numbers = {on}\nwrap = {on}\n"
+        );
+        let mut app = hundred_lines();
+        app.configure(&Config::parse(&text).unwrap());
+        let shown = (
+            app.shows_thread(),
+            app.shows_histogram(),
+            app.shows_line_numbers(),
+            app.wraps(),
+        );
+        assert_eq!(shown, (on, on, on, on));
+    }
 }

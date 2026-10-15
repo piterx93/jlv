@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::*;
 use crate::app::{Action, FileChange, action};
+use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
@@ -887,25 +888,6 @@ fn plain_theme_draws_the_table_without_any_style() {
     "#);
 }
 
-#[test]
-fn levels_have_the_colours_of_their_severity() {
-    let styles = [
-        (Some(Level::Trace), Style::new().fg(Color::DarkGray)),
-        (Some(Level::Debug), Style::new().fg(Color::Cyan)),
-        (Some(Level::Info), Style::new().fg(Color::Green)),
-        (Some(Level::Warn), Style::new().fg(Color::Yellow)),
-        (Some(Level::Error), Style::new().fg(Color::Red)),
-        (
-            Some(Level::Fatal),
-            Style::new().fg(Color::White).bg(Color::Red).bold(),
-        ),
-        (None, Style::new()),
-    ];
-    for (level, style) in styles {
-        assert_eq!(level_style(level), style, "{level:?}");
-    }
-}
-
 // Where the columns start at 80 columns, after the `▶` gutter.
 const TIMESTAMP_COLUMN: u16 = 1;
 const LEVEL_COLUMN: u16 = 14;
@@ -924,7 +906,7 @@ fn styled_table_colours_only_the_level_column() {
         Level::Fatal,
     ];
     for (y, level) in (1..).zip(levels) {
-        let style = level_style(Some(level));
+        let style = Config::default().colors.level(Some(level));
         let cell = &buffer[(LEVEL_COLUMN, y)];
         assert_eq!(
             (cell.fg, cell.bg),
@@ -989,6 +971,74 @@ fn level_column_names_the_level_however_the_line_spells_it() {
         row(&terminal, 1),
         "▶12:00:00.100 WARN  com.example.App          Retry"
     );
+}
+
+// --- configuration ---
+
+/// [`table`] configured with the `[ui]` lines `ui` and the sections `sections`, the
+/// histogram hidden unless `ui` shows it.
+fn configured_table(ui: &str, sections: &str) -> App {
+    let text = format!("[ui]\nshow_histogram = false\n{ui}\n{sections}");
+    let mut app = table();
+    app.configure(&Config::parse(&text).unwrap());
+    app
+}
+
+const DAY_FIRST: &str = "timestamp_format = \"%d.%m. %H:%M:%S\"";
+
+#[test]
+fn configured_timestamp_format_is_shown_from_100_columns() {
+    let terminal = drawn(&mut configured_table(DAY_FIRST, ""), 100, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "▶07.10. 12:00:00 TRACE com.example.App                Tick"
+    );
+}
+
+#[test]
+fn below_100_columns_timestamps_show_the_time_of_day_whatever_the_format() {
+    let terminal = drawn(&mut configured_table(DAY_FIRST, ""), 99, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 1),
+        "▶12:00:00.100 TRACE com.example.App               Tick"
+    );
+}
+
+#[test]
+fn configured_level_colours_paint_the_level_column() {
+    let colors = concat!(
+        "[colors]\n",
+        "trace = \"blue\"\n",
+        "debug = \"magenta\"\n",
+        "info = \"lightred\"\n",
+        "warn = \"white\"\n",
+        "error = \"lightcyan\"\n",
+        "fatal = { fg = \"black\", bg = \"lightyellow\" }\n",
+    );
+    let terminal = drawn(&mut configured_table("", colors), 80, 24, Theme::Styled);
+    let buffer = terminal.backend().buffer();
+    let expected = [
+        (Color::Blue, Color::Reset),
+        (Color::Magenta, Color::Reset),
+        (Color::LightRed, Color::Reset),
+        (Color::White, Color::Reset),
+        (Color::LightCyan, Color::Reset),
+        (Color::Black, Color::LightYellow),
+    ];
+    for (y, colours) in (1..).zip(expected) {
+        let cell = &buffer[(LEVEL_COLUMN, y)];
+        assert_eq!((cell.fg, cell.bg), colours, "line {y}");
+    }
+}
+
+#[test]
+fn configured_line_number_colour_paints_the_gutter() {
+    let mut app = configured_table("", "[colors]\nline_number = \"lightblue\"\n");
+    let terminal = numbered_terminal(&mut app, 80, &[]);
+    let buffer = terminal.backend().buffer();
+    for y in 2..=6 {
+        assert_eq!(buffer[(3, y)].fg, Color::LightBlue, "number on line {y}");
+    }
 }
 
 // --- long messages ---

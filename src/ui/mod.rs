@@ -6,7 +6,7 @@ use std::iter;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -93,9 +93,9 @@ const TAB_STOP: usize = 4;
 ///
 /// Under `Raw` a row is the entry's first line. Under the other presets it is a table
 /// row, columns separated by a space: the timestamp in the app's zone
-/// (`%Y-%m-%d %H:%M:%S%.3f`, `%H:%M:%S%.3f` below 100 columns), the level (5 wide,
-/// in [`level_style`]), the thread if shown (15 wide, a longer name keeps its end
-/// after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
+/// (the configured format, `%H:%M:%S%.3f` below 100 columns), the level (5 wide,
+/// in the style of [`App::colors`]), the thread if shown (15 wide, a longer name keeps
+/// its end after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
 /// cut with `…` if even the abbreviation is too wide) and the message in the rest.
 /// The headless entry has only a message, its first line. A folded entry's message
 /// ends with ` [+N]`, N being the lines it hides; an unfolded entry's continuation
@@ -532,22 +532,6 @@ fn plain_follow_status(app: &App) -> Cow<'static, str> {
             0 => "".into(),
             n => format!(" ─ PAUSED +{n} new").into(),
         }
-    }
-}
-
-/// The style of a level in the level column (PRD §6.4): TRACE dark gray, DEBUG cyan,
-/// INFO green, WARN yellow, ERROR red, FATAL bold white on red, and the terminal's
-/// default style for a level jlv doesn't know.
-pub fn level_style(level: Option<Level>) -> Style {
-    let style = Style::new();
-    match level {
-        Some(Level::Trace) => style.fg(Color::DarkGray),
-        Some(Level::Debug) => style.fg(Color::Cyan),
-        Some(Level::Info) => style.fg(Color::Green),
-        Some(Level::Warn) => style.fg(Color::Yellow),
-        Some(Level::Error) => style.fg(Color::Red),
-        Some(Level::Fatal) => style.fg(Color::White).bg(Color::Red).bold(),
-        None => style,
     }
 }
 

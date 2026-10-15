@@ -11,7 +11,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{Theme, abbreviate, level_style, printable, printable_from};
+use super::{Theme, abbreviate, printable, printable_from};
 use crate::app::{App, Search, ShownLine};
 use crate::format::{EntryParser, strip_ansi};
 use crate::source;
@@ -28,7 +28,6 @@ const MAX_CLASS_WIDTH: usize = 40;
 const DATE_FROM_WIDTH: usize = 100;
 /// Timestamp formats and the width of what they print.
 const TIME: (&str, usize) = ("%H:%M:%S%.3f", 12);
-const DATE_TIME: (&str, usize) = ("%Y-%m-%d %H:%M:%S%.3f", 23);
 
 /// Draws the rows on screen into `body`, reading only their entries. Sets the app's
 /// screen to the rows that fit and keeps its scroll from running past the widest
@@ -119,7 +118,7 @@ struct Columns {
 /// The columns before the message, under a preset that has them.
 struct Table {
     parser: EntryParser,
-    timestamp_format: &'static str,
+    timestamp_format: String,
     timestamp: usize,
     /// `None` while the thread column is hidden.
     thread: Option<usize>,
@@ -138,9 +137,10 @@ impl Columns {
     fn new(app: &App, width: usize) -> Self {
         let table = app.settings().preset.entry_parser().map(|parser| {
             let (timestamp_format, timestamp) = if width < DATE_FROM_WIDTH {
-                TIME
+                (TIME.0.to_owned(), TIME.1)
             } else {
-                DATE_TIME
+                let timestamps = app.timestamps();
+                (timestamps.format.clone(), timestamps.width)
             };
             Table {
                 parser,
@@ -203,7 +203,7 @@ impl Columns {
         let record = shown.record;
         let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
             let local = app.settings().zone.to_datetime(timestamp);
-            local.strftime(table.timestamp_format).to_string()
+            local.strftime(&table.timestamp_format).to_string()
         });
         let level = record
             .level()
@@ -212,7 +212,7 @@ impl Columns {
             Span::raw(cell(&timestamp, table.timestamp) + " "),
             Span::styled(
                 cell(&level, LEVEL_WIDTH),
-                theme.paint(level_style(record.level())),
+                theme.paint(app.colors().level(record.level())),
             ),
             Span::raw(" "),
         ];
@@ -323,7 +323,7 @@ impl Row {
             let number = self
                 .number
                 .map_or_else(String::new, |number| number.to_string());
-            let style = theme.paint(Style::new().fg(Color::DarkGray));
+            let style = theme.paint(app.colors().line_number);
             Span::styled(format!("{number:>width$} "), style)
         });
         let marker = Span::raw(match (selected, self.bookmarked) {
