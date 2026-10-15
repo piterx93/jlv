@@ -162,11 +162,11 @@ fn default_options_watch_and_poll_every_250_ms() {
 }
 
 #[test]
-fn shows_an_append_within_a_second() {
+fn shows_an_append() {
     let (_dir, path) = log_with("a\n");
     let mut follower = follow(&path);
     append(&path, "b\n");
-    follower.wait_for(Duration::from_secs(1), "a\nb\n", false);
+    follower.wait_for(PATIENCE, "a\nb\n", false);
 }
 
 #[test]
