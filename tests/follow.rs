@@ -313,8 +313,13 @@ fn stays_idle_with_notify_while_the_file_does_not_change() {
     listener
         .watch(dir.path(), RecursiveMode::NonRecursive)
         .unwrap();
-    if let Ok(event) = events.recv_timeout(Duration::from_millis(500)) {
-        panic!("the directory was touched: {event:?}");
+    // FSEvents on macOS may still report the file's creation, which happened before
+    // the listener started; the follower never creates the file, so that is no look.
+    let until = Instant::now() + Duration::from_millis(500);
+    while let Ok(event) = events.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        if !matches!(&event, Ok(event) if event.kind.is_create()) {
+            panic!("the directory was touched: {event:?}");
+        }
     }
 }
 
