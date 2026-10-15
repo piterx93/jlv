@@ -6,13 +6,14 @@ use std::iter;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Text};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
+use crate::follow::Liveness;
 use crate::format::Level;
 use crate::keymap;
 use crate::mouse::HitMap;
@@ -82,12 +83,16 @@ const TAB_STOP: usize = 4;
 /// file, in dark gray, right-aligned as wide as the last line number of the entries
 /// needs (at least 4) and followed by a space; blank while it isn't known.
 ///
-/// The follow status is ` ─ READ-ONLY` for a gzip file, which is never followed,
+/// The follow status is ` ─ READ-ONLY ○` for a gzip file, which is never followed,
 /// then ` ─ truncated .gz` if it ended early or was corrupt ([`App::origin`]). For a
-/// plain file it is ` ─ WAITING FOR FILE` while the file is gone from its path,
-/// otherwise ` ─ FOLLOW ●` while the app follows the file and ` ─ PAUSED +N new`
-/// while it doesn't and N new entries came in ([`App::new_entries`]); nothing while
-/// it doesn't and none came.
+/// plain file it is ` ─ WAITING FOR FILE ○` while the file is gone from its path,
+/// otherwise ` ─ FOLLOW ` and the dot while the app follows the file,
+/// ` ─ PAUSED +N new ` and the dot while it doesn't and N new entries came in
+/// ([`App::new_entries`]), and ` ─ PAUSED ` and the dot while it doesn't and none
+/// came. The dot shows the file's [liveness](App::liveness): `●` while it is live,
+/// `◐` while it is quiet and `○` while it is idle. Its cell keeps the header's bold
+/// reverse video with a green, yellow or dark gray background, so that it shows in
+/// that colour on the bar; under the plain theme the shape alone tells them apart.
 ///
 /// The row that marks a truncation shows `── file truncated ──` after the gutter.
 ///
@@ -233,16 +238,23 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         .map_or(String::new(), |(position, total)| {
             format!(" ─ match {position}/{total}")
         });
-    let title = format!(
-        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}{matches}{key_notice}",
+    let (status, after_dot) = follow_status(app);
+    let before_dot = format!(
+        "jlv ─ {} ─ {} ─ {}{status} ",
         printable(app.file_name()),
         human_size(app.size()),
         app.settings().preset,
-        follow_status(app),
     );
+    let after_dot = format!("{after_dot}{notice}{indexing}{matches}{key_notice}");
     let bar = Style::new().reversed();
-    let title_width = title.width();
-    frame.render_widget(Line::from(title).style(theme.paint(bar.bold())), header);
+    let (dot, colour) = liveness_dot(app.liveness());
+    let title_width = before_dot.width() + dot.width() + after_dot.width();
+    let title = Line::from(vec![
+        Span::raw(before_dot),
+        Span::styled(dot, theme.paint(bar.bold().bg(colour))),
+        Span::raw(after_dot),
+    ]);
+    frame.render_widget(title.style(theme.paint(bar.bold())), header);
     let counters = level_counters(app.level_counts());
     let room = usize::from(area.width).saturating_sub(title_width + 1);
     if !counters.is_empty() && counters.width() <= room {
@@ -512,13 +524,13 @@ fn filter_bar(app: &App) -> Option<String> {
     (!active.is_empty()).then(|| format!("Filters: {}", active.join("  ")))
 }
 
-/// The follow status of the header, with the ` ─ ` before it; empty while paused
-/// with no new entries.
-fn follow_status(app: &App) -> Cow<'static, str> {
+/// The follow status of the header, with the ` ─ ` before it, split where the
+/// liveness dot goes: what comes before it and what after.
+fn follow_status(app: &App) -> (Cow<'static, str>, &'static str) {
     match app.origin() {
-        Origin::Gzip => " ─ READ-ONLY".into(),
-        Origin::TruncatedGzip => " ─ READ-ONLY ─ truncated .gz".into(),
-        Origin::Plain => plain_follow_status(app),
+        Origin::Gzip => (" ─ READ-ONLY".into(), ""),
+        Origin::TruncatedGzip => (" ─ READ-ONLY".into(), " ─ truncated .gz"),
+        Origin::Plain => (plain_follow_status(app), ""),
     }
 }
 
@@ -526,12 +538,21 @@ fn plain_follow_status(app: &App) -> Cow<'static, str> {
     if app.waiting_for_file() {
         " ─ WAITING FOR FILE".into()
     } else if app.following() {
-        " ─ FOLLOW ●".into()
+        " ─ FOLLOW".into()
     } else {
         match app.new_entries() {
-            0 => "".into(),
+            0 => " ─ PAUSED".into(),
             n => format!(" ─ PAUSED +{n} new").into(),
         }
+    }
+}
+
+/// The dot for a liveness and the colour it shows in on the reversed header.
+fn liveness_dot(liveness: Liveness) -> (&'static str, Color) {
+    match liveness {
+        Liveness::Live => ("●", Color::Green),
+        Liveness::Quiet => ("◐", Color::Yellow),
+        Liveness::Idle => ("○", Color::DarkGray),
     }
 }
 

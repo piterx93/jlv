@@ -1094,6 +1094,78 @@ fn file_back_at_the_path_is_shown_from_its_start() {
     assert!(app.following());
 }
 
+// --- liveness ---
+
+const TEN_SECONDS: Duration = Duration::from_secs(10);
+const FIVE_MINUTES: Duration = Duration::from_secs(300);
+
+/// `app` told the time `at`.
+fn ticked(mut app: App, at: Instant) -> App {
+    app.tick(at);
+    app
+}
+
+/// `app` opened at `start` and told the time five minutes later, by when an unchanged
+/// file is idle.
+fn idle(app: App, start: Instant) -> App {
+    ticked(ticked(app, start), start + FIVE_MINUTES)
+}
+
+#[test]
+fn liveness_counts_from_opening_while_the_file_does_not_change() {
+    let start = Instant::now();
+    let app = ticked(twenty_lines_followed(), start);
+    assert_eq!(app.liveness(), Liveness::Live);
+    let app = ticked(app, start + TEN_SECONDS);
+    assert_eq!(app.liveness(), Liveness::Quiet);
+}
+
+/// The change happened at the latest tick, and the liveness counts from there.
+#[test]
+fn growth_is_a_change_also_without_following() {
+    let start = Instant::now();
+    let app = idle(app(numbered_log(20).as_bytes()), start);
+    assert_eq!(app.liveness(), Liveness::Idle);
+    let app = grown(app, &numbered_log(21));
+    let app = ticked(
+        app,
+        start + FIVE_MINUTES + TEN_SECONDS - Duration::from_millis(1),
+    );
+    assert_eq!(app.liveness(), Liveness::Live);
+}
+
+#[test]
+fn truncation_is_a_change() {
+    let start = Instant::now();
+    let app = truncated(idle(twenty_lines_followed(), start), &numbered_log(2));
+    assert_eq!(app.liveness(), Liveness::Live);
+}
+
+#[test]
+fn missing_file_is_idle() {
+    let app = ticked(twenty_lines_followed(), Instant::now());
+    let app = changed(app, FileChange::Gone);
+    assert_eq!(app.liveness(), Liveness::Idle);
+}
+
+/// After a rotation, or once the file is back after it was gone.
+#[test]
+fn another_file_at_the_path_is_a_change() {
+    let start = Instant::now();
+    let app = changed(idle(twenty_lines_followed(), start), FileChange::Gone);
+    let app = changed(
+        app,
+        FileChange::Replaced(test_support::source(b"new 1\nnew 2\n")),
+    );
+    assert_eq!(app.liveness(), Liveness::Live);
+}
+
+#[test]
+fn gzip_file_is_idle() {
+    let app = ticked(hundred_lines_gzipped(), Instant::now());
+    assert_eq!(app.liveness(), Liveness::Idle);
+}
+
 /// Something that happens to a followed Logback file or its viewer.
 #[derive(Debug, Clone)]
 enum Step {

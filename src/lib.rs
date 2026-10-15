@@ -205,7 +205,7 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         ratatui::restore();
         return Err(err);
     }
-    let result = event_loop(&mut terminal, &mut app, theme, |timeout| {
+    let result = event_loop(&mut terminal, &mut app, theme, Instant::now, |timeout| {
         let ready = timeout.map_or(Ok(true), event::poll)?;
         ready.then(event::read).transpose()
     });
@@ -277,16 +277,19 @@ pub fn initial_time_filter(args: &Args) -> Option<TimeFilter> {
 /// app ([`App::key`]), and again, until the app should quit. Other events, and a wait
 /// that timed out, only redraw. Errors from drawing or reading events end the loop.
 ///
-/// Before every drawing the app takes in what its index found since the last one
-/// ([`App::poll_index`]), and what happened to the file if it watches one. While
-/// indexing goes on, and while the app [watches](App::watch) the file, `next_event`
-/// is asked to wait at most 100 ms, so that the screen keeps up with them;
-/// `next_event(Some(timeout))` returns `Ok(None)` when nothing came in time.
-/// Otherwise it is asked to wait for as long as it takes (`None`).
+/// Before every drawing the app is told the time `now` says ([`App::tick`]) and takes
+/// in what its index found since the last one ([`App::poll_index`]), and what
+/// happened to the file if it watches one. While indexing goes on, and while the app
+/// [watches](App::watch) the file, `next_event` is asked to wait at most 100 ms, so
+/// that the screen keeps up with them; `next_event(Some(timeout))` returns `Ok(None)`
+/// when nothing came in time. It is asked to wait no longer than until the dot in the
+/// header changes, so that the dot changes on screen without a key. Otherwise it is
+/// asked to wait for as long as it takes (`None`).
 pub fn event_loop<B>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     theme: Theme,
+    mut now: impl FnMut() -> Instant,
     mut next_event: impl FnMut(Option<Duration>) -> io::Result<Option<Event>>,
 ) -> io::Result<()>
 where
@@ -294,14 +297,16 @@ where
     B::Error: Send + Sync + 'static,
 {
     while !app.should_quit() {
+        app.tick(now());
         app.poll_index();
         terminal
             .draw(|frame| ui::render(frame, app, theme))
             .map_err(io::Error::other)?;
-        let timeout = app.expects_updates().then_some(REDRAW);
+        let redraw = app.expects_updates().then_some(REDRAW);
+        let timeout = [redraw, app.dot_changes_in()].into_iter().flatten().min();
         match next_event(timeout)? {
             Some(Event::Key(key)) => app.key(key),
-            Some(Event::Mouse(mouse)) => app.mouse(mouse, Instant::now()),
+            Some(Event::Mouse(mouse)) => app.mouse(mouse, now()),
             _ => {}
         }
     }

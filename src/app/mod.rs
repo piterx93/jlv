@@ -28,7 +28,7 @@ use crate::filter::{
     TimeSpec,
 };
 use crate::fold::Folds;
-use crate::follow::{Event, Options, Watcher};
+use crate::follow::{Event, Liveness, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
@@ -888,6 +888,19 @@ impl HistogramState {
     }
 }
 
+/// The latest time the app was told, and the time of the file's last change.
+#[derive(Debug, Clone, Copy)]
+struct Clock {
+    now: Instant,
+    changed: Instant,
+}
+
+impl Clock {
+    fn since_change(self) -> Duration {
+        self.now.saturating_duration_since(self.changed)
+    }
+}
+
 /// A log file being viewed.
 #[derive(Debug)]
 pub struct App {
@@ -936,6 +949,8 @@ pub struct App {
     /// Whether the rows start with the truncation row.
     truncated: bool,
     waiting: bool,
+    /// Set by the first [`tick`](Self::tick).
+    ticks: Option<Clock>,
     /// The file grown while the index wasn't complete yet, mapped.
     grown: Option<Source>,
     watch: Option<Watch>,
@@ -1063,6 +1078,7 @@ impl App {
             index_brings_new: false,
             truncated: false,
             waiting: false,
+            ticks: None,
             grown: None,
             watch: None,
             progress,
@@ -1253,6 +1269,41 @@ impl App {
         self.waiting
     }
 
+    /// Tells the viewer the time it is, for its [`liveness`](Self::liveness). The
+    /// first tick is when it opened the file; every change to the file it takes in
+    /// afterwards ([`file_changed`](Self::file_changed), also through
+    /// [`poll_index`](Self::poll_index)) happened at the latest tick.
+    pub fn tick(&mut self, now: Instant) {
+        let clock = self.ticks.get_or_insert(Clock { now, changed: now });
+        clock.now = now;
+    }
+
+    /// How recently the file changed, as of the latest [`tick`](Self::tick):
+    /// [`Liveness::since`] its last change, or since it opened if it hasn't changed
+    /// since. A gzip file, and a file the viewer [waits for](Self::waiting_for_file),
+    /// are [`Idle`](Liveness::Idle). Before the first tick the file is
+    /// [`Live`](Liveness::Live). Growth, a truncation and another file at the path
+    /// count as changes, whether or not the viewer follows the file.
+    pub fn liveness(&self) -> Liveness {
+        if !self.can_follow() || self.waiting {
+            return Liveness::Idle;
+        }
+        self.ticks.map_or(Liveness::Live, |clock| {
+            Liveness::since(clock.since_change())
+        })
+    }
+
+    /// How long after the latest [`tick`](Self::tick) the dot in the header changes if
+    /// nothing else happens ([`Liveness::changes_in`]); `None` while the file is
+    /// [`Idle`](Liveness::Idle), as the dot can't change any more.
+    pub(crate) fn dot_changes_in(&self) -> Option<Duration> {
+        if self.liveness() == Liveness::Idle {
+            return None;
+        }
+        self.ticks
+            .and_then(|clock| Liveness::changes_in(clock.since_change()))
+    }
+
     /// Whether the file is plain or gzip. A gzip file is read-only: the viewer opens
     /// it at the end or the top as [`new`](Self::new) says, but never follows it, and
     /// never [watches](Self::watch) it. [`Action::Bottom`] goes to the last row
@@ -1286,6 +1337,9 @@ impl App {
     /// growth the view stays where it was, after a truncation or another file the
     /// first row is selected and the count is the new file's entries.
     pub fn file_changed(&mut self, change: FileChange) {
+        if let Some(clock) = &mut self.ticks {
+            clock.changed = clock.now;
+        }
         match change {
             FileChange::Grew(source) if self.progress.is_complete() => self.grow(source),
             FileChange::Grew(source) => self.grown = Some(source),

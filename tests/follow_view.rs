@@ -93,11 +93,17 @@ fn event_loop_waits_at_most_100_ms_at_a_time_while_watching() {
     let (_path, mut app) = watching(&dir, "one\n", OPTIONS);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     let mut waits = Vec::new();
-    event_loop(&mut terminal, &mut app, Theme::Styled, |timeout| {
-        waits.push(timeout);
-        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        Ok::<_, io::Error>(Some(Event::Key(q)))
-    })
+    event_loop(
+        &mut terminal,
+        &mut app,
+        Theme::Styled,
+        Instant::now,
+        |timeout| {
+            waits.push(timeout);
+            let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+            Ok::<_, io::Error>(Some(Event::Key(q)))
+        },
+    )
     .unwrap();
     assert_eq!(waits.len(), 1);
     assert!(
