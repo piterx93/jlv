@@ -3950,6 +3950,133 @@ fn a_bookmark_set_before_the_index_is_complete_stays_on_its_entry() {
     assert_eq!(bookmarks(&app), [4]);
 }
 
+// --- jumps while the filter is evaluating ---
+
+/// A Logback log of `n` entries, `… - step 1` to `… - step n`, in which the entries
+/// at the indexes in `traced` have a stack trace.
+fn traced_log(n: usize, traced: &[usize]) -> String {
+    (0..n)
+        .map(|i| {
+            let trace = if traced.contains(&i) {
+                [EXCEPTION, FRAME].concat()
+            } else {
+                String::new()
+            };
+            format!(
+                "2026-10-07 12:00:00.000 [main] INFO  com.example.App - step {}\n{trace}",
+                i + 1
+            )
+        })
+        .collect()
+}
+
+/// [`traced_log`] of `n` entries with traces at `traced`, on a 10-line screen.
+fn traced_app(n: usize, traced: &[usize]) -> App {
+    let mut app = app_in(Preset::Logback, traced_log(n, traced).as_bytes());
+    app.resize(10);
+    app
+}
+
+/// `app` filtered to the entries whose message contains `word`, before any of the
+/// filter's results come in.
+fn filter_set(mut app: App, word: &str) -> App {
+    app.set_filters(text_filter(word));
+    assert!(app.filtering());
+    app
+}
+
+/// [`traced_log`] of 100 entries with a trace at entry 20, under a filter that shows
+/// every entry, with entry `at` selected, then grown to 3,100 entries with another
+/// trace at entry 3000: more than the filter evaluates again at once.
+fn traced_then_grown(at: usize) -> App {
+    let mut app = filter_set(traced_app(100, &[20]), "step");
+    wait_for_filter(&mut app);
+    let mut app = applied(app, &vec![Action::Down; at]);
+    let source = test_support::source(traced_log(3100, &[20, 3000]).as_bytes());
+    app.file_changed(FileChange::Grew(source));
+    assert!(app.filtering());
+    assert_eq!(selected(&app), Some(at));
+    app
+}
+
+#[test]
+fn an_exception_jump_waits_for_the_filter_and_lands_on_the_exception_it_finds() {
+    let mut app = pressed(traced_then_grown(50), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(50), Some("searching…")));
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(3000), None));
+    assert!(!app.following());
+}
+
+#[test]
+fn an_exception_jump_wraps_only_once_the_filter_has_evaluated_every_entry() {
+    let mut app = pressed(traced_then_grown(10), &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(10), Some("searching…")));
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(3000), Some("exceptions wrapped")));
+}
+
+#[test]
+fn an_exception_jump_to_an_entry_already_evaluated_moves_at_once() {
+    let app = pressed(traced_then_grown(10), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(20), None));
+}
+
+#[test]
+fn an_exception_jump_waits_for_the_index_and_lands_on_the_exception_it_finds() {
+    let mut app = unindexed_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    let mut app = pressed(app, &[char_key(']')]);
+    assert_eq!(app.notice(), Some("searching…"));
+    wait_for_index(&mut app);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn a_bookmark_jump_waits_for_the_filter_and_lands_on_the_bookmark_it_finds() {
+    let app = filter_set(marked(traced_app(100, &[]), &[80]), "step");
+    let mut app = pressed(app, &[char_key('\'')]);
+    assert_eq!(app.notice(), Some("searching…"));
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(80), None));
+}
+
+#[test]
+fn a_jump_that_finds_nothing_once_the_filter_is_done_says_so() {
+    for (jump, none) in [(']', "no exceptions"), ('\'', "no bookmarks")] {
+        // Entry 3, `step 4`, has the only trace and the only bookmark.
+        let app = filter_set(marked(traced_app(100, &[3]), &[3]), "step 5");
+        let mut app = pressed(app, &[char_key(jump)]);
+        assert_eq!(app.notice(), Some("searching…"), "{jump}");
+        wait_for_filter(&mut app);
+        assert_eq!(app.notice(), Some(none), "{jump}");
+    }
+}
+
+#[test]
+fn a_key_while_a_jump_waits_cancels_it() {
+    let mut app = pressed(traced_then_grown(50), &[char_key(']'), char_key('j')]);
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(51), None));
+}
+
+#[test]
+fn a_click_while_a_jump_waits_cancels_it() {
+    let app = mapped(pressed(traced_then_grown(50), &[char_key(']')]));
+    let top = app.viewport().top();
+    let mut app = clicked(app, &[(4, 0)]);
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(top + 3), None));
+}
+
+#[test]
+fn a_filter_change_while_a_jump_waits_cancels_it() {
+    let app = pressed(traced_then_grown(50), &[char_key(']')]);
+    let mut app = applied(app, &[Action::ToggleLevel(Level::Debug)]);
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(0), None));
+}
+
 // --- histogram ---
 
 /// The width the histogram is worked out for.

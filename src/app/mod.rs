@@ -907,6 +907,9 @@ pub struct App {
     matches: Option<Engine>,
     /// The way a move to a match is waiting to go, for matches not yet counted.
     pending_step: Option<bool>,
+    /// An exception or bookmark jump, and its way, waiting for the index and the filters
+    /// to settle a wrap or a miss.
+    pending_jump: Option<(Seek, bool)>,
     /// An export waiting for the index and the filters' results.
     pending_export: Option<PendingExport>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
@@ -1047,6 +1050,7 @@ impl App {
             bookmarks: BTreeSet::new(),
             matches: None,
             pending_step: None,
+            pending_jump: None,
             pending_export: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
@@ -1152,6 +1156,9 @@ impl App {
         self.update_rows();
         if let Some(backward) = self.pending_step.take() {
             self.step(backward);
+        }
+        if let Some((seek, backward)) = self.pending_jump.take() {
+            self.seek(seek, backward);
         }
         if self.progress.is_complete()
             && !self.filtering()
@@ -1950,6 +1957,7 @@ impl App {
 
     fn dispatch(&mut self, action: Action) {
         self.pending_step = None;
+        self.cancel_jump();
         if let Some(panel) = self.panel.take() {
             self.apply_in_panel(panel, action);
             return;
@@ -2040,11 +2048,11 @@ impl App {
             Action::SearchBackward => self.open_search(true),
             Action::NextMatch => self.step_search(false),
             Action::PreviousMatch => self.step_search(true),
-            Action::NextException => self.jump_exception(false),
-            Action::PreviousException => self.jump_exception(true),
+            Action::NextException => self.seek(Seek::Exception, false),
+            Action::PreviousException => self.seek(Seek::Exception, true),
             Action::ToggleBookmark => self.toggle_bookmark(),
-            Action::NextBookmark => self.jump_bookmark(false),
-            Action::PreviousBookmark => self.jump_bookmark(true),
+            Action::NextBookmark => self.seek(Seek::Bookmark, false),
+            Action::PreviousBookmark => self.seek(Seek::Bookmark, true),
             Action::Export => self.panel = Some(Panel::Export(self.export_prompt())),
             Action::Copy => self.copy_entry(),
             Action::Confirm => self.toggle_details(),
@@ -2192,6 +2200,7 @@ impl App {
             return;
         }
         self.pending_step = None;
+        self.cancel_jump();
         let target = self.hit_map.target(event.column, event.row);
         match event.kind {
             MouseEventKind::ScrollUp => self.wheel(target, true),
@@ -2345,18 +2354,35 @@ impl App {
         }
     }
 
-    fn jump_exception(&mut self, backward: bool) {
-        let found = self.find_shown(backward, Record::has_exception);
-        self.land(found, "exceptions wrapped", "no exceptions");
+    fn cancel_jump(&mut self) {
+        if self.pending_jump.take().is_some() {
+            self.notice = None;
+        }
     }
 
-    fn jump_bookmark(&mut self, backward: bool) {
-        if self.bookmarks.is_empty() {
+    /// Selects the next exception or bookmark. A match among the entries shown so far
+    /// is taken at once; a wrap or a miss only counts once the index and the filter
+    /// have gone through every entry, so until then the jump waits.
+    fn seek(&mut self, jump: Seek, backward: bool) {
+        if jump == Seek::Bookmark && self.bookmarks.is_empty() {
             self.notice = Some(Cow::Borrowed("no bookmarks"));
             return;
         }
-        let found = self.find_shown(backward, |record| self.is_bookmarked(record));
-        self.land(found, "bookmarks wrapped", "no bookmarks");
+        let found = match jump {
+            Seek::Exception => self.find_shown(backward, Record::has_exception),
+            Seek::Bookmark => self.find_shown(backward, |record| self.is_bookmarked(record)),
+        };
+        let settled = self.progress.is_complete() && !self.filtering();
+        if matches!(found, Some((_, false))) || settled {
+            let (wrapped, none) = match jump {
+                Seek::Exception => ("exceptions wrapped", "no exceptions"),
+                Seek::Bookmark => ("bookmarks wrapped", "no bookmarks"),
+            };
+            self.land(found, wrapped, none);
+        } else {
+            self.pending_jump = Some((jump, backward));
+            self.notice = Some(Cow::Borrowed("searching…"));
+        }
     }
 
     fn toggle_bookmark(&mut self) {
@@ -2480,6 +2506,7 @@ impl App {
 
     /// Starts evaluating the filters over the index, in place of any engine at work.
     fn start_filter(&mut self) {
+        self.cancel_jump();
         let filters = self.filters.clone();
         let preset = self.settings.preset;
         self.filter = Some(Filter::spawn(&self.index, preset, filters, &self.folds));
@@ -3160,6 +3187,12 @@ fn last_dated(
         Some(_) => dated(0..from),
         None => None,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Seek {
+    Exception,
+    Bookmark,
 }
 
 /// Where a move to a match goes.
