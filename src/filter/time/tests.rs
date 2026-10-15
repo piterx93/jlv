@@ -312,6 +312,36 @@ fn a_range_shows_as_written_whatever_the_base() {
     }
 }
 
+// --- covering ---
+
+#[test]
+fn covering_spans_the_whole_seconds_from_its_start_up_to_its_end() {
+    let spec = TimeSpec::covering(
+        utc("2026-10-07 10:10:00.400"),
+        utc("2026-10-07 10:15:00"),
+        &TimeZone::UTC,
+    );
+    let filter = TimeFilter {
+        spec,
+        base: Base::File,
+    };
+    assert_eq!(
+        filter.range(utc(LAST), utc(NOW), &TimeZone::UTC),
+        between("2026-10-07 10:10:00", Some("2026-10-07 10:15:00"))
+    );
+}
+
+#[test]
+fn covering_shows_its_times_on_the_zone_clock() {
+    let zone = TimeZone::fixed(tz::offset(2));
+    let spec = TimeSpec::covering(
+        utc("2026-10-07 08:10:00"),
+        utc("2026-10-07 08:15:00"),
+        &zone,
+    );
+    assert_eq!(spec.to_string(), "2026-10-07 10:10:00..2026-10-07 10:14:59");
+}
+
 // --- anything ---
 
 fn spec_like() -> impl Strategy<Value = String> {

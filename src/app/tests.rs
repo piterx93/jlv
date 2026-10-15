@@ -1,16 +1,20 @@
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use proptest::collection::vec;
 use proptest::prelude::*;
-use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::layout::Rect;
 
 use super::*;
+use crate::clipboard::{CopyError, Via};
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
 use crate::format::Level;
 use crate::index::Progress;
@@ -206,6 +210,11 @@ fn enter_confirms() {
 }
 
 #[test]
+fn tab_cycles_the_focus() {
+    assert_eq!(action(key(KeyCode::Tab)), Some(Action::CycleFocus));
+}
+
+#[test]
 fn esc_cancels() {
     assert_eq!(action(key(KeyCode::Esc)), Some(Action::Cancel));
 }
@@ -293,7 +302,7 @@ fn letters_with_alt_are_not_plain_letters() {
 #[test]
 fn unbound_keys_do_nothing() {
     assert_eq!(action(char_key('v')), None);
-    assert_eq!(action(key(KeyCode::F(1))), None);
+    assert_eq!(action(key(KeyCode::F(12))), None);
 }
 
 #[test]
@@ -3283,4 +3292,1478 @@ fn a_backward_step_waits_until_the_entries_before_the_selection_are_counted() {
     assert_eq!(selected(&app), Some(3000));
     wait_for_search(&mut app);
     assert_eq!(selected(&app), Some(2000));
+}
+
+// --- details pane ---
+
+/// An entry with a stack trace of three lines, then an entry of one line.
+const DETAILS_LOG: &str = concat!(
+    "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n",
+    "java.lang.IllegalStateException: boom\n",
+    "\tat com.example.App.run(App.java:10)\n",
+    "\tat com.example.App.main(App.java:5)\n",
+    "2026-10-07 12:00:01.000 [main] INFO  com.example.App - Recovered\n",
+);
+
+/// The first entry of `DETAILS_LOG`, as in the file.
+fn first_details_entry() -> String {
+    DETAILS_LOG
+        .lines()
+        .take(4)
+        .map(|line| line.to_owned() + "\n")
+        .collect()
+}
+
+/// `DETAILS_LOG` with the details pane shown, 2 lines high for an entry that takes
+/// 10, the first entry selected and the focus on the table.
+fn details_shown() -> App {
+    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    app.resize(10);
+    app.apply(Action::Confirm);
+    app.fit_details(2, 10);
+    app
+}
+
+/// [`details_shown`] with the focus on the details pane.
+fn details_focused() -> App {
+    applied(details_shown(), &[Action::CycleFocus])
+}
+
+#[test]
+fn details_pane_is_hidden_at_first() {
+    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    assert!(!app.shows_details());
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn confirm_without_a_panel_shows_the_details_pane() {
+    assert!(details_shown().shows_details());
+}
+
+#[test]
+fn confirm_hides_the_shown_details_pane() {
+    let app = applied(details_shown(), &[Action::Confirm]);
+    assert!(!app.shows_details());
+}
+
+#[test]
+fn confirm_in_a_panel_leaves_the_details_pane_hidden() {
+    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = applied(app, &[Action::LevelPanel, Action::Confirm]);
+    assert!(!app.shows_details());
+}
+
+#[test]
+fn cycle_focus_moves_the_focus_to_the_details_pane_and_back() {
+    let mut app = details_shown();
+    app.apply(Action::CycleFocus);
+    assert_eq!(app.focus(), Focus::Details);
+    app.apply(Action::CycleFocus);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn cycle_focus_without_the_details_pane_keeps_the_focus_on_the_table() {
+    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = applied(app, &[Action::CycleFocus]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn hiding_the_details_pane_gives_the_focus_back_to_the_table() {
+    let app = applied(details_focused(), &[Action::Confirm]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn down_with_the_details_focused_scrolls_them_and_keeps_the_selection() {
+    let app = applied(details_focused(), &[Action::Down]);
+    assert_eq!(app.details_scroll(), 1);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn up_with_the_details_focused_scrolls_them_back() {
+    let app = applied(details_focused(), &[Action::Down, Action::Down, Action::Up]);
+    assert_eq!(app.details_scroll(), 1);
+}
+
+#[test]
+fn page_down_with_the_details_focused_scrolls_them_by_their_height() {
+    let app = applied(details_focused(), &[Action::PageDown]);
+    assert_eq!(app.details_scroll(), 2);
+}
+
+#[test]
+fn page_up_with_the_details_focused_scrolls_them_back_by_their_height() {
+    let app = applied(details_focused(), &[Action::Down; 5]);
+    let app = applied(app, &[Action::PageUp]);
+    assert_eq!(app.details_scroll(), 3);
+}
+
+#[test]
+fn details_scroll_stops_at_the_first_line() {
+    let app = applied(details_focused(), &[Action::Down, Action::PageUp]);
+    assert_eq!(app.details_scroll(), 0);
+}
+
+#[test]
+fn details_scroll_stops_with_the_last_line_at_the_bottom() {
+    let app = applied(details_focused(), &[Action::Down; 20]);
+    assert_eq!(app.details_scroll(), 8);
+}
+
+#[test]
+fn details_taking_fewer_lines_scroll_back_to_their_last_line() {
+    let mut app = applied(details_focused(), &[Action::Down; 8]);
+    app.fit_details(2, 5);
+    assert_eq!(app.details_scroll(), 3);
+}
+
+#[test]
+fn scrolling_the_details_up_keeps_following() {
+    let mut app = followed(Preset::Logback, DETAILS_LOG);
+    app.apply(Action::Confirm);
+    app.fit_details(2, 10);
+    let app = applied(app, &[Action::CycleFocus, Action::Down, Action::Up]);
+    assert!(app.following());
+}
+
+#[test]
+fn other_actions_with_the_details_focused_work_on_the_table() {
+    let app = applied(details_focused(), &[Action::Bottom]);
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn selecting_another_entry_scrolls_the_details_back_to_the_top() {
+    let app = applied(
+        details_focused(),
+        &[Action::Down, Action::CycleFocus, Action::Down],
+    );
+    assert_eq!(app.viewport().selected(), Some(1));
+    assert_eq!(app.details_scroll(), 0);
+}
+
+#[test]
+fn details_entry_follows_the_selection() {
+    let app = applied(details_shown(), &[Action::Down]);
+    let second = DETAILS_LOG.lines().last().unwrap().to_owned() + "\n";
+    assert_eq!(app.details_entry(), Some(second.as_bytes()));
+}
+
+#[test]
+fn moving_between_the_lines_of_the_selected_entry_keeps_the_details_scroll() {
+    let app = applied(
+        details_shown(),
+        &[
+            Action::ToggleFold,
+            Action::CycleFocus,
+            Action::Down,
+            Action::CycleFocus,
+            Action::Down,
+        ],
+    );
+    assert_eq!(app.viewport().selected(), Some(1));
+    assert_eq!(app.details_scroll(), 1);
+}
+
+#[test]
+fn details_entry_is_every_line_of_the_selected_entry_folded_or_not() {
+    let entry = first_details_entry();
+    assert_eq!(details_shown().details_entry(), Some(entry.as_bytes()));
+}
+
+#[test]
+fn append_to_the_shown_entry_keeps_the_details_scroll_and_adds_its_lines() {
+    let first = first_details_entry();
+    let mut app = followed(Preset::Logback, &first);
+    app.apply(Action::Confirm);
+    app.fit_details(2, 10);
+    let app = applied(app, &[Action::CycleFocus, Action::Down]);
+    let longer = first + "\tat java.lang.Thread.run(Thread.java:1583)\n";
+    let app = grown(app, &longer);
+    assert_eq!(app.details_scroll(), 1);
+    assert_eq!(app.details_entry(), Some(longer.as_bytes()));
+}
+
+// --- exception jumps ---
+
+const RETRYING: &str = "2026-10-07 12:00:01.700 [main] INFO  com.example.App - Retrying\n";
+const STOPPED: &str = "2026-10-07 12:00:03.000 [main] INFO  com.example.App - Stopped\n";
+
+/// Five entries, of which [`FAILED`] (entry 1) and [`DONE`] (entry 3) have a stack
+/// trace.
+const EXCEPTIONS: [&str; 8] = [
+    STARTED, FAILED, EXCEPTION, FRAME, RETRYING, DONE, FRAME, STOPPED,
+];
+
+/// [`EXCEPTIONS`] on a 10-line screen, every entry folded, with row `row` selected.
+fn exceptions_at(row: usize) -> App {
+    let mut app = logback(&EXCEPTIONS);
+    app.resize(10);
+    applied(app, &vec![Action::Down; row])
+}
+
+/// [`EXCEPTIONS`] with the `hidden` levels hidden, the filter's results in.
+fn exceptions_without(hidden: &[Level]) -> App {
+    let mut filters = Filters::default();
+    for &level in hidden {
+        filters.levels.set(level, false);
+    }
+    filtered(exceptions_at(0), filters)
+}
+
+/// The selected row of `app` and what its notice says.
+fn landed(app: &App) -> (Option<usize>, Option<&str>) {
+    (selected(app), app.notice())
+}
+
+#[test]
+fn closing_bracket_selects_the_next_entry_with_an_exception() {
+    let app = pressed(exceptions_at(0), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn opening_bracket_selects_the_previous_entry_with_an_exception() {
+    let app = pressed(exceptions_at(4), &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(3), None));
+}
+
+#[test]
+fn from_an_entry_with_an_exception_the_jumps_go_past_it() {
+    let app = pressed(exceptions_at(1), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(3), None));
+    let app = pressed(app, &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn closing_bracket_past_the_last_exception_wraps_to_the_first_with_a_notice() {
+    let app = pressed(exceptions_at(3), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(1), Some("exceptions wrapped")));
+}
+
+#[test]
+fn opening_bracket_before_the_first_exception_wraps_to_the_last_with_a_notice() {
+    let app = pressed(exceptions_at(0), &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(3), Some("exceptions wrapped")));
+}
+
+#[test]
+fn from_inside_an_unfolded_trace_a_jump_selects_the_first_line_of_the_next_exception() {
+    let unfolded = [Action::UnfoldAll, Action::Down, Action::Down, Action::Down];
+    let app = applied(exceptions_at(0), &unfolded);
+    assert_eq!(selected_row(&app), FRAME.trim_end());
+    let app = pressed(app, &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(5), None));
+    assert_eq!(selected_row(&app), DONE.trim_end());
+    assert_eq!(app.viewport().total(), 8);
+}
+
+#[test]
+fn exception_jumps_pass_over_the_entries_the_filters_hide() {
+    let app = pressed(exceptions_without(&[Level::Error]), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(2), None));
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn the_only_exception_in_view_wraps_onto_itself_with_a_notice() {
+    let app = pressed(exceptions_without(&[Level::Warn]), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(1), None));
+    for bracket in [']', '['] {
+        let app = pressed(
+            exceptions_without(&[Level::Warn]),
+            &[char_key(']'), char_key(bracket)],
+        );
+        assert_eq!(
+            landed(&app),
+            (Some(1), Some("exceptions wrapped")),
+            "{bracket}"
+        );
+    }
+}
+
+#[test]
+fn without_an_exception_in_view_the_jumps_say_no_exceptions_and_stay() {
+    let without_traces = || applied(hundred_lines(), &[Action::Down; 3]);
+    let traces_hidden = || {
+        applied(
+            exceptions_without(&[Level::Error, Level::Warn]),
+            &[Action::Down],
+        )
+    };
+    let cases: [(&dyn Fn() -> App, usize); 2] = [(&without_traces, 3), (&traces_hidden, 1)];
+    for (app, row) in cases {
+        for bracket in [']', '['] {
+            let app = pressed(app(), &[char_key(bracket)]);
+            assert_eq!(
+                landed(&app),
+                (Some(row), Some("no exceptions")),
+                "{bracket}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_exception_jump_stops_following() {
+    let app = followed(Preset::Logback, &EXCEPTIONS.concat());
+    assert_eq!(selected(&app), Some(4));
+    let app = pressed(app, &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(3), None));
+    assert!(!app.following());
+}
+
+#[test]
+fn exception_jumps_cover_the_last_entries_shown_before_the_index_is_complete() {
+    let mut app = following_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    assert_eq!(selected(&app), Some(4));
+    let app = pressed(app, &[char_key('['), char_key('[')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+// --- bookmarks ---
+
+/// `app` with the entries on `rows` bookmarked, one after the other, with `m`.
+fn marked(mut app: App, rows: &[usize]) -> App {
+    for &row in rows {
+        app = applied(app, &[Action::Top]);
+        app = applied(app, &vec![Action::Down; row]);
+        app = pressed(app, &[char_key('m')]);
+    }
+    app
+}
+
+/// [`EXCEPTIONS`] on a 10-line screen with the entries on `rows` bookmarked and row
+/// `at` selected.
+fn bookmarked_at(rows: &[usize], at: usize) -> App {
+    let app = applied(marked(exceptions_at(0), rows), &[Action::Top]);
+    applied(app, &vec![Action::Down; at])
+}
+
+/// The rows of `app` that show a bookmarked entry.
+fn bookmarks(app: &App) -> Vec<usize> {
+    (0..app.viewport().total())
+        .filter(|&i| app.bookmarked(i))
+        .collect()
+}
+
+/// `app` with the ERROR entries hidden, the filter's results in.
+fn hiding_errors(app: App) -> App {
+    let mut filters = Filters::default();
+    filters.levels.set(Level::Error, false);
+    filtered(app, filters)
+}
+
+/// [`EXCEPTIONS`] in `Raw`, every line an entry, on a 10-line screen.
+fn exception_lines() -> App {
+    let mut app = app(EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    app
+}
+
+#[test]
+fn m_bookmarks_the_selected_entry() {
+    let app = pressed(exceptions_at(2), &[char_key('m')]);
+    assert_eq!(bookmarks(&app), [2]);
+    assert_eq!(landed(&app), (Some(2), Some("bookmarked")));
+}
+
+#[test]
+fn m_on_a_bookmarked_entry_removes_its_bookmark() {
+    let app = pressed(bookmarked_at(&[2], 2), &[char_key('m')]);
+    assert_eq!(bookmarks(&app), Vec::<usize>::new());
+    assert_eq!(app.notice(), Some("bookmark removed"));
+}
+
+#[test]
+fn m_on_a_stack_frame_bookmarks_its_whole_entry() {
+    let unfolded = [Action::UnfoldAll, Action::Down, Action::Down, Action::Down];
+    let app = pressed(applied(exceptions_at(0), &unfolded), &[char_key('m')]);
+    assert_eq!(bookmarks(&app), [1, 2, 3]);
+}
+
+#[test]
+fn quote_selects_the_next_bookmark() {
+    let app = pressed(bookmarked_at(&[1, 3], 1), &[char_key('\'')]);
+    assert_eq!(landed(&app), (Some(3), None));
+}
+
+#[test]
+fn double_quote_selects_the_previous_bookmark() {
+    let app = pressed(bookmarked_at(&[1, 3], 3), &[char_key('"')]);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn bookmark_jumps_past_the_last_or_first_bookmark_wrap_around_with_a_notice() {
+    for (at, quote, to) in [(4, '\'', 1), (0, '"', 3)] {
+        let app = pressed(bookmarked_at(&[1, 3], at), &[char_key(quote)]);
+        assert_eq!(
+            landed(&app),
+            (Some(to), Some("bookmarks wrapped")),
+            "{quote}"
+        );
+    }
+}
+
+#[test]
+fn without_a_bookmark_in_view_the_jumps_say_no_bookmarks_and_stay() {
+    let unmarked = || exceptions_at(2);
+    let marks_hidden = || applied(hiding_errors(bookmarked_at(&[1], 0)), &[Action::Top]);
+    let cases: [(&dyn Fn() -> App, usize); 2] = [(&unmarked, 2), (&marks_hidden, 0)];
+    for (app, row) in cases {
+        for quote in ['\'', '"'] {
+            let app = pressed(app(), &[char_key(quote)]);
+            assert_eq!(landed(&app), (Some(row), Some("no bookmarks")), "{quote}");
+        }
+    }
+}
+
+#[test]
+fn bookmark_jumps_pass_over_the_entries_the_filters_hide() {
+    let app = applied(hiding_errors(bookmarked_at(&[1, 3], 0)), &[Action::Top]);
+    let app = pressed(app, &[char_key('\'')]);
+    assert_eq!(landed(&app), (Some(2), None));
+    assert_eq!(selected_row(&app), DONE.trim_end());
+}
+
+#[test]
+fn a_bookmark_the_filters_hide_is_kept_for_when_they_show_it_again() {
+    let app = hiding_errors(bookmarked_at(&[1, 3], 0));
+    assert_eq!(bookmarks(&app), [2]);
+    let app = filtered(app, Filters::default());
+    assert_eq!(bookmarks(&app), [1, 3]);
+}
+
+#[test]
+fn a_bookmark_jump_stops_following() {
+    let app = applied(
+        followed(Preset::Logback, &EXCEPTIONS.concat()),
+        &[Action::Up],
+    );
+    let app = pressed(app, &[char_key('m'), char_key('F')]);
+    assert!(app.following());
+    let app = pressed(app, &[char_key('"')]);
+    assert_eq!(landed(&app), (Some(3), None));
+    assert!(!app.following());
+}
+
+#[test]
+fn cycling_the_preset_moves_a_bookmark_to_the_entry_that_holds_its_offset() {
+    // Under `Raw` row 2 is the exception line, which Logback reads as part of entry 1;
+    // row 5 starts entry 3.
+    let mut app = cycled(marked(exception_lines(), &[2, 5]));
+    wait_for_index(&mut app);
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(bookmarks(&app), [1, 3]);
+}
+
+#[test]
+fn unbookmarking_an_entry_removes_every_bookmark_inside_it() {
+    let mut app = cycled(marked(exception_lines(), &[2, 3]));
+    wait_for_index(&mut app);
+    assert_eq!(bookmarks(&app), [1]);
+    let app = applied(app, &[Action::Top, Action::Down]);
+    let app = pressed(app, &[char_key('m')]);
+    assert_eq!(bookmarks(&app), Vec::<usize>::new());
+}
+
+#[test]
+fn truncation_and_another_file_at_the_path_remove_every_bookmark() {
+    let content = EXCEPTIONS.concat();
+    let changes: [fn(Source) -> FileChange; 2] = [FileChange::Truncated, FileChange::Replaced];
+    for change in changes {
+        let app = pressed(followed(Preset::Logback, &content), &[char_key('m')]);
+        assert_eq!(bookmarks(&app), [4]);
+        let app = changed(app, change(test_support::source(content.as_bytes())));
+        assert_eq!(bookmarks(&app), Vec::<usize>::new());
+    }
+}
+
+#[test]
+fn a_bookmark_set_before_the_index_is_complete_stays_on_its_entry() {
+    let mut app = following_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    let mut app = pressed(app, &[char_key('m')]);
+    assert_eq!(bookmarks(&app), [4]);
+    wait_for_index(&mut app);
+    assert_eq!(bookmarks(&app), [4]);
+}
+
+// --- histogram ---
+
+/// The width the histogram is worked out for.
+const HISTOGRAM_WIDTH: usize = 60;
+
+/// An INFO, a WARN, an ERROR of another class and a FATAL entry, a second apart.
+const HISTOGRAM_LOG: &str = concat!(
+    "2026-10-07 10:00:00.000 [main] INFO  com.example.App - Started\n",
+    "2026-10-07 10:00:01.000 [main] WARN  com.example.App - Slow\n",
+    "2026-10-07 10:00:02.000 [main] ERROR com.example.Pay - Failed\n",
+    "2026-10-07 10:00:03.000 [main] FATAL com.example.App - Down\n",
+);
+
+fn histogram_app() -> App {
+    let mut app = app_in(Preset::Logback, HISTOGRAM_LOG.as_bytes());
+    app.resize(10);
+    app
+}
+
+fn histogram_counts(app: &mut App) -> Vec<u32> {
+    app.histogram(HISTOGRAM_WIDTH).unwrap().counts.clone()
+}
+
+/// `app` with the histogram shown and worked out.
+fn with_histogram(mut app: App) -> App {
+    app.apply(Action::ToggleHistogram);
+    app.histogram(HISTOGRAM_WIDTH);
+    app
+}
+
+/// [`histogram_app`] with the histogram shown and the focus on it.
+fn histogram_focused() -> App {
+    applied(with_histogram(histogram_app()), &[Action::CycleFocus])
+}
+
+#[test]
+fn capital_h_toggles_the_histogram() {
+    assert_eq!(action(char_key('H')), Some(Action::ToggleHistogram));
+}
+
+#[test]
+fn histogram_is_hidden_at_first() {
+    assert!(!histogram_app().shows_histogram());
+}
+
+#[test]
+fn toggle_histogram_shows_and_hides_it() {
+    let mut app = applied(histogram_app(), &[Action::ToggleHistogram]);
+    assert!(app.shows_histogram());
+    app.apply(Action::ToggleHistogram);
+    assert!(!app.shows_histogram());
+}
+
+#[test]
+fn showing_the_histogram_without_timestamps_says_so() {
+    let app = applied(hundred_lines(), &[Action::ToggleHistogram]);
+    assert_eq!(app.notice(), Some("no entry has a timestamp"));
+}
+
+#[test]
+fn histogram_counts_only_the_entries_the_filters_show() {
+    let mut app = histogram_app();
+    assert_eq!(histogram_counts(&mut app), [0, 1, 1, 1]);
+    let classes = Classes::parse(["!com.example.Pay"]).unwrap();
+    let mut app = filtered(
+        app,
+        Filters {
+            classes,
+            ..Filters::default()
+        },
+    );
+    assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1]);
+}
+
+/// An ERROR two seconds after the last entry of [`HISTOGRAM_LOG`].
+const LATER_ERROR: &str = "2026-10-07 10:00:05.000 [main] ERROR com.example.App - Again\n";
+
+/// [`HISTOGRAM_LOG`], followed, with the histogram shown and fed, grown by a line that
+/// continues its last entry and by [`LATER_ERROR`].
+fn histogram_grown(app: App) -> App {
+    let mut app = with_histogram(app);
+    assert!(app.histogram(HISTOGRAM_WIDTH).is_some());
+    grown(app, &[HISTOGRAM_LOG, EXCEPTION, LATER_ERROR].concat())
+}
+
+#[test]
+fn histogram_counts_appended_entries_once() {
+    let mut app = histogram_grown(followed(Preset::Logback, HISTOGRAM_LOG));
+    assert_eq!(histogram_counts(&mut app), [0, 1, 1, 1, 0, 1]);
+}
+
+#[test]
+fn filtered_histogram_counts_appended_entries_once() {
+    let classes = Classes::parse(["!com.example.Pay"]).unwrap();
+    let filters = Filters {
+        classes,
+        ..Filters::default()
+    };
+    let app = filtered(followed(Preset::Logback, HISTOGRAM_LOG), filters);
+    let mut app = histogram_grown(app);
+    wait_for_filter(&mut app);
+    assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1, 0, 1]);
+}
+
+#[test]
+fn histogram_counts_only_what_a_truncated_file_holds_now() {
+    let app = with_histogram(followed(Preset::Logback, HISTOGRAM_LOG));
+    let mut app = truncated(app, LATER_ERROR);
+    assert_eq!(histogram_counts(&mut app), [1]);
+}
+
+#[test]
+fn histogram_counts_only_what_a_replacing_file_holds() {
+    let app = with_histogram(followed(Preset::Logback, HISTOGRAM_LOG));
+    let replacing = test_support::source(LATER_ERROR.as_bytes());
+    let mut app = changed(app, FileChange::Replaced(replacing));
+    assert_eq!(histogram_counts(&mut app), [1]);
+}
+
+#[test]
+fn histogram_counts_each_entry_once_across_preset_cycles() {
+    let classes = Classes::parse(["!com.example.Pay"]).unwrap();
+    let filters = Filters {
+        classes,
+        ..Filters::default()
+    };
+    let mut app = with_histogram(filtered(histogram_app(), filters));
+    for _ in Preset::ALL {
+        app.histogram(HISTOGRAM_WIDTH);
+        app.apply(Action::CyclePreset);
+        wait_for_filter(&mut app);
+    }
+    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1]);
+}
+
+#[test]
+fn cycle_focus_goes_down_the_shown_panes_and_back_to_the_table() {
+    let mut app = applied(with_histogram(histogram_app()), &[Action::Confirm]);
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        app.apply(Action::CycleFocus);
+        seen.push(app.focus());
+    }
+    assert_eq!(seen, [Focus::Histogram, Focus::Details, Focus::Table]);
+}
+
+#[test]
+fn cycle_focus_skips_the_histogram_without_timestamps() {
+    let app = applied(with_histogram(hundred_lines()), &[Action::CycleFocus]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn hiding_the_histogram_gives_the_focus_back_to_the_table() {
+    let app = applied(histogram_focused(), &[Action::ToggleHistogram]);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+#[test]
+fn right_with_the_histogram_focused_selects_the_next_bucket_instead_of_scrolling() {
+    let app = applied(histogram_focused(), &[Action::ScrollRight]);
+    assert_eq!(app.histogram_bucket(), 1);
+    assert_eq!(app.scroll(), 0);
+}
+
+#[test]
+fn left_with_the_histogram_focused_selects_the_bucket_before() {
+    let app = applied(
+        histogram_focused(),
+        &[Action::ScrollRight, Action::ScrollRight, Action::ScrollLeft],
+    );
+    assert_eq!(app.histogram_bucket(), 1);
+}
+
+#[test]
+fn bucket_selection_stops_at_the_first_and_the_last_bucket() {
+    let app = applied(histogram_focused(), &[Action::ScrollLeft]);
+    assert_eq!(app.histogram_bucket(), 0);
+    let app = applied(app, &[Action::ScrollRight; 5]);
+    assert_eq!(app.histogram_bucket(), 3);
+}
+
+#[test]
+fn down_with_the_histogram_focused_moves_the_selection() {
+    let app = applied(histogram_focused(), &[Action::Down]);
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn histogram_counts_the_filters_results_as_they_come_in() {
+    let mut app = with_histogram(histogram_app());
+    app.set_filters(Filters {
+        levels: Levels::only(&[Level::Warn, Level::Error]),
+        ..Filters::default()
+    });
+    // Before the first results.
+    app.histogram(HISTOGRAM_WIDTH);
+    wait_for_filter(&mut app);
+    assert_eq!(histogram_counts(&mut app), [1, 1]);
+}
+
+#[test]
+fn histogram_fits_a_new_width() {
+    let mut app = histogram_app();
+    app.histogram(HISTOGRAM_WIDTH);
+    // The four seconds share one 5 s bucket.
+    assert_eq!(app.histogram(1).unwrap().counts, [3]);
+}
+
+#[test]
+fn a_shown_histogram_with_entries_left_to_count_expects_updates() {
+    let mut app = unindexed_app(Preset::Logback, HISTOGRAM_LOG.as_bytes());
+    app.apply(Action::ToggleHistogram);
+    wait_for_index(&mut app);
+    assert!(app.expects_updates());
+    app.histogram(HISTOGRAM_WIDTH);
+    assert!(!app.expects_updates());
+}
+
+#[test]
+fn showing_a_histogram_with_timestamps_sets_no_notice() {
+    let mut app = histogram_app();
+    app.key(char_key('H'));
+    assert_eq!(app.notice(), None);
+}
+
+#[test]
+fn the_selected_bucket_stays_within_a_narrower_histogram() {
+    let mut app = applied(histogram_focused(), &[Action::ScrollRight; 3]);
+    app.apply(Action::ToggleLevel(Level::Fatal));
+    wait_for_filter(&mut app);
+    assert_eq!(app.histogram(HISTOGRAM_WIDTH).unwrap().counts.len(), 3);
+    assert_eq!(app.histogram_bucket(), 2);
+}
+
+#[test]
+fn confirming_a_bucket_without_entries_gives_the_focus_back_to_the_table() {
+    let log = [HISTOGRAM_LOG, LATER_ERROR].concat();
+    let app = with_histogram(app_in(Preset::Logback, log.as_bytes()));
+    // The fifth bucket, 10:00:04, has no entry.
+    let mut app = applied(
+        app,
+        &[
+            Action::CycleFocus,
+            Action::ScrollRight,
+            Action::ScrollRight,
+            Action::ScrollRight,
+            Action::ScrollRight,
+            Action::Confirm,
+        ],
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(app.histogram(HISTOGRAM_WIDTH), None);
+    assert_eq!(app.focus(), Focus::Table);
+}
+
+/// [`histogram_focused`] after setting the time filter to the third bucket.
+fn third_bucket_confirmed() -> App {
+    applied(
+        histogram_focused(),
+        &[Action::ScrollRight, Action::ScrollRight, Action::Confirm],
+    )
+}
+
+#[test]
+fn confirm_with_the_histogram_focused_sets_the_time_filter_to_the_selected_bucket() {
+    let app = third_bucket_confirmed();
+    assert_eq!(
+        app.time_filter().map(ToString::to_string).as_deref(),
+        Some("2026-10-07 10:00:02..2026-10-07 10:00:02")
+    );
+    assert_eq!(
+        app.filters().time,
+        Some(TimeRange {
+            start: "2026-10-07T10:00:02Z".parse().unwrap(),
+            end: Some("2026-10-07T10:00:03Z".parse().unwrap()),
+        })
+    );
+    assert!(!app.shows_details());
+}
+
+#[test]
+fn confirming_a_bucket_selects_the_first_bucket_again() {
+    assert_eq!(third_bucket_confirmed().histogram_bucket(), 0);
+}
+
+// --- export ---
+
+#[test]
+fn e_opens_the_export_prompt() {
+    assert_eq!(action(char_key('e')), Some(Action::Export));
+}
+
+#[test]
+fn f8_opens_the_export_prompt() {
+    assert_eq!(action(key(KeyCode::F(8))), Some(Action::Export));
+}
+
+/// A viewer over `content` in `preset`, opened from `app.log` in `dir`, where it is
+/// written, with `dir` as its current directory. Its index isn't complete yet.
+fn exporting(dir: &tempfile::TempDir, preset: Preset, content: &str) -> App {
+    let path = dir.path().join("app.log");
+    fs::write(&path, content).unwrap();
+    let mut app = App::new(
+        &path,
+        source::open(&path).unwrap(),
+        Some(preset),
+        test_support::zone(),
+        test_support::mtime(),
+        false,
+    );
+    app.set_current_dir(dir.path());
+    app
+}
+
+/// [`TWO_TRACES`] in Logback, exporting to `dir`, with the whole file indexed.
+fn exporting_traces(dir: &tempfile::TempDir) -> App {
+    let mut app = exporting(dir, Preset::Logback, &TWO_TRACES.concat());
+    wait_for_index(&mut app);
+    app
+}
+
+/// `app` after opening the export prompt, typing `path` over its suggestion and
+/// confirming.
+fn exported_to(mut app: App, path: &str) -> App {
+    app.key(char_key('e'));
+    let suggested = match app.panel() {
+        Some(Panel::Export(prompt)) => prompt.text.chars().count(),
+        other => panic!("expected the export prompt, got {other:?}"),
+    };
+    let keys = [
+        vec![key(KeyCode::Backspace); suggested],
+        typing(path),
+        vec![key(KeyCode::Enter)],
+    ]
+    .concat();
+    pressed(app, &keys)
+}
+
+fn export_prompt(text: &str, error: Option<&str>, overwrite: bool) -> Panel {
+    Panel::Export(ExportPrompt {
+        text: text.to_owned(),
+        error: error.map(str::to_owned),
+        overwrite,
+    })
+}
+
+#[test]
+fn export_prompt_suggests_the_file_name_without_gz() {
+    let app = pressed(
+        test_support::gzip_app(&test_support::gzip(b"line\n")),
+        &[char_key('e')],
+    );
+    assert_eq!(
+        app.panel(),
+        Some(&export_prompt("app.log.filtered.log", None, false))
+    );
+}
+
+#[test]
+fn export_writes_every_entry_the_filters_show_with_all_its_lines() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = filtered(exporting_traces(&dir), without_info());
+    let app = exported_to(applied(app, &[Action::FoldAll]), "out.log");
+    assert_eq!(app.panel(), None);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        [FAILED, EXCEPTION, FRAME, DONE, FRAME].concat()
+    );
+}
+
+/// What [`App::notice`] says while an export waits for the index and the filters.
+const EXPORT_WAITS: &str = "export waits for the filters";
+
+/// Polls `app` until its pending export is done. Fails the test after
+/// [`INDEX_DEADLINE`].
+fn wait_for_export(app: &mut App) {
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    loop {
+        app.poll_index();
+        if app.notice() != Some(EXPORT_WAITS) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exporting took longer than {INDEX_DEADLINE:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// [`TWO_TRACES`] without INFO, exported to `out.log` in `dir` before the index and
+/// the filter are polled even once.
+fn export_before_polling(dir: &tempfile::TempDir) -> App {
+    let mut app = exporting(dir, Preset::Logback, &TWO_TRACES.concat());
+    app.set_filters(without_info());
+    exported_to(app, "out.log")
+}
+
+#[test]
+fn export_waits_for_the_index_and_the_filters() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = export_before_polling(&dir);
+    assert_eq!(app.notice(), Some(EXPORT_WAITS));
+    assert_eq!(app.panel(), None);
+    assert!(!dir.path().join("out.log").exists());
+    wait_for_export(&mut app);
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        [FAILED, EXCEPTION, FRAME, DONE, FRAME].concat()
+    );
+}
+
+#[test]
+fn esc_cancels_a_waiting_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = pressed(export_before_polling(&dir), &[key(KeyCode::Esc)]);
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    app.poll_index();
+    assert!(!dir.path().join("out.log").exists());
+}
+
+#[test]
+fn changing_the_filters_cancels_a_waiting_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = pressed(export_before_polling(&dir), &[char_key('x')]);
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    app.poll_index();
+    assert!(!dir.path().join("out.log").exists());
+}
+
+#[test]
+fn export_says_how_many_entries_it_wrote() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exported_to(filtered(exporting_traces(&dir), without_info()), "out.log");
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+}
+
+#[test]
+fn export_of_no_entries_says_nothing_to_export_and_writes_no_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = filtered(exporting_traces(&dir), text_filter("nowhere"));
+    let app = exported_to(app, "out.log");
+    assert_eq!(app.notice(), Some("nothing to export"));
+    assert_eq!(app.panel(), None);
+    assert!(!dir.path().join("out.log").exists());
+}
+
+/// [`TWO_TRACES`] exporting to `out.log` in `dir`, which already holds `old`.
+fn exported_over_a_file(dir: &tempfile::TempDir) -> App {
+    let app = exporting_traces(dir);
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    exported_to(app, "out.log")
+}
+
+#[test]
+fn export_asks_before_overwriting_a_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exported_over_a_file(&dir);
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, true)));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn y_overwrites_the_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(exported_over_a_file(&dir), &[char_key('y')]);
+    assert_eq!(app.panel(), None);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        TWO_TRACES.concat()
+    );
+}
+
+#[test]
+fn ctrl_c_quits_while_asking_to_overwrite() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(exported_over_a_file(&dir), &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn another_key_than_y_keeps_the_file_and_goes_back_to_the_path() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(exported_over_a_file(&dir), &[char_key('n')]);
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, false)));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn export_refuses_the_viewed_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exported_to(exporting_traces(&dir), "./app.log");
+    let error = "cannot export to the file being viewed";
+    assert_eq!(
+        app.panel(),
+        Some(&export_prompt("./app.log", Some(error), false))
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("app.log")).unwrap(),
+        TWO_TRACES.concat()
+    );
+}
+
+#[test]
+fn export_to_a_directory_fails_without_asking_to_overwrite() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("logs")).unwrap();
+    // A blank path is the current directory.
+    for path in ["logs", ""] {
+        let app = exported_to(exporting_traces(&dir), path);
+        assert_eq!(
+            app.notice(),
+            Some("export failed: Is a directory (os error 21)"),
+            "{path:?}"
+        );
+        assert_eq!(app.panel(), None, "{path:?}");
+    }
+}
+
+#[test]
+fn export_refuses_a_hard_link_to_the_viewed_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = exporting_traces(&dir);
+    fs::hard_link(dir.path().join("app.log"), dir.path().join("link.log")).unwrap();
+    let app = exported_to(app, "link.log");
+    let error = "cannot export to the file being viewed";
+    assert_eq!(
+        app.panel(),
+        Some(&export_prompt("link.log", Some(error), false))
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("app.log")).unwrap(),
+        TWO_TRACES.concat()
+    );
+}
+
+#[test]
+fn export_failure_shows_in_the_notice() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let locked = dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let app = exported_to(exporting_traces(&dir), "locked/out.log");
+    assert_eq!(
+        app.notice(),
+        Some("export failed: Permission denied (os error 13)")
+    );
+    assert_eq!(app.panel(), None);
+}
+
+// --- mouse ---
+
+fn mouse(kind: MouseEventKind, column: u16, line: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row: line,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn left_click(column: u16, line: u16) -> MouseEvent {
+    mouse(MouseEventKind::Down(MouseButton::Left), column, line)
+}
+
+/// Left clicks at column 5 of screen line `line`, each `ms` milliseconds after the
+/// first.
+fn clicked(mut app: App, clicks: &[(u16, u64)]) -> App {
+    let start = Instant::now();
+    for &(line, ms) in clicks {
+        app.mouse(left_click(5, line), start + Duration::from_millis(ms));
+    }
+    app
+}
+
+fn wheel(mut app: App, kind: MouseEventKind) -> App {
+    app.mouse(mouse(kind, 5, 5), Instant::now());
+    app
+}
+
+/// A map of an 80-column screen with the header on line 0 and the rows from line 1
+/// on, `lines` being the row drawn on each.
+fn rows_map(lines: impl IntoIterator<Item = usize>) -> HitMap {
+    let lines: Vec<usize> = lines.into_iter().collect();
+    let height = u16::try_from(lines.len()).unwrap();
+    HitMap {
+        rows: Rect::new(0, 1, 80, height),
+        lines,
+        ..HitMap::default()
+    }
+}
+
+/// `app` with the map of a screen showing its viewport's rows from line 1 on.
+fn mapped(mut app: App) -> App {
+    let viewport = app.viewport();
+    let shown = viewport.top()..viewport.total().min(viewport.top() + viewport.height());
+    app.set_hit_map(rows_map(shown));
+    app
+}
+
+/// [`DETAILS_LOG`], every entry folded, so that it has 2 rows, mapped from line 1.
+fn foldable() -> App {
+    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    app.resize(10);
+    mapped(app)
+}
+
+#[test]
+fn click_selects_the_row_drawn_under_it() {
+    let app = clicked(
+        mapped(applied(hundred_lines(), &[Action::Bottom])),
+        &[(3, 0)],
+    );
+    assert_eq!(pos(&app), (90, Some(92)));
+}
+
+#[test]
+fn click_stops_following_even_on_the_last_row() {
+    let app = clicked(mapped(twenty_lines_followed()), &[(10, 0)]);
+    assert_eq!(pos(&app), (10, Some(19)));
+    assert!(!app.following());
+}
+
+#[test]
+fn click_before_the_matches_are_counted_drops_the_search_move() {
+    let mut app = app(numbered_log(5000).as_bytes());
+    app.resize(10);
+    let app = search_entered(app, "step 4999");
+    let mut app = clicked(mapped(app), &[(4, 0)]);
+    wait_for_search(&mut app);
+    assert_eq!(selected(&app), Some(3));
+}
+
+#[test]
+fn click_on_a_row_gone_since_the_screen_was_drawn_does_nothing() {
+    let mut app = hundred_lines();
+    // One past the last row.
+    app.set_hit_map(rows_map([100]));
+    let app = clicked(app, &[(1, 0)]);
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn right_click_does_nothing() {
+    let mut app = mapped(hundred_lines());
+    app.mouse(
+        mouse(MouseEventKind::Down(MouseButton::Right), 5, 5),
+        Instant::now(),
+    );
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn mouse_does_nothing_while_a_panel_is_open() {
+    let app = clicked(
+        mapped(applied(hundred_lines(), &[Action::LevelPanel])),
+        &[(5, 0)],
+    );
+    assert_eq!(pos(&app), (0, Some(0)));
+    assert!(matches!(app.panel(), Some(Panel::Levels(_))));
+}
+
+#[test]
+fn second_click_on_a_row_within_400_ms_toggles_its_fold() {
+    let app = clicked(foldable(), &[(1, 0), (1, 400)]);
+    assert_eq!(app.viewport().total(), 5);
+    assert_eq!(app.viewport().selected(), Some(0));
+}
+
+#[test]
+fn second_click_after_400_ms_only_selects() {
+    let app = clicked(foldable(), &[(1, 0), (1, 401)]);
+    assert_eq!(app.viewport().total(), 2);
+}
+
+#[test]
+fn clicks_on_two_lines_of_a_wrapped_row_are_a_double_click() {
+    let mut app = foldable();
+    app.set_hit_map(rows_map([0, 0, 1]));
+    let app = clicked(app, &[(1, 0), (2, 100)]);
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn clicks_on_two_rows_are_no_double_click() {
+    let app = clicked(foldable(), &[(1, 0), (2, 100)]);
+    assert_eq!(app.viewport().total(), 2);
+    assert_eq!(app.viewport().selected(), Some(1));
+}
+
+#[test]
+fn key_between_two_clicks_on_the_same_row_makes_no_double_click() {
+    let mut app = foldable();
+    let start = Instant::now();
+    app.mouse(left_click(5, 1), start);
+    // Unfolds the first entry, so the rows below it are numbered anew.
+    app.key(char_key(' '));
+    app.mouse(left_click(5, 1), start + Duration::from_millis(100));
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn click_after_a_double_click_starts_over() {
+    let app = clicked(foldable(), &[(1, 0), (1, 100), (1, 200)]);
+    assert_eq!(app.viewport().total(), 5);
+}
+
+#[test]
+fn click_on_a_histogram_bucket_sets_the_time_filter_to_it() {
+    let mut app = with_histogram(histogram_app());
+    app.set_hit_map(HitMap {
+        buckets: Some(Rect::new(0, 1, 4, 1)),
+        ..rows_map(0..4)
+    });
+    app.mouse(left_click(2, 1), Instant::now());
+    assert_eq!(
+        app.time_filter().map(ToString::to_string).as_deref(),
+        Some("2026-10-07 10:00:02..2026-10-07 10:00:02")
+    );
+}
+
+#[test]
+fn wheel_down_scrolls_the_screen_and_the_selection_three_rows() {
+    let app = wheel(mapped(hundred_lines()), MouseEventKind::ScrollDown);
+    assert_eq!(pos(&app), (3, Some(3)));
+}
+
+#[test]
+fn wheel_up_scrolls_the_screen_and_the_selection_three_rows() {
+    let app = mapped(applied(hundred_lines(), &[Action::Bottom]));
+    let app = wheel(app, MouseEventKind::ScrollUp);
+    assert_eq!(pos(&app), (87, Some(96)));
+}
+
+#[test]
+fn wheel_up_stops_following() {
+    let app = wheel(mapped(twenty_lines_followed()), MouseEventKind::ScrollUp);
+    assert!(!app.following());
+}
+
+#[test]
+fn wheel_over_the_details_pane_scrolls_it_three_lines() {
+    let mut app = details_shown();
+    app.set_hit_map(HitMap {
+        details: Some(Rect::new(0, 3, 80, 5)),
+        ..rows_map([0, 1])
+    });
+    app.mouse(mouse(MouseEventKind::ScrollDown, 5, 4), Instant::now());
+    assert_eq!(app.details_scroll(), 3);
+    assert_eq!(app.viewport().selected(), Some(0));
+}
+
+// --- clipboard ---
+
+#[test]
+fn y_copies_the_selected_entry() {
+    assert_eq!(action(char_key('y')), Some(Action::Copy));
+}
+
+/// A clipboard that keeps the texts it is handed and answers each with `answer`.
+#[derive(Debug)]
+struct FakeClipboard {
+    handed: Rc<RefCell<Vec<String>>>,
+    answer: fn() -> Result<Via, CopyError>,
+}
+
+impl Clipboard for FakeClipboard {
+    fn copy(&mut self, text: &str) -> Result<Via, CopyError> {
+        self.handed.borrow_mut().push(text.to_owned());
+        (self.answer)()
+    }
+}
+
+/// `app` after `y` with a clipboard that answers `answer`, and the texts the
+/// clipboard was handed.
+fn copied(mut app: App, answer: fn() -> Result<Via, CopyError>) -> (App, Vec<String>) {
+    let handed = Rc::default();
+    app.set_clipboard(Box::new(FakeClipboard {
+        handed: Rc::clone(&handed),
+        answer,
+    }));
+    app.key(char_key('y'));
+    let handed = handed.borrow().clone();
+    (app, handed)
+}
+
+/// `DETAILS_LOG` on a 10-line screen, every entry folded, the first one selected.
+fn folded_details_log() -> App {
+    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    app.resize(10);
+    app.apply(Action::FoldAll);
+    app
+}
+
+#[test]
+fn copy_puts_every_line_of_the_selected_entry_on_the_clipboard() {
+    let (app, handed) = copied(folded_details_log(), || Ok(Via::Osc52));
+    assert_eq!(handed, [first_details_entry().trim_end()]);
+    assert_eq!(app.notice(), Some("copied to clipboard"));
+}
+
+#[test]
+fn copy_with_no_row_selected_copies_nothing() {
+    let mut app = app(b"");
+    app.resize(10);
+    let (app, handed) = copied(app, || Ok(Via::Native));
+    assert_eq!(handed, Vec::<String>::new());
+    assert_eq!(app.notice(), Some("nothing to copy"));
+}
+
+#[test]
+fn copy_without_a_clipboard_says_so() {
+    let mut app = folded_details_log();
+    app.key(char_key('y'));
+    assert_eq!(app.notice(), Some("no clipboard"));
+}
+
+#[test]
+fn copy_of_an_entry_too_large_for_osc52_says_so() {
+    let (app, _) = copied(folded_details_log(), || Err(CopyError::TooLarge));
+    assert_eq!(
+        app.notice(),
+        Some("entry too large for OSC 52 (over 100 KB)")
+    );
+}
+
+#[test]
+fn copy_failure_shows_in_the_notice() {
+    let (app, _) = copied(folded_details_log(), || {
+        Err(CopyError::Terminal(io::Error::other("broken pipe")))
+    });
+    assert_eq!(app.notice(), Some("copy failed: broken pipe"));
+}
+
+// --- help overlay ---
+
+/// How far the help overlay is scrolled, `None` while it is closed.
+fn help_scroll(app: &App) -> Option<usize> {
+    match app.panel() {
+        Some(Panel::Help(help)) => Some(help.scroll),
+        _ => None,
+    }
+}
+
+/// How many lines the help overlay has.
+fn help_lines() -> usize {
+    crate::keymap::help().len()
+}
+
+/// `app` with the help overlay open, showing `height` lines at a time, and `keys`
+/// pressed in it.
+fn in_help(app: App, height: usize, keys: &[KeyEvent]) -> App {
+    let mut app = pressed(app, &[key(KeyCode::F(1))]);
+    app.fit_help(height);
+    pressed(app, keys)
+}
+
+#[test]
+fn f1_opens_the_help_overlay_at_its_first_line() {
+    let app = pressed(hundred_lines(), &[key(KeyCode::F(1))]);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn esc_f1_and_q_close_the_help_overlay_without_quitting() {
+    for close in [key(KeyCode::Esc), key(KeyCode::F(1)), char_key('q')] {
+        let app = in_help(hundred_lines(), 10, &[close]);
+        assert_eq!(help_scroll(&app), None, "{close:?}");
+        assert!(!app.should_quit(), "{close:?}");
+    }
+}
+
+#[test]
+fn ctrl_c_quits_with_the_help_overlay_open() {
+    let app = in_help(hundred_lines(), 10, &[ctrl('c')]);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn j_k_and_the_arrows_scroll_the_help_overlay_by_a_line() {
+    let keys = [
+        char_key('j'),
+        char_key('j'),
+        key(KeyCode::Down),
+        char_key('k'),
+    ];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(2));
+    let app = pressed(app, &[key(KeyCode::Up)]);
+    assert_eq!(help_scroll(&app), Some(1));
+}
+
+#[test]
+fn page_keys_scroll_the_help_overlay_by_its_height() {
+    let keys = [
+        key(KeyCode::PageDown),
+        key(KeyCode::PageDown),
+        key(KeyCode::PageUp),
+    ];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(10));
+}
+
+#[test]
+fn help_overlay_does_not_scroll_above_its_first_line() {
+    let keys = [char_key('j'), key(KeyCode::PageUp), char_key('k')];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn help_overlay_does_not_scroll_past_its_last_line_at_the_bottom() {
+    let mut keys = vec![key(KeyCode::PageDown); help_lines()];
+    keys.push(char_key('j'));
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(help_lines() - 10));
+}
+
+#[test]
+fn help_overlay_that_shows_every_line_does_not_scroll() {
+    let keys = [char_key('j'), key(KeyCode::PageDown)];
+    let app = in_help(hundred_lines(), help_lines(), &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn a_taller_help_overlay_scrolls_back_to_keep_its_last_line_at_the_bottom() {
+    let keys = vec![key(KeyCode::PageDown); help_lines()];
+    let mut app = in_help(hundred_lines(), 10, &keys);
+    app.fit_help(20);
+    assert_eq!(help_scroll(&app), Some(help_lines() - 20));
+}
+
+#[test]
+fn other_keys_do_nothing_while_the_help_overlay_is_open() {
+    let keys = [
+        char_key('G'),
+        char_key('/'),
+        key(KeyCode::F(2)),
+        char_key('x'),
+    ];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+    assert_eq!(pos(&app), (0, Some(0)));
+}
+
+#[test]
+fn help_overlay_opens_again_at_its_first_line() {
+    let keys = [char_key('j'), key(KeyCode::Esc), key(KeyCode::F(1))];
+    let app = in_help(hundred_lines(), 10, &keys);
+    assert_eq!(help_scroll(&app), Some(0));
+}
+
+#[test]
+fn f1_does_nothing_in_another_panel() {
+    let app = pressed(hundred_lines(), &[key(KeyCode::F(2)), key(KeyCode::F(1))]);
+    assert!(matches!(app.panel(), Some(Panel::Levels(_))));
 }

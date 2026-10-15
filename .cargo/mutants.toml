@@ -9,6 +9,15 @@ exclude_re = [
     'src/lib\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)$',
     # The same goes for the flags `run` hands to `App::new`.
     'src/lib\.rs:\d+:\d+: delete ! in run$',
+    # Turning mouse capture on writes to the real terminal; testing it needs a tty.
+    'src/lib\.rs:\d+:\d+: replace capture_mouse -> io::Result<\(\)> with Ok\(\(\)\)$',
+    # `System` hands `copy` the real clipboard and stdout; testing it needs a display
+    # and a terminal. `copy` itself is tested with both injected.
+    'src/clipboard/mod\.rs:\d+:\d+: replace <impl Clipboard for System>::copy -> Result<Via, CopyError> with Ok\(Default::default\(\)\)$',
+    'src/clipboard/mod\.rs:\d+:\d+: replace <impl Debug for System>::fmt -> fmt::Result with Ok\(Default::default\(\)\)$',
+    # Each byte is shifted into its own 8 bits of a group that starts at 0, so OR and
+    # XOR never see two set bits in the same place.
+    'src/clipboard/mod\.rs:\d+:\d+: replace \| with \^ in base64_into$',
     # `at >= start` only differs for a first character wider than the whole line; the
     # message column is at least 19 columns wide and no character is wider than 2.
     'src/ui/table\.rs:\d+:41: replace > with >= in wrap$',
@@ -79,4 +88,21 @@ exclude_re = [
     # A match ending where the message starts, or starting where it ends, is cut to an
     # empty range, which highlights no cell.
     'src/ui/table\.rs:\d+:\d+: replace < with <= in highlights$',
+    # Counting again from the first entry when none was dropped gives the same counts.
+    'src/app/mod\.rs:\d+:\d+: replace < with <= in HistogramState::invalidate_from$',
+    # Without taking out the re-read tail, `invalidate_from` counts again from the first
+    # entry, which gives the same counts; taking it out only spares that work.
+    'src/app/mod\.rs:\d+:\d+: replace HistogramState::uncount with \(\)$',
+    # The entries taken out are fed again right after, which bumps the version anyway.
+    'src/app/mod\.rs:\d+:\d+: replace \+= with \*= in HistogramState::uncount$',
+    # Looping on an empty chunk, at the very deadline or past it only changes how much of
+    # the frame's budget is spent; what is counted stays the same, and timing it would
+    # make a test flaky.
+    'src/app/mod\.rs:\d+:\d+: replace < with <= in App::feed_histogram$',
+    'src/app/mod\.rs:\d+:\d+: replace && with \|\| in App::feed_histogram$',
+    # Bumping the version without new entries only works the same buckets out again.
+    'src/app/mod\.rs:\d+:\d+: replace > with >= in App::feed_histogram$',
+    # Only where the search for the number of days starts: a lower start finds the same
+    # smallest number.
+    'src/histogram/mod\.rs:\d+:22: replace - with / in bucket_size$',
 ]

@@ -3,8 +3,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::io::{self, Write};
+use std::panic;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use clap::error::ErrorKind;
@@ -12,10 +13,12 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::execute;
 
 use crate::app::App;
 use crate::cli::Args;
+use crate::clipboard::{Env, System};
 use crate::filter::{Base, Filters, TimeFilter};
 use crate::follow::Options;
 use crate::source::{OpenError, Source};
@@ -23,12 +26,17 @@ use crate::ui::Theme;
 
 pub mod app;
 pub mod cli;
+pub mod clipboard;
+pub mod export;
 pub mod filter;
 pub mod fold;
 pub mod follow;
 pub mod format;
+pub mod histogram;
 pub mod index;
+pub mod keymap;
 pub mod matcher;
+pub mod mouse;
 pub mod source;
 pub mod ui;
 pub mod viewport;
@@ -143,16 +151,45 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     if let Some(filter) = initial_time_filter(&args) {
         app.set_time_filter(Some(filter));
     }
+    app.set_clipboard(Box::new(System::new(Env::from_vars(|name| {
+        env::var_os(name)
+    }))));
     app.watch(&args.file, file, Options::default())
         .map_err(|err| in_file(&args.file, err))?;
     // try_init can fail after raw mode is on; restore ignores what isn't set up.
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
+    let captures_mouse = captures_mouse(&args);
+    if captures_mouse && let Err(err) = capture_mouse() {
+        ratatui::restore();
+        return Err(err);
+    }
     let result = event_loop(&mut terminal, &mut app, theme, |timeout| {
         let ready = timeout.map_or(Ok(true), event::poll)?;
         ready.then(event::read).transpose()
     });
+    if captures_mouse {
+        // Restoring the terminal matters more than a failure to say so.
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     result
+}
+
+/// Turns mouse capture on, and off again if the program panics, as ratatui's own hook
+/// leaves it on.
+fn capture_mouse() -> io::Result<()> {
+    execute!(io::stdout(), EnableMouseCapture)?;
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        previous(info);
+    }));
+    Ok(())
+}
+
+/// Whether the viewer turns on mouse capture: always, unless `--no-mouse` was given.
+pub fn captures_mouse(args: &Args) -> bool {
+    !args.no_mouse
 }
 
 /// The filters the viewer starts with: the levels of `--level` and the class rules of
@@ -204,8 +241,10 @@ where
             .draw(|frame| ui::render(frame, app, theme))
             .map_err(io::Error::other)?;
         let timeout = app.expects_updates().then_some(REDRAW);
-        if let Some(Event::Key(key)) = next_event(timeout)? {
-            app.key(key);
+        match next_event(timeout)? {
+            Some(Event::Key(key)) => app.key(key),
+            Some(Event::Mouse(mouse)) => app.mouse(mouse, Instant::now()),
+            _ => {}
         }
     }
     Ok(())

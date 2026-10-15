@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStringExt;
 
@@ -8,7 +9,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
@@ -16,10 +17,11 @@ use crate::app::{Action, FileChange, action};
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
+use crate::mouse::HitMap;
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
-    hide_line_numbers, key, named_app, numbered_log, row, unindexed_app, wait_for_filter,
-    wait_for_index, wait_for_index_within, wait_for_search,
+    hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
+    wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -563,6 +565,56 @@ fn a_jump_prompt_error_follows_its_text_in_the_footer() {
         &[&keys[..], &[key(KeyCode::Enter)]].concat(),
     );
     assert_eq!(row(&terminal, 23), ":abc ─ 'abc' is not a line number");
+}
+
+#[test]
+fn the_footer_shows_the_export_prompt_as_typed() {
+    let terminal = terminal_after_pressing(&mut hundred_lines(), &[char_key('e')]);
+    assert_eq!(row(&terminal, 23), "export to: app.log.filtered.log");
+}
+
+#[test]
+fn the_export_prompt_shows_control_characters_in_the_path_as_replacement_characters() {
+    let mut app = named_app("/var/log/a\x1bb.log", numbered_log(100).as_bytes());
+    let terminal = terminal_after_pressing(&mut app, &[char_key('e')]);
+    assert_eq!(row(&terminal, 23), "export to: a\u{fffd}b.log.filtered.log");
+}
+
+/// [`hundred_lines`] opened from `app.log` in `dir`, where they are written, with
+/// `dir` as its current directory.
+fn exporting_hundred_lines(dir: &tempfile::TempDir) -> App {
+    let path = dir.path().join("app.log");
+    fs::write(&path, numbered_log(100)).unwrap();
+    let mut app = named_app(&path, numbered_log(100).as_bytes());
+    app.set_current_dir(dir.path());
+    app
+}
+
+#[test]
+fn the_footer_asks_before_overwriting_an_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(dir.path().join("app.log.filtered.log"), "old\n").unwrap();
+    let keys = [char_key('e'), key(KeyCode::Enter)];
+    let terminal = terminal_after_pressing(&mut exporting_hundred_lines(&dir), &keys);
+    assert_eq!(row(&terminal, 23), "overwrite app.log.filtered.log? y/n");
+}
+
+#[test]
+fn an_export_prompt_error_follows_its_path_in_the_footer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let suggested = "app.log.filtered.log".len();
+    let keys = [
+        vec![char_key('e')],
+        vec![key(KeyCode::Backspace); suggested],
+        "./app.log".chars().map(char_key).collect(),
+        vec![key(KeyCode::Enter)],
+    ]
+    .concat();
+    let terminal = terminal_after_pressing(&mut exporting_hundred_lines(&dir), &keys);
+    assert_eq!(
+        row(&terminal, 23),
+        "export to: ./app.log ─ cannot export to the file being viewed"
+    );
 }
 
 #[test]
@@ -1174,6 +1226,23 @@ fn space_unfolds_the_selected_entry_under_its_message_column() {
                                                      at App.step(App.java:2)
      12:00:00.003 INFO  com.example.App          step 3 [+1]
      12:00:00.004 INFO  com.example.App          step 4
+    ");
+}
+
+/// The marker is on the entry's first line only, and the selected row shows `▶`
+/// whether or not it is bookmarked.
+#[test]
+fn bookmarked_entries_have_a_marker_in_the_gutter() {
+    // Bookmarks step 2, unfolded, then step 3 and the selected step 4.
+    let keys: Vec<KeyEvent> = "j mjjjmjm".chars().map(char_key).collect();
+    let out = lines_after(&mut traces(), &keys, 1..=6);
+    assert_snapshot!(out, @r"
+     12:00:00.001 INFO  com.example.App          step 1
+    ◆12:00:00.002 INFO  com.example.App          step 2
+                                                     at App.step(App.java:1)
+                                                     at App.step(App.java:2)
+    ◆12:00:00.003 INFO  com.example.App          step 3 [+1]
+    ▶12:00:00.004 INFO  com.example.App          step 4
     ");
 }
 
@@ -2327,4 +2396,500 @@ fn a_tab_after_a_match_keeps_its_tab_stop() {
 fn a_match_of_half_a_character_is_not_highlighted() {
     let terminal = searched_terminal(&mut app("café\n".as_bytes()), r"(?-u)\xC3", &[]);
     assert_eq!(with_highlights(&terminal, 1..=1), "▶café");
+}
+
+// --- details pane ---
+
+/// A Logback entry whose stack trace takes 12 lines, more than the details pane shows.
+fn long_trace() -> App {
+    let trace: String = (1..=12)
+        .map(|i| format!("\tat com.example.Step{i}.run(Step.java:{i})\n"))
+        .collect();
+    let log = format!(
+        "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n\
+         java.lang.IllegalStateException: boom\n{trace}"
+    );
+    app_in(Preset::Logback, log.as_bytes())
+}
+
+/// The screen lines of the details pane at 80×24.
+const DETAILS_LINES: RangeInclusive<u16> = 15..=22;
+
+#[test]
+fn details_pane_shows_the_selected_entry_with_its_stack_trace() {
+    let keys = [
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        key(KeyCode::Enter),
+    ];
+    assert_snapshot!(screen_after(&mut table(), &keys), @r#"
+    "jlv ─ app.log ─ 500 B ─ Logback                          F:1 E:1 W:1 I:1 D:1 T:1"
+    " 12:00:00.100 TRACE com.example.App          Tick                               "
+    " 12:00:00.200 DEBUG com.example.App          Config loaded                      "
+    " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   "
+    " 12:00:01.000 WARN  com.example.App          Retry 1/3                          "
+    "▶12:00:02.000 ERROR com.example.App          Failed [+2]                        "
+    " 12:00:03.000 FATAL com.example.App          Giving up                          "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "┌ Details ─────────────────────────────────────────────────────────────────────┐"
+    "│ com.example.App (main)                                                       │"
+    "│ Failed                                                                       │"
+    "│ java.lang.IllegalStateException: boom                                        │"
+    "│     at com.example.App.main(App.java:10)                                     │"
+    "│                                                                              │"
+    "│                                                                              │"
+    "└──────────────────────────────────────────────────────────────────────────────┘"
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn details_pane_has_a_thick_border_while_focused() {
+    let keys = [
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+        key(KeyCode::Enter),
+        key(KeyCode::Tab),
+    ];
+    assert_snapshot!(lines_after(&mut table(), &keys, DETAILS_LINES), @r"
+    ┏ Details ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃ com.example.App (main)                                                       ┃
+    ┃ Failed                                                                       ┃
+    ┃ java.lang.IllegalStateException: boom                                        ┃
+    ┃     at com.example.App.main(App.java:10)                                     ┃
+    ┃                                                                              ┃
+    ┃                                                                              ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    ");
+}
+
+#[test]
+fn details_pane_scrolls_through_an_entry_longer_than_itself() {
+    let keys = [
+        key(KeyCode::Enter),
+        key(KeyCode::Tab),
+        char_key('j'),
+        char_key('j'),
+        char_key('j'),
+    ];
+    assert_snapshot!(lines_after(&mut long_trace(), &keys, DETAILS_LINES), @r"
+    ┏ Details ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃     at com.example.Step1.run(Step.java:1)                                    ┃
+    ┃     at com.example.Step2.run(Step.java:2)                                    ┃
+    ┃     at com.example.Step3.run(Step.java:3)                                    ┃
+    ┃     at com.example.Step4.run(Step.java:4)                                    ┃
+    ┃     at com.example.Step5.run(Step.java:5)                                    ┃
+    ┃     at com.example.Step6.run(Step.java:6)                                    ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    ");
+}
+
+#[test]
+fn details_pane_scrolls_no_further_than_its_last_line() {
+    let page = key(KeyCode::PageDown);
+    let keys = [key(KeyCode::Enter), key(KeyCode::Tab), page, page];
+    assert_snapshot!(lines_after(&mut long_trace(), &keys, DETAILS_LINES), @r"
+    ┏ Details ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃     at com.example.Step7.run(Step.java:7)                                    ┃
+    ┃     at com.example.Step8.run(Step.java:8)                                    ┃
+    ┃     at com.example.Step9.run(Step.java:9)                                    ┃
+    ┃     at com.example.Step10.run(Step.java:10)                                  ┃
+    ┃     at com.example.Step11.run(Step.java:11)                                  ┃
+    ┃     at com.example.Step12.run(Step.java:12)                                  ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    ");
+}
+
+#[test]
+fn details_pane_leaves_the_rows_above_it() {
+    let keys = [key(KeyCode::Enter), char_key('G')];
+    assert_snapshot!(lines_after(&mut hundred_lines(), &keys, 13..=15), @r"
+     12:00:00.099 [main] INFO  com.example.App - step 99
+    ▶12:00:00.100 [main] INFO  com.example.App - step 100
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    ");
+}
+
+#[test]
+fn details_pane_shows_the_headless_entry_as_it_is() {
+    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ starting up                                                                  │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_shows_a_raw_entry_as_it_is() {
+    assert_snapshot!(lines_after(&mut hundred_lines(), &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ 12:00:00.001 [main] INFO  com.example.App - step 1                           │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_wraps_a_long_message_at_its_inner_width() {
+    let log = format!(
+        "2026-10-07 12:00:00.000 [main] INFO  com.example.App - {}\n",
+        "0123456789".repeat(10)
+    );
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ com.example.App (main)                                                       │
+    │ 0123456789012345678901234567890123456789012345678901234567890123456789012345 │
+    │ 678901234567890123456789                                                     │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_shows_the_lines_appended_to_its_entry() {
+    let log = concat!(
+        "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n",
+        "java.lang.IllegalStateException: boom\n",
+        "\tat com.example.App.main(App.java:10)\n",
+    );
+    let mut app = following_app(Preset::Logback, log.as_bytes());
+    wait_for_index(&mut app);
+    let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter)]);
+    let longer = format!("{log}\tat java.lang.Thread.run(Thread.java:1583)\n");
+    let mut app = changed(
+        app,
+        FileChange::Grew(test_support::source(longer.as_bytes())),
+    );
+    draw(&mut terminal, &mut app, Theme::Styled);
+    let lines: Vec<String> = DETAILS_LINES.map(|y| row(&terminal, y)).collect();
+    assert_snapshot!(lines.join("\n"), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ com.example.App (main)                                                       │
+    │ Failed                                                                       │
+    │ java.lang.IllegalStateException: boom                                        │
+    │     at com.example.App.main(App.java:10)                                     │
+    │     at java.lang.Thread.run(Thread.java:1583)                                │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+/// The last line of the details pane, focused and scrolled to the bottom, on a
+/// Logback entry of exactly `len` bytes whose stack trace ends in a line of `x`.
+fn last_details_line(len: usize) -> String {
+    let head = "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n";
+    let line = "\tat com.example.Step.run(Step.java:1)\n";
+    let lines = (len - head.len()) / line.len() - 1;
+    let rest = len - head.len() - lines * line.len();
+    let log = format!(
+        "{head}{}\tat {}\n",
+        line.repeat(lines),
+        "x".repeat(rest - 5)
+    );
+    assert_eq!(log.len(), len);
+    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter), key(KeyCode::Tab)]);
+    loop {
+        let scroll = app.details_scroll();
+        app.apply(Action::PageDown);
+        if app.details_scroll() == scroll {
+            break;
+        }
+    }
+    draw(&mut terminal, &mut app, Theme::Styled);
+    let last = row(&terminal, *DETAILS_LINES.end() - 1);
+    last.trim_matches(['┃', ' ']).to_owned()
+}
+
+#[test]
+fn details_pane_ends_an_entry_longer_than_its_cap_with_an_ellipsis() {
+    assert_eq!(last_details_line(super::details::DETAILS_CAP + 1), "…");
+}
+
+#[test]
+fn details_pane_shows_an_entry_as_long_as_its_cap_whole() {
+    let last = last_details_line(super::details::DETAILS_CAP);
+    assert!(last.ends_with('x'), "{last}");
+}
+
+// --- histogram ---
+
+fn spike() -> App {
+    app_in(Preset::Logback, spike_log().as_bytes())
+}
+
+/// The keys that show the histogram, focus it and select its third bucket.
+fn third_bucket_keys() -> [KeyEvent; 4] {
+    [
+        char_key('H'),
+        key(KeyCode::Tab),
+        key(KeyCode::Right),
+        key(KeyCode::Right),
+    ]
+}
+
+#[test]
+fn histogram_row_shows_a_spike_of_errors_under_the_header() {
+    assert_snapshot!(lines_after(&mut spike(), &[char_key('H')], 1..=2), @r"
+      ▁      ▂  █▅    ▁                                                     max 9/5m
+    ▶10:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn histogram_without_warnings_or_errors_is_blank_but_for_its_scale() {
+    let log = concat!(
+        "2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
+        "2026-10-07 12:00:01.000 [main] INFO  com.example.App - Working\n",
+        "2026-10-07 12:00:02.000 [main] INFO  com.example.App - Done\n",
+    );
+    let mut app = app_in(Preset::Logback, log.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[char_key('H')], 1..=2), @r"
+                                                                            max 0/1s
+    ▶12:00:00.123 INFO  com.example.App          Started
+    ");
+}
+
+#[test]
+fn focused_histogram_names_the_count_and_start_of_the_selected_bucket() {
+    assert_snapshot!(lines_after(&mut spike(), &third_bucket_keys(), 1..=2), @r"
+      ▁      ▂  █▅    ▁                                                1 at 10:10:00
+    ▶10:00:00.000 INFO  com.example.App          Tick
+    ");
+}
+
+#[test]
+fn focused_histogram_shows_the_selected_bucket_in_reverse_video() {
+    let terminal = terminal_after(&mut spike(), &third_bucket_keys());
+    let buffer = terminal.backend().buffer();
+    let reversed = |x: u16| buffer[(x, 1)].modifier.contains(Modifier::REVERSED);
+    assert_eq!(
+        [reversed(1), reversed(2), reversed(3)],
+        [false, true, false]
+    );
+}
+
+#[test]
+fn histogram_without_timestamps_is_hidden_with_a_notice() {
+    assert_snapshot!(lines_after(&mut hundred_lines(), &[char_key('H')], 0..=1), @r"
+    jlv ─ app.log ─ 5.1 KB ─ Raw ─ no entry has a timestamp
+    ▶12:00:00.001 [main] INFO  com.example.App - step 1
+    ");
+}
+
+#[test]
+fn too_small_terminal_shows_no_histogram() {
+    let mut app = spike();
+    app.apply(Action::ToggleHistogram);
+    let terminal = drawn(&mut app, 79, 24, Theme::Styled);
+    assert_eq!(row(&terminal, 1), TOO_SMALL);
+}
+
+// --- hit map ---
+
+/// The map of an 80×24 screen whose rows are drawn from line `top` on, `height`
+/// lines high.
+fn rows_map(top: u16, height: u16, lines: impl IntoIterator<Item = usize>) -> HitMap {
+    HitMap {
+        rows: Rect::new(0, top, 80, height),
+        lines: lines.into_iter().collect(),
+        buckets: None,
+        details: None,
+    }
+}
+
+#[test]
+fn hit_map_has_the_row_drawn_on_each_line() {
+    let mut app = hundred_lines();
+    app.apply(Action::Bottom);
+    drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(*app.hit_map(), rows_map(1, 22, 78..100));
+}
+
+#[test]
+fn hit_map_lines_end_with_the_last_row() {
+    let mut app = app(numbered_log(3).as_bytes());
+    drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(*app.hit_map(), rows_map(1, 22, 0..3));
+}
+
+#[test]
+fn hit_map_has_a_wrapped_row_on_each_of_its_lines() {
+    let mut app = two_line_entries();
+    terminal_after(&mut app, &[char_key('w')]);
+    let lines: Vec<usize> = (0..11).flat_map(|i| [i, i]).collect();
+    assert_eq!(app.hit_map().lines, lines);
+}
+
+#[test]
+fn hit_map_has_the_histogram_buckets_and_the_rows_below_them() {
+    let mut app = spike();
+    terminal_after(&mut app, &[char_key('H')]);
+    assert_eq!(
+        *app.hit_map(),
+        HitMap {
+            buckets: Some(Rect::new(0, 1, 24, 1)),
+            ..rows_map(2, 21, 0..21)
+        }
+    );
+}
+
+#[test]
+fn hit_map_has_the_details_pane_below_the_rows() {
+    let mut app = hundred_lines();
+    terminal_after(&mut app, &[key(KeyCode::Enter)]);
+    assert_eq!(
+        *app.hit_map(),
+        HitMap {
+            details: Some(Rect::new(0, 15, 80, 8)),
+            ..rows_map(1, 14, 0..14)
+        }
+    );
+}
+
+#[test]
+fn hit_map_of_a_too_small_terminal_has_no_rows() {
+    let mut app = hundred_lines();
+    drawn(&mut app, 79, 24, Theme::Styled);
+    assert_eq!(app.hit_map().lines, Vec::<usize>::new());
+}
+
+// --- help overlay ---
+
+#[test]
+fn help_overlay_lists_the_keymap_over_the_rows() {
+    let keys = [key(KeyCode::F(1))];
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ k ↑           Move up                      │                 "
+    " 12:00:00.003 [ma│ j ↓           Move down                    │                 "
+    " 12:00:00.004 [ma│ PgUp          Page up                      │                 "
+    " 12:00:00.005 [ma│ PgDn          Page down                    │                 "
+    " 12:00:00.006 [ma│ Ctrl-u        Half page up                 │                 "
+    " 12:00:00.007 [ma│ Ctrl-d        Half page down               │                 "
+    " 12:00:00.008 [ma│ g Home        Go to top                    │                 "
+    " 12:00:00.009 [ma│ G End         Go to bottom and follow      │                 "
+    " 12:00:00.010 [ma│ ←             Scroll left                  │                 "
+    " 12:00:00.011 [ma│ →             Scroll right                 │                 "
+    " 12:00:00.012 [ma│ Tab           Focus next pane              │                 "
+    " 12:00:00.013 [ma│ Enter         Details panel                │                 "
+    " 12:00:00.014 [ma│ Esc           Cancel waiting export        │                 "
+    " 12:00:00.015 [ma│ F             Toggle follow                │                 "
+    " 12:00:00.016 [ma│ P             Cycle format preset          │                 "
+    " 12:00:00.017 [ma│ /             Search forward               │                 "
+    " 12:00:00.018 [ma│ ?             Search backward              │                 "
+    " 12:00:00.019 [ma│ n             Next match                   │                 "
+    " 12:00:00.020 [ma│ N             Previous match               │                 "
+    " 12:00:00.021 [ma│ :             Jump to line                 │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close                                      "
+    "#);
+}
+
+#[test]
+fn help_overlay_scrolls_a_page_with_page_down() {
+    let keys = [key(KeyCode::F(1)), key(KeyCode::PageDown)];
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ t             Jump to time                 │                 "
+    " 12:00:00.003 [ma│ 1 2 3 4 5 6   Toggle level (TRACE to FATAL)│                 "
+    " 12:00:00.004 [ma│ F2            Level filter                 │                 "
+    " 12:00:00.005 [ma│ F4 &          Text filter                  │                 "
+    " 12:00:00.006 [ma│ F5            Time filter                  │                 "
+    " 12:00:00.007 [ma│ F6            Class filter                 │                 "
+    " 12:00:00.008 [ma│ c             Only this class              │                 "
+    " 12:00:00.009 [ma│ C             Hide this class              │                 "
+    " 12:00:00.010 [ma│ x             Clear all filters            │                 "
+    " 12:00:00.011 [ma│ Space         Fold or unfold entry         │                 "
+    " 12:00:00.012 [ma│ z             Fold all                     │                 "
+    " 12:00:00.013 [ma│ Z             Unfold all                   │                 "
+    " 12:00:00.014 [ma│ ]             Next exception               │                 "
+    " 12:00:00.015 [ma│ [             Previous exception           │                 "
+    " 12:00:00.016 [ma│ m             Toggle bookmark              │                 "
+    " 12:00:00.017 [ma│ '             Next bookmark                │                 "
+    " 12:00:00.018 [ma│ "             Previous bookmark            │                 "
+    " 12:00:00.019 [ma│ y             Copy entry                   │                 "
+    " 12:00:00.020 [ma│ e F8          Export filtered              │                 "
+    " 12:00:00.021 [ma│ T             Toggle thread column         │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close                                      "
+    "#);
+}
+
+#[test]
+fn help_overlay_scrolled_to_its_end_shows_its_last_lines() {
+    let keys = [
+        key(KeyCode::F(1)),
+        key(KeyCode::PageDown),
+        key(KeyCode::PageDown),
+        key(KeyCode::PageDown),
+    ];
+    assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw                                                    "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ F6            Class filter                 │                 "
+    " 12:00:00.003 [ma│ c             Only this class              │                 "
+    " 12:00:00.004 [ma│ C             Hide this class              │                 "
+    " 12:00:00.005 [ma│ x             Clear all filters            │                 "
+    " 12:00:00.006 [ma│ Space         Fold or unfold entry         │                 "
+    " 12:00:00.007 [ma│ z             Fold all                     │                 "
+    " 12:00:00.008 [ma│ Z             Unfold all                   │                 "
+    " 12:00:00.009 [ma│ ]             Next exception               │                 "
+    " 12:00:00.010 [ma│ [             Previous exception           │                 "
+    " 12:00:00.011 [ma│ m             Toggle bookmark              │                 "
+    " 12:00:00.012 [ma│ '             Next bookmark                │                 "
+    " 12:00:00.013 [ma│ "             Previous bookmark            │                 "
+    " 12:00:00.014 [ma│ y             Copy entry                   │                 "
+    " 12:00:00.015 [ma│ e F8          Export filtered              │                 "
+    " 12:00:00.016 [ma│ T             Toggle thread column         │                 "
+    " 12:00:00.017 [ma│ #             Toggle line numbers          │                 "
+    " 12:00:00.018 [ma│ H             Toggle histogram             │                 "
+    " 12:00:00.019 [ma│ w             Toggle wrap                  │                 "
+    " 12:00:00.020 [ma│ F1            Help                         │                 "
+    " 12:00:00.021 [ma│ q F10 Ctrl-c  Quit                         │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close                                      "
+    "#);
+}
+
+#[test]
+fn help_overlay_in_a_tall_terminal_is_as_high_as_its_lines_and_border() {
+    let mut app = hundred_lines();
+    let mut terminal = drawn(&mut app, 80, 60, Theme::Styled);
+    app.key(key(KeyCode::F(1)));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    let find = |mark: &str| (0..60).find(|&y| row(&terminal, y).contains(mark)).unwrap();
+    let (top, bottom) = (find("┌ Help "), find("└"));
+    assert_eq!(
+        usize::from(bottom - top) + 1,
+        crate::keymap::help().len() + 2
+    );
+    assert!(row(&terminal, top + 1).contains("│ k ↑ "));
 }

@@ -32,8 +32,8 @@ const DATE_TIME: (&str, usize) = ("%Y-%m-%d %H:%M:%S%.3f", 23);
 
 /// Draws the rows on screen into `body`, reading only their entries. Sets the app's
 /// screen to the rows that fit and keeps its scroll from running past the widest
-/// message on screen.
-pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect) {
+/// message on screen. Returns the row drawn on each screen line.
+pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect) -> Vec<usize> {
     let columns = Columns::new(app, usize::from(body.width));
     let height = usize::from(body.height);
     if app.wraps() {
@@ -64,11 +64,14 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, theme: Theme, body: Rect)
             Style::new()
         };
         let lines = row.lines(&columns, app, selected, theme);
-        lines.into_iter().map(move |line| line.style(style))
+        lines.into_iter().map(move |line| (i, line.style(style)))
     });
-    for (line, area) in lines.zip(body.rows()) {
+    let mut drawn = Vec::new();
+    for ((i, line), area) in lines.zip(body.rows()) {
         frame.render_widget(line, area);
+        drawn.push(i);
     }
+    drawn
 }
 
 /// Wrapped rows take as many screen lines as their messages need, so how many rows
@@ -175,6 +178,7 @@ impl Columns {
             None => Row::new(Vec::new(), app.line(i).into_owned(), 0),
         };
         row.number = shown.and_then(|shown| shown.number);
+        row.bookmarked = shown.is_some_and(|shown| shown.first) && app.bookmarked(i);
         if search.is_some() && app.hides_match(i) {
             // Past the space that sets the marker apart from the message.
             row.highlights.push(row.marker + 1..row.text.len());
@@ -233,6 +237,8 @@ struct Row {
     marker: usize,
     /// The line's number in the file, if known.
     number: Option<u64>,
+    /// Whether the row is the first line of a bookmarked entry.
+    bookmarked: bool,
     /// The byte ranges of `text` that the search matches, in order.
     highlights: Vec<Range<usize>>,
 }
@@ -251,6 +257,7 @@ impl Row {
             text,
             marker,
             number: None,
+            bookmarked: false,
             highlights: Vec::new(),
         }
     }
@@ -319,7 +326,11 @@ impl Row {
             let style = theme.paint(Style::new().fg(Color::DarkGray));
             Span::styled(format!("{number:>width$} "), style)
         });
-        let marker = Span::raw(if selected { "▶" } else { " " });
+        let marker = Span::raw(match (selected, self.bookmarked) {
+            (true, _) => "▶",
+            (false, true) => "◆",
+            (false, false) => " ",
+        });
         let cells = self.cells.iter().cloned();
         let first = number
             .into_iter()
@@ -374,7 +385,7 @@ fn highlights(
 }
 
 /// `bytes` as text that is safe to show.
-fn text(bytes: &[u8]) -> String {
+pub(super) fn text(bytes: &[u8]) -> String {
     printable(&source::display(bytes)).into_owned()
 }
 
@@ -441,7 +452,7 @@ fn skip_columns(text: &str, columns: usize) -> &str {
 
 /// `text` cut into lines of at most `width` columns, at least one. A character wider
 /// than `width` gets a line of its own.
-fn wrap(text: &str, width: usize) -> Vec<&str> {
+pub(super) fn wrap(text: &str, width: usize) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut used = 0;

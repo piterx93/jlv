@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::iter;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -14,9 +14,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::format::Level;
+use crate::keymap;
+use crate::mouse::HitMap;
 use crate::source::Origin;
+use layout::Screen;
 
 mod abbrev;
+mod details;
+mod histogram;
+mod layout;
 mod table;
 
 pub use abbrev::abbreviate;
@@ -60,6 +66,7 @@ const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Ca
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
 const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel";
+const HELP_HINTS: &str = "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close";
 const SEARCH_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel";
 const TAB_STOP: usize = 4;
 
@@ -67,8 +74,9 @@ const TAB_STOP: usize = 4;
 /// preset the index reads the file in, then the follow status, then
 /// ` ─ format not recognized, showing raw` while `Raw` is shown because detection
 /// found no preset, then ` ─ indexing <percent>%` until the index is complete), the
-/// rows on screen with `▶` in front of the selected one, and the key hints in the
-/// footer.
+/// rows on screen with `▶` in front of the selected one and `◆` in front of the
+/// first line of every bookmarked entry but the selected one ([`App::bookmarked`]),
+/// and the key hints in the footer.
 ///
 /// While [`App::shows_line_numbers`], each row starts with its line number in the
 /// file, in dark gray, right-aligned as wide as the last line number of the entries
@@ -132,6 +140,47 @@ const TAB_STOP: usize = 4;
 /// and the text typed for a line, `t ` and the text for a time, followed by ` ─ `
 /// and the prompt's [error](crate::app::JumpPrompt::error) while it has one.
 ///
+/// The export prompt is shown the same way, as `export to: ` and the path typed,
+/// or, while it [asks to overwrite](crate::app::ExportPrompt::overwrite),
+/// `overwrite <path>? y/n`.
+///
+/// While the help overlay is open, it is drawn the same way, a box titled ` Help `,
+/// as wide as its widest line and the border need (the widest keys and the widest
+/// description plus 5 columns) and as high as its lines and the border need, but no
+/// wider and no higher than the body: one line per line of [`keymap::help`](crate::keymap::help), from the first
+/// that [`HelpPanel::scroll`](crate::app::HelpPanel::scroll) leaves, as ` k ↑
+/// Move up`: a space, the keys left-aligned in a column as wide as the widest keys,
+/// two spaces and the description. It tells the app how many lines it shows
+/// ([`App::fit_help`]). The footer then shows `j/k Scroll  PgUp/PgDn Page
+/// F1/Esc/q Close`.
+///
+/// While the app [shows the details pane](App::shows_details), the bottom of the
+/// body is a box titled ` Details `, a third of the screen's height high (at least 5
+/// lines, and at most what leaves the rows 5), with a plain border (`┌─┐`), or a thick
+/// one (`┏━┓`) while it has the [focus](App::focus). Inside, one column in from each
+/// side, it shows the selected entry ([`App::details_entry`]): under a preset, a
+/// first line with the full class and the thread in parentheses, as
+/// `com.example.App (main)`, then the message of the entry's first line, then every
+/// continuation line; the headless entry, and every entry under `Raw`, show their
+/// lines as they are. Lines are made safe to show like the rows and wrapped at the
+/// box's inner width, cut at the column rather than at a word. The pane is scrolled as
+/// [`App::details_scroll`] says, and tells the app its inner height and how many
+/// wrapped lines the entry takes ([`App::fit_details`]).
+///
+/// While the app [shows the histogram](App::shows_histogram) and has one, the line
+/// below the filter bar, or below the header without one, is the histogram row, taken
+/// from the body. Its first columns, all but the last 20, show the histogram
+/// ([`App::histogram`] for that many columns), one column per bucket from the left:
+/// blank for a bucket without entries, otherwise one of `▁▂▃▄▅▆▇█` for its count in
+/// eighths of the largest count, rounded up, so that the largest gets `█` and every
+/// other bucket with an entry at least `▁`. Right-aligned at the end of the line is
+/// the largest count and the bucket size, as `max 9/5m` (sizes as `1s`, `10m`, `6h`,
+/// `1d`, and merged days as `37d`). While the histogram has the [focus](App::focus),
+/// the selected bucket ([`App::histogram_bucket`]) is in reverse video and the end of
+/// the line is its count and its start in the app's zone, as `1 at 10:10:00`, or as
+/// `1 at 2026-10-07` for buckets of a day or more. Below 80×24 there is no histogram
+/// row.
+///
 /// While the app has a search, the header has ` ─ match k/N` ([`App::match_count`])
 /// after the status and before the notice.
 ///
@@ -149,12 +198,21 @@ const TAB_STOP: usize = 4;
 /// options that are on). Without filters there is no bar.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     let area = frame.area();
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let filters = filter_bar(app);
+    let histogram = histogram::row(app, area, theme);
+    let buckets = histogram.as_ref().map(|&(_, buckets)| buckets);
+    let screen = Screen::new(
+        area,
+        filters.is_some(),
+        histogram.is_some(),
+        app.shows_details(),
+    );
+    let Screen {
+        header,
+        rows: body,
+        footer,
+        ..
+    } = screen;
 
     let progress = app.progress();
     let indexing = if progress.is_complete() {
@@ -169,7 +227,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
     };
     let key_notice = app
         .notice()
-        .map_or(String::new(), |notice| format!(" ─ {notice}"));
+        .map_or(String::new(), |notice| format!(" ─ {}", printable(notice)));
     let matches = app
         .match_count()
         .map_or(String::new(), |(position, total)| {
@@ -196,22 +254,36 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         );
     }
 
-    let fits = area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT;
-    let body = match filter_bar(app) {
-        Some(filters) if fits => {
-            let [bar, body] =
-                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
-            frame.render_widget(Line::from(filters), bar);
-            body
-        }
-        _ => body,
-    };
-    if !fits {
+    let fits = screen.fits;
+    if let (Some(bar), Some(filters)) = (screen.filters, filters) {
+        frame.render_widget(Line::from(filters), bar);
+    }
+    if let (Some(area), Some((row, _))) = (screen.histogram, histogram) {
+        frame.render_widget(row, area);
+    }
+    let lines = if !fits {
         frame.render_widget(Line::from(TOO_SMALL), body);
+        Vec::new()
     } else if app.nothing_matches() {
         frame.render_widget(Line::from(NO_MATCHES), body);
+        Vec::new()
     } else {
-        table::render(frame, app, theme, body);
+        table::render(frame, app, theme, body)
+    };
+    app.set_hit_map(HitMap {
+        rows: body,
+        lines,
+        buckets: screen
+            .histogram
+            .zip(buckets)
+            .map(|(row, width)| Rect { width, ..row }),
+        details: screen.details,
+    });
+    if let Some(area) = screen.details {
+        details::render(frame, app, area);
+    }
+    if fits && matches!(app.panel(), Some(Panel::Help(_))) {
+        render_help_panel(frame, app, body);
     }
     let hints = match app.panel() {
         None => KEY_HINTS.into(),
@@ -247,6 +319,18 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             let error = prompt.error.as_deref().map(|error| format!(" ─ {error}"));
             format!("{opener}{}{}", prompt.text, error.unwrap_or_default()).into()
         }
+        Some(Panel::Export(prompt)) if prompt.overwrite => {
+            format!("overwrite {}? y/n", printable(&prompt.text)).into()
+        }
+        Some(Panel::Export(prompt)) => {
+            let error = prompt.error.as_deref().map(|error| format!(" ─ {error}"));
+            format!(
+                "export to: {}{}",
+                printable(&prompt.text),
+                error.unwrap_or_default()
+            )
+            .into()
+        }
         Some(Panel::Search { prompt, backward }) => {
             if fits {
                 let title = if *backward {
@@ -258,8 +342,36 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             }
             panel_hints(prompt.error.as_deref(), SEARCH_PROMPT_HINTS)
         }
+        Some(Panel::Help(_)) => HELP_HINTS.into(),
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
+}
+
+fn render_help_panel(frame: &mut Frame, app: &mut App, body: Rect) {
+    let help = keymap::help();
+    let height = u16::try_from(help.len() + 2).map_or(body.height, |h| h.min(body.height));
+    let keys_width = help.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
+    let widest = help.iter().map(|(_, d)| d.width()).max().unwrap_or(0);
+    // A space, the keys, two spaces, the description, and the two borders.
+    let width = u16::try_from(keys_width + widest + 5).map_or(body.width, |w| w.min(body.width));
+    let area = body.centered(Constraint::Length(width), Constraint::Length(height));
+    let inner = usize::from(area.height.saturating_sub(2));
+    app.fit_help(inner);
+    let scroll = match app.panel() {
+        Some(Panel::Help(panel)) => panel.scroll,
+        _ => 0,
+    };
+    let lines: Vec<Line> = help
+        .iter()
+        .skip(scroll)
+        .take(inner)
+        .map(|(keys, description)| Line::from(format!(" {keys:<keys_width$}  {description}")))
+        .collect();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Help ")),
+        area,
+    );
 }
 
 fn render_level_panel(frame: &mut Frame, panel: &LevelPanel, body: Rect) {

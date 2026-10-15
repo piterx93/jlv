@@ -3,10 +3,12 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::fs::File;
-use std::io;
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::mem;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -14,8 +16,12 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use memchr::{memchr, memchr_iter, memrchr};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
+use crate::clipboard::{Clipboard, CopyError, entry_text};
+use crate::export;
 use crate::filter::{
     self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
     TimeSpec,
@@ -23,8 +29,11 @@ use crate::filter::{
 use crate::fold::Folds;
 use crate::follow::{Event, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
+use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
+use crate::keymap;
 use crate::matcher::{self, Matcher};
+use crate::mouse::{HitMap, Target};
 use crate::source::{self, Origin, Source};
 use crate::viewport::Viewport;
 
@@ -52,6 +61,10 @@ pub enum Action {
     /// Shows the message column 8 columns further right.
     ScrollRight,
     ToggleThread,
+    /// Moves the [focus](App::focus) to the next pane that is shown.
+    CycleFocus,
+    /// Shows the histogram ([`App::shows_histogram`]) or hides it.
+    ToggleHistogram,
     /// Shows or hides the gutter of file line numbers.
     ToggleLineNumbers,
     ToggleWrap,
@@ -91,71 +104,52 @@ pub enum Action {
     NextMatch,
     /// Selects the next matching entry against the direction of the search.
     PreviousMatch,
-    /// Applies what the open panel edits and closes it.
+    /// Selects the next entry the rows show that has an exception.
+    NextException,
+    /// Selects the previous entry the rows show that has an exception.
+    PreviousException,
+    /// Bookmarks the selected entry, or removes its bookmark if it has one.
+    ToggleBookmark,
+    /// Selects the next bookmarked entry the rows show, wrapping around to the first
+    /// with the notice `bookmarks wrapped`, or says `no bookmarks`.
+    NextBookmark,
+    /// Selects the previous bookmarked entry the rows show, wrapping around to the
+    /// last with the notice `bookmarks wrapped`, or says `no bookmarks`.
+    PreviousBookmark,
+    /// Opens the export prompt ([`App::panel`]), which suggests the file name
+    /// `<name>.filtered.log`, `<name>` being the viewed file's name without `.gz`.
+    Export,
+    /// Puts the selected entry on the [clipboard](App::set_clipboard): every line of
+    /// it, folded or not, as [`entry_text`](crate::clipboard::entry_text) gives it.
+    /// The [notice](App::notice) says `copied to clipboard`; with no row selected it says
+    /// `nothing to copy`, without a clipboard `no clipboard`, for an entry OSC 52
+    /// refuses `entry too large for OSC 52 (over 100 KB)`, and when the terminal
+    /// can't be written `copy failed: ` and the error.
+    Copy,
+    /// Applies what the open panel edits and closes it. With no panel open, opens
+    /// the details pane ([`App::shows_details`]), or closes it.
     Confirm,
-    /// Closes the open panel without applying its edits.
+    /// Closes the open panel without applying its edits. With no panel open, drops an
+    /// export that waits for the filters.
     Cancel,
+    /// Opens the help overlay ([`App::panel`]), which lists the
+    /// [key bindings](crate::keymap::bindings).
+    Help,
     Quit,
 }
 
-/// The action bound to a key, `None` for keys that do nothing.
+/// The action bound to a key in the [keymap](crate::keymap::bindings), `None` for
+/// keys that do nothing.
 ///
-/// `j k ↑ ↓` move by a line, `PgUp PgDn` by a page, `Ctrl-u Ctrl-d` by half a page,
-/// `g Home` go to the top, `G End` to the bottom, `← →` scroll the message column,
-/// `F` toggles follow, `T` toggles the thread column, `#` the line numbers, `w`
-/// wrapping, `P` cycles the preset, `Space` folds or unfolds the selected entry, `z`
-/// folds every entry, `Z` unfolds every entry, `1`–`6` toggle the levels TRACE to
-/// FATAL, `F2` opens the level panel, `c` shows only the selected entry's class, `C`
-/// hides it, `F4` or `&` opens the text filter prompt, `F5` the time panel, `F6` the
-/// class panel, `x` clears every filter, `:` opens the line prompt, `t` the time
-/// prompt, `/` and `?` open the search prompt down and up, `n` and `N` select the next
-/// and previous match, `Enter` confirms, `Esc` cancels and `q F10 Ctrl-c` quit. Characters
-/// ignore Shift (the character already says which case it is) but not Ctrl or Alt;
-/// other keys do nothing with any modifier. Key releases do nothing; held keys
+/// Characters ignore Shift (the character already says which case it is) but not Ctrl
+/// or Alt; other keys do nothing with any modifier. Key releases do nothing; held keys
 /// repeat.
 pub fn action(key: KeyEvent) -> Option<Action> {
-    let action = match normalized(key)? {
-        (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => Action::Up,
-        (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => Action::Down,
-        (KeyCode::PageUp, KeyModifiers::NONE) => Action::PageUp,
-        (KeyCode::PageDown, KeyModifiers::NONE) => Action::PageDown,
-        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::HalfPageUp,
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Action::HalfPageDown,
-        (KeyCode::Char('g') | KeyCode::Home, KeyModifiers::NONE) => Action::Top,
-        (KeyCode::Char('G') | KeyCode::End, KeyModifiers::NONE) => Action::Bottom,
-        (KeyCode::Left, KeyModifiers::NONE) => Action::ScrollLeft,
-        (KeyCode::Right, KeyModifiers::NONE) => Action::ScrollRight,
-        (KeyCode::Char('F'), KeyModifiers::NONE) => Action::ToggleFollow,
-        (KeyCode::Char('T'), KeyModifiers::NONE) => Action::ToggleThread,
-        (KeyCode::Char('#'), KeyModifiers::NONE) => Action::ToggleLineNumbers,
-        (KeyCode::Char('w'), KeyModifiers::NONE) => Action::ToggleWrap,
-        (KeyCode::Char('P'), KeyModifiers::NONE) => Action::CyclePreset,
-        (KeyCode::Char(' '), KeyModifiers::NONE) => Action::ToggleFold,
-        (KeyCode::Char('z'), KeyModifiers::NONE) => Action::FoldAll,
-        (KeyCode::Char('Z'), KeyModifiers::NONE) => Action::UnfoldAll,
-        (KeyCode::Char(digit @ '1'..='6'), KeyModifiers::NONE) => {
-            Action::ToggleLevel(Level::ALL[usize::from(digit as u8 - b'1')])
-        }
-        (KeyCode::F(2), KeyModifiers::NONE) => Action::LevelPanel,
-        (KeyCode::Char('c'), KeyModifiers::NONE) => Action::OnlyClass,
-        (KeyCode::Char('C'), KeyModifiers::NONE) => Action::HideClass,
-        (KeyCode::F(4) | KeyCode::Char('&'), KeyModifiers::NONE) => Action::TextPanel,
-        (KeyCode::F(5), KeyModifiers::NONE) => Action::TimePanel,
-        (KeyCode::F(6), KeyModifiers::NONE) => Action::ClassPanel,
-        (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ClearFilters,
-        (KeyCode::Char(':'), KeyModifiers::NONE) => Action::LinePrompt,
-        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::TimePrompt,
-        (KeyCode::Char('/'), KeyModifiers::NONE) => Action::SearchForward,
-        (KeyCode::Char('?'), KeyModifiers::NONE) => Action::SearchBackward,
-        (KeyCode::Char('n'), KeyModifiers::NONE) => Action::NextMatch,
-        (KeyCode::Char('N'), KeyModifiers::NONE) => Action::PreviousMatch,
-        (KeyCode::Enter, KeyModifiers::NONE) => Action::Confirm,
-        (KeyCode::Esc, KeyModifiers::NONE) => Action::Cancel,
-        (KeyCode::Char('q') | KeyCode::F(10), KeyModifiers::NONE)
-        | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
-        _ => return None,
-    };
-    Some(action)
+    let (code, modifiers) = normalized(key)?;
+    keymap::bindings()
+        .iter()
+        .find(|binding| binding.code == code && binding.modifiers == modifiers)
+        .map(|binding| binding.action)
 }
 
 /// The code and modifiers of `key` as the bindings see them, `None` for a release.
@@ -195,6 +189,33 @@ fn typed(key: KeyEvent) -> Option<Typed> {
         _ => return None,
     };
     Some(typed)
+}
+
+/// The pane that takes the moves `Up`, `Down`, `PageUp` and `PageDown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Table,
+    /// The details pane ([`App::shows_details`]).
+    Details,
+    /// The histogram ([`App::shows_histogram`]).
+    Histogram,
+}
+
+/// The scroll of the details pane and what it was last told about its size.
+#[derive(Debug, Clone, Copy, Default)]
+struct Details {
+    /// Where the shown entry starts in the file.
+    entry: Option<usize>,
+    scroll: usize,
+    height: usize,
+    lines: usize,
+}
+
+impl Details {
+    fn max_scroll(&self) -> usize {
+        self.lines.saturating_sub(self.height)
+    }
 }
 
 /// The level panel while it is open: the level filter as edited so far, not applied
@@ -423,6 +444,53 @@ impl JumpPrompt {
     }
 }
 
+/// The export prompt while it is open: the path to export to as typed so far, read
+/// from the [current directory](App::set_current_dir) when relative; why it can't be
+/// exported to, if the path last confirmed can't; and whether the prompt asks to
+/// overwrite the existing file the path names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportPrompt {
+    pub text: String,
+    pub error: Option<String>,
+    pub overwrite: bool,
+}
+
+impl ExportPrompt {
+    /// Edits the path as `key` asks, or returns the action it stands for here. While
+    /// asking to overwrite, `y` confirms and any other key goes back to the path.
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+        let typed = typed(key)?;
+        if self.overwrite {
+            return match typed {
+                Typed::Action(Action::Quit) => Some(Action::Quit),
+                Typed::Char('y') => Some(Action::Confirm),
+                _ => {
+                    self.overwrite = false;
+                    None
+                }
+            };
+        }
+        match typed {
+            Typed::Action(action) => return Some(action),
+            Typed::Char(c) => self.text.push(c),
+            Typed::Backspace => {
+                self.text.pop();
+            }
+            Typed::Other(_) => {}
+        }
+        self.error = None;
+        None
+    }
+}
+
+/// An export that waits for the index and the filters to be done.
+#[derive(Debug)]
+struct PendingExport {
+    target: PathBuf,
+    /// The path as the user typed it, for the notice.
+    typed: String,
+}
+
 /// The panel open over the rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
@@ -432,11 +500,59 @@ pub enum Panel {
     /// The text filter prompt.
     Text(Prompt),
     Jump(JumpPrompt),
+    Export(ExportPrompt),
     /// The search prompt, for a search up the rows if `backward`.
     Search {
         prompt: Prompt,
         backward: bool,
     },
+    Help(HelpPanel),
+}
+
+/// The help overlay, which lists the lines of [`keymap::help`](crate::keymap::help).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpPanel {
+    /// How many of its lines are scrolled off above the overlay.
+    pub scroll: usize,
+    height: usize,
+    lines: usize,
+}
+
+impl HelpPanel {
+    fn max_scroll(&self) -> usize {
+        self.lines.saturating_sub(self.height)
+    }
+
+    fn edit(&mut self, action: Action) {
+        let scroll = match action {
+            Action::Up => self.scroll.saturating_sub(1),
+            Action::Down => self.scroll + 1,
+            Action::PageUp => self.scroll.saturating_sub(self.height),
+            Action::PageDown => self.scroll + self.height,
+            _ => return,
+        };
+        self.scroll = scroll.min(self.max_scroll());
+    }
+}
+
+/// What `key` is while the help overlay is open: `q` closes it like `Esc` and `F1`,
+/// and only the scrolling keys and `Ctrl-c` do anything else.
+fn help_action(key: KeyEvent) -> Option<Action> {
+    match normalized(key)? {
+        (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Cancel),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+        _ => action(key).filter(|action| {
+            matches!(
+                action,
+                Action::Up
+                    | Action::Down
+                    | Action::PageUp
+                    | Action::PageDown
+                    | Action::Cancel
+                    | Action::Help
+            )
+        }),
+    }
 }
 
 /// A search: what it looks for and which way [`Action::NextMatch`] goes, up the rows
@@ -456,7 +572,9 @@ impl Panel {
             | Panel::Time(_)
             | Panel::Text(_)
             | Panel::Jump(_)
+            | Panel::Export(_)
             | Panel::Search { .. } => {}
+            Panel::Help(panel) => panel.edit(action),
         }
     }
 }
@@ -467,6 +585,10 @@ const NO_CLASS: &str = "the selected entry has no class";
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
 /// message column by.
 const SCROLL_STEP: usize = 8;
+/// Rows or lines one notch of the mouse wheel scrolls.
+const WHEEL_STEP: usize = 3;
+/// The longest between two clicks on a row that make a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// How many bytes [`index::tail`] reads from the end of the file at a time, 64 KiB:
 /// a screen of entries, stack traces included, mostly fits.
@@ -713,6 +835,58 @@ impl Watch {
     }
 }
 
+/// The histogram's counts of the entries the rows come from, and what was worked out
+/// from them.
+#[derive(Debug, Default)]
+struct HistogramState {
+    counter: Counter,
+    /// How many of the entries (the filters' matches, or the index's entries without
+    /// filters) the counter took in.
+    fed: usize,
+    /// Bumped when `counter` changes, to tell when `cached` is stale.
+    version: u64,
+    cached: Option<CachedHistogram>,
+    bucket: usize,
+}
+
+#[derive(Debug)]
+struct CachedHistogram {
+    width: usize,
+    version: u64,
+    histogram: Option<Histogram>,
+}
+
+impl HistogramState {
+    /// Counts the entries again from the first, as those from `kept` on are gone or
+    /// changed.
+    fn invalidate_from(&mut self, kept: usize) {
+        if kept < self.fed {
+            self.reset();
+        }
+    }
+
+    /// Takes the entries from `from` on, which the index is about to read again, out
+    /// of the counter, as `records` has them still. With `filter`, `from` is an index
+    /// entry and the counted ones are its matches.
+    fn uncount(&mut self, filter: Option<&Filter>, records: &[Record], from: usize) {
+        let kept = filter.map_or(from, |filter| filter.matches_before(from));
+        for i in kept..self.fed {
+            let record = counted_record(filter, records, i);
+            if let Some((at, level)) = record.and_then(|r| Some((r.timestamp()?, r.level()))) {
+                self.counter.remove(at, level);
+            }
+        }
+        self.fed = self.fed.min(kept);
+        self.version += 1;
+    }
+
+    fn reset(&mut self) {
+        self.counter = Counter::default();
+        self.fed = 0;
+        self.version += 1;
+    }
+}
+
 /// A log file being viewed.
 #[derive(Debug)]
 pub struct App {
@@ -735,11 +909,15 @@ pub struct App {
     /// At work since the first [`set_filters`](Self::set_filters).
     filter: Option<Filter>,
     search: Option<Search>,
+    /// The byte offsets of the bookmarks, which hold across changes to the rows.
+    bookmarks: BTreeSet<u64>,
     /// Counts the entries the filters show that match `search`; at work while there
     /// is one.
     matches: Option<Engine>,
     /// The way a move to a match is waiting to go, for matches not yet counted.
     pending_step: Option<bool>,
+    /// An export waiting for the index and the filters' results.
+    pending_export: Option<PendingExport>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
     /// quicker than from the entry's start when an unfolded entry is long.
     line_mark: Cell<LineMark>,
@@ -770,8 +948,22 @@ pub struct App {
     shows_thread: bool,
     shows_line_numbers: bool,
     wraps: bool,
+    shows_details: bool,
+    shows_histogram: bool,
+    focus: Focus,
+    details: Details,
+    histogram: HistogramState,
     panel: Option<Panel>,
-    notice: Option<&'static str>,
+    notice: Option<Cow<'static, str>>,
+    /// Where the file was opened from, to tell an export onto it.
+    path: PathBuf,
+    /// What a relative export path is read from.
+    current_dir: PathBuf,
+    hit_map: HitMap,
+    /// The row and time of the last click, until a double click uses it up.
+    last_click: Option<(usize, Instant)>,
+    /// Where [`Action::Copy`] puts the selected entry.
+    clipboard: Option<Box<dyn Clipboard>>,
     quit: bool,
 }
 
@@ -837,8 +1029,10 @@ impl App {
             clock: Timestamp::now,
             filter: None,
             search: None,
+            bookmarks: BTreeSet::new(),
             matches: None,
             pending_step: None,
+            pending_export: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
             opens_at_end: follow,
@@ -854,11 +1048,21 @@ impl App {
             unrecognized: picked.is_none(),
             viewport: Viewport::new(0, 0),
             scroll: 0,
+            shows_details: false,
+            shows_histogram: false,
+            focus: Focus::Table,
+            details: Details::default(),
+            histogram: HistogramState::default(),
             shows_thread: false,
             shows_line_numbers: true,
             wraps: false,
             panel: None,
             notice: None,
+            path: path.to_owned(),
+            current_dir: std::env::current_dir().unwrap_or_default(),
+            hit_map: HitMap::default(),
+            last_click: None,
+            clipboard: None,
             quit: false,
         }
     }
@@ -930,6 +1134,12 @@ impl App {
         if let Some(backward) = self.pending_step.take() {
             self.step(backward);
         }
+        if self.progress.is_complete()
+            && !self.filtering()
+            && let Some(export) = self.pending_export.take()
+        {
+            self.finish_export(&export);
+        }
     }
 
     /// How far indexing got as of the last [`poll_index`](Self::poll_index):
@@ -979,6 +1189,25 @@ impl App {
             number: record.line().map(|first| first + line as u64),
             hidden: folds.hidden_lines(entry),
         })
+    }
+
+    /// Whether row `i` shows a line of a bookmarked entry; `false` for the row that
+    /// marks a truncation. Panics if `i` is not below `viewport().total()`.
+    ///
+    /// A bookmark is the byte offset of the entry it was set on, so it lasts through
+    /// filtering and preset cycling: the entry bookmarked is the one whose bytes hold
+    /// the offset. A truncation or another file at the path
+    /// ([`file_changed`](Self::file_changed)) removes every bookmark.
+    pub fn bookmarked(&self, i: usize) -> bool {
+        let Some(row) = self.fold_row(i) else {
+            return false;
+        };
+        let (entry, _) = self.shown_folds().line_at(row);
+        self.is_bookmarked(&self.shown_record(entry))
+    }
+
+    fn is_bookmarked(&self, record: &Record) -> bool {
+        self.bookmarks.range(record.bytes()).next().is_some()
     }
 
     /// Whether the viewer follows the file: keeps its last row selected as entries
@@ -1062,9 +1291,13 @@ impl App {
 
     /// Whether the app has more to take in at the next [`poll_index`](Self::poll_index)
     /// without anything happening on screen: the index isn't complete, a watcher may
-    /// report changes to the file, or the filters' results are still coming in.
+    /// report changes to the file, or the filters' results are still coming in, or the histogram shown is still counting them.
     pub(crate) fn expects_updates(&self) -> bool {
-        !self.progress.is_complete() || self.watch.is_some() || self.filtering() || self.searching()
+        !self.progress.is_complete()
+            || self.watch.is_some()
+            || self.filtering()
+            || self.searching()
+            || self.histogram_behind()
     }
 
     /// Whether the preset was detected, found none fitting and fell back to `Raw`.
@@ -1135,7 +1368,9 @@ impl App {
     /// Opened at the end, the file's last entries are shown unfiltered until the
     /// index is complete and takes over, filtered.
     pub fn set_filters(&mut self, filters: Filters) {
+        self.cancel_export();
         self.filters = filters;
+        self.histogram.reset();
         // The index shows as it is, which is cheaper than an engine passing every entry.
         if hides_nothing(&self.filters) {
             self.filter = None;
@@ -1170,10 +1405,39 @@ impl App {
         self.time_filter.as_ref()
     }
 
+    /// Reads a relative export path from `dir` from here on. It is the process's
+    /// current directory at first.
+    pub fn set_current_dir(&mut self, dir: &Path) {
+        dir.clone_into(&mut self.current_dir);
+    }
+
     /// Reads the wall clock from `now` from here on, for a time filter on
     /// [`Base::Now`](crate::filter::Base::Now). It is the system clock at first.
     pub fn set_clock(&mut self, now: fn() -> Timestamp) {
         self.clock = now;
+    }
+
+    /// Puts what [`Action::Copy`] copies on `clipboard` from here on. There is none
+    /// at first.
+    pub fn set_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
+        self.clipboard = Some(clipboard);
+    }
+
+    fn copy_entry(&mut self) {
+        let Some(entry) = self.details_entry() else {
+            self.notice = Some(Cow::Borrowed("nothing to copy"));
+            return;
+        };
+        let text = entry_text(entry);
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            self.notice = Some(Cow::Borrowed("no clipboard"));
+            return;
+        };
+        self.notice = Some(match clipboard.copy(&text) {
+            Ok(_) => Cow::Borrowed("copied to clipboard"),
+            Err(err @ CopyError::TooLarge) => Cow::Owned(err.to_string()),
+            Err(err) => Cow::Owned(format!("copy failed: {err}")),
+        });
     }
 
     /// The filters [`set_filters`](Self::set_filters) set; none at first.
@@ -1292,6 +1556,267 @@ impl App {
             .any(|line| search.matcher.is_match(&strip_ansi(line)))
     }
 
+    /// Whether the details pane is shown: the selected row's entry in full, below the
+    /// rows. [`Action::Confirm`] with no panel open shows it and hides it again.
+    pub fn shows_details(&self) -> bool {
+        self.shows_details
+    }
+
+    /// The pane that takes the moves. [`Action::CycleFocus`] moves it down the
+    /// screen to the next pane that is shown, from the last one back to the table:
+    /// table, histogram, details pane. The histogram only takes it while it is shown
+    /// and there is a histogram to show ([`histogram`](Self::histogram)). Hiding the
+    /// pane that has the focus gives it back to the table.
+    ///
+    /// With the focus on the details pane, `Up` and `Down` scroll it by a line and
+    /// `PageUp` and `PageDown` by its height (see [`fit_details`](Self::fit_details)),
+    /// stopping at its first and last lines; they neither move the selection nor stop
+    /// following.
+    ///
+    /// With the focus on the histogram, [`Action::ScrollLeft`] and
+    /// [`Action::ScrollRight`] select the bucket before and after the selected one
+    /// ([`histogram_bucket`](Self::histogram_bucket)) instead of scrolling the
+    /// messages, and [`Action::Confirm`] sets the time filter to what the selected
+    /// bucket covers instead of showing the details pane (see
+    /// [`histogram_bucket`](Self::histogram_bucket)).
+    ///
+    /// Every other action works on the table as usual.
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// How many lines the details pane is scrolled down. It starts at 0 for each
+    /// entry selected: moving the selection to another entry scrolls it back to the
+    /// top, while moving between the lines of the same entry, or the entry being read
+    /// again after an append, keeps it.
+    pub fn details_scroll(&self) -> usize {
+        self.details.scroll
+    }
+
+    /// Sets how many screen lines the details pane shows, `height`, and how many the
+    /// selected entry takes in it, `lines`. Scrolls the pane back so that it goes no
+    /// further than its last line at the bottom.
+    pub fn fit_details(&mut self, height: usize, lines: usize) {
+        self.track_details_entry();
+        self.details.height = height;
+        self.details.lines = lines;
+        self.details.scroll = self.details.scroll.min(self.details.max_scroll());
+    }
+
+    /// Sets how many lines the help overlay shows at a time, `height`. Scrolls it back
+    /// so that it goes no further than its last line at the bottom.
+    ///
+    /// While the overlay is open, `j ↓` and `k ↑` scroll it by a line, `PgDn` and
+    /// `PgUp` by `height` lines, never above its first line nor further than its last
+    /// line at the bottom; an overlay that shows every line doesn't scroll. `Esc`,
+    /// `F1` and `q` close it, `Ctrl-c` quits, and every other key does nothing. It
+    /// opens at its first line.
+    pub fn fit_help(&mut self, height: usize) {
+        if let Some(Panel::Help(panel)) = &mut self.panel {
+            panel.height = height;
+            panel.lines = keymap::help().len();
+            panel.scroll = panel.scroll.min(panel.max_scroll());
+        }
+    }
+
+    /// The selected row's entry, every line of it as in the file whether folded or
+    /// not, line endings included. `None` with no row selected or with the row that
+    /// marks a truncation selected.
+    pub fn details_entry(&self) -> Option<&[u8]> {
+        let record = self.selected_record()?;
+        Some(&self.source.bytes()[file_range(&record)])
+    }
+
+    fn selected_record(&self) -> Option<Record> {
+        let row = self.fold_row(self.viewport.selected()?)?;
+        let (entry, _) = self.shown_folds().line_at(row);
+        Some(self.shown_record(entry))
+    }
+
+    /// Scrolls the details back to the top when the selection moved to another entry.
+    fn track_details_entry(&mut self) {
+        let start = self
+            .selected_record()
+            .map(|record| file_range(&record).start);
+        if start != self.details.entry {
+            self.details = Details {
+                entry: start,
+                scroll: 0,
+                ..self.details
+            };
+        }
+    }
+
+    /// Takes the entries the rows come from that the counter hasn't seen into it, for
+    /// at most [`CATCH_UP`] so that a frame never waits on a big file.
+    fn feed_histogram(&mut self) {
+        let deadline = Instant::now() + CATCH_UP;
+        let index = read(&self.index);
+        let filter = self.filter.as_ref();
+        let available = histogram_sources(filter, &index.records);
+        let state = &mut self.histogram;
+        let before = state.fed;
+        while state.fed < available && Instant::now() < deadline {
+            let end = (state.fed + FILTER_CHUNK).min(available);
+            for i in state.fed..end {
+                let record = counted_record(filter, &index.records, i);
+                if let Some(at) = record.and_then(Record::timestamp) {
+                    state.counter.add(at, record.and_then(Record::level));
+                }
+            }
+            state.fed = end;
+        }
+        if state.fed > before {
+            state.version += 1;
+        }
+    }
+
+    /// Whether the histogram is shown and has entries left to count.
+    fn histogram_behind(&self) -> bool {
+        let available = histogram_sources(self.filter.as_ref(), &read(&self.index).records);
+        self.shows_histogram && self.histogram.fed < available
+    }
+
+    fn toggle_histogram(&mut self) {
+        self.shows_histogram = !self.shows_histogram;
+        if self.focus == Focus::Histogram {
+            self.focus = Focus::Table;
+        }
+        if self.shows_histogram && !self.has_histogram() && !self.histogram_behind() {
+            self.notice = Some(Cow::Borrowed("no entry has a timestamp"));
+        }
+    }
+
+    fn has_histogram(&mut self) -> bool {
+        self.feed_histogram();
+        !self.histogram.counter.is_empty()
+    }
+
+    fn cycle_focus(&mut self) {
+        let histogram = self.shows_histogram && self.has_histogram();
+        let panes = [
+            (Focus::Table, true),
+            (Focus::Histogram, histogram),
+            (Focus::Details, self.shows_details),
+        ];
+        let shown = panes
+            .iter()
+            .filter(|(_, shown)| *shown)
+            .map(|(pane, _)| *pane);
+        let mut cycle = shown
+            .clone()
+            .chain(shown)
+            .skip_while(|&pane| pane != self.focus);
+        self.focus = cycle.nth(1).unwrap_or(Focus::Table);
+    }
+
+    fn act_on_histogram(&mut self, action: Action) {
+        let buckets = self.histogram_buckets();
+        let bucket = self.histogram.bucket;
+        match action {
+            Action::ScrollLeft => self.histogram.bucket = bucket.saturating_sub(1),
+            Action::ScrollRight => {
+                self.histogram.bucket = (bucket + 1).min(buckets.saturating_sub(1));
+            }
+            _ => self.filter_to_bucket(bucket),
+        }
+    }
+
+    fn histogram_buckets(&self) -> usize {
+        let cached = self.histogram.cached.as_ref();
+        cached
+            .and_then(|c| c.histogram.as_ref())
+            .map_or(0, |h| h.counts.len())
+    }
+
+    /// Sets the time filter to what bucket `bucket` of the last histogram covers and
+    /// selects the first bucket again.
+    fn filter_to_bucket(&mut self, bucket: usize) {
+        let cached = self.histogram.cached.as_ref();
+        let Some(histogram) = cached.and_then(|c| c.histogram.as_ref()) else {
+            return;
+        };
+        let range = histogram.range(bucket);
+        let end = range.end.unwrap_or(Timestamp::MAX);
+        let spec = TimeSpec::covering(range.start, end, &self.settings.zone);
+        self.histogram.bucket = 0;
+        self.set_time_filter(Some(TimeFilter {
+            spec,
+            base: Base::File,
+        }));
+    }
+
+    fn toggle_details(&mut self) {
+        self.shows_details = !self.shows_details;
+        self.focus = Focus::Table;
+        self.details = Details::default();
+    }
+
+    fn scroll_details(&mut self, action: Action) {
+        let Details { height, scroll, .. } = self.details;
+        let scroll = match action {
+            Action::Up => scroll.saturating_sub(1),
+            Action::Down => scroll + 1,
+            Action::PageUp => scroll.saturating_sub(height),
+            Action::PageDown => scroll + height,
+            _ => scroll,
+        };
+        self.details.scroll = scroll.min(self.details.max_scroll());
+    }
+
+    /// Whether the histogram row is shown, under the header and the filter bar.
+    /// [`Action::ToggleHistogram`] shows and hides it; it is hidden at first. Showing
+    /// it while there is no histogram ([`histogram`](Self::histogram)) sets the
+    /// [notice](Self::notice) `no entry has a timestamp`, and the row stays hidden until
+    /// there is one.
+    pub fn shows_histogram(&self) -> bool {
+        self.shows_histogram
+    }
+
+    /// The histogram ([`crate::histogram`]) of the index's entries that pass the
+    /// filters, in at most `width` buckets aligned on the clock of the app's zone;
+    /// `None` while none of them has a timestamp.
+    ///
+    /// The entries are counted as they come in, the index's or the filters' results
+    /// at each [`poll_index`](Self::poll_index), and counted again from the first only
+    /// when those results start over. The buckets are worked out again only when what
+    /// is counted or `width` changed since the last call, so that calling this for
+    /// every frame costs next to nothing. The selected bucket, and the time filter it
+    /// sets, are those of the histogram this last returned.
+    pub fn histogram(&mut self, width: usize) -> Option<&Histogram> {
+        self.feed_histogram();
+        let state = &mut self.histogram;
+        let stale = state
+            .cached
+            .as_ref()
+            .is_none_or(|cached| cached.width != width || cached.version != state.version);
+        if stale {
+            let histogram = state.counter.histogram(width, &self.settings.zone);
+            let last = histogram.as_ref().map_or(0, |h| h.counts.len() - 1);
+            state.bucket = state.bucket.min(last);
+            state.cached = Some(CachedHistogram {
+                width,
+                version: state.version,
+                histogram,
+            });
+        }
+        let found = state.cached.as_ref().is_some_and(|c| c.histogram.is_some());
+        if !found && self.focus == Focus::Histogram {
+            self.focus = Focus::Table;
+        }
+        self.histogram.cached.as_ref()?.histogram.as_ref()
+    }
+
+    /// The selected bucket of the histogram, 0 at first. With the focus on the
+    /// histogram, [`Action::ScrollLeft`] and [`Action::ScrollRight`] move it by one,
+    /// stopping at the first and the last bucket, and [`Action::Confirm`] sets the time
+    /// filter ([`set_time_filter`](Self::set_time_filter)) to the range the bucket
+    /// covers ([`Histogram::range`], [`TimeSpec::covering`]) and selects the first
+    /// bucket again. Before the first histogram they do nothing.
+    pub fn histogram_bucket(&self) -> usize {
+        self.histogram.bucket
+    }
+
     /// Whether long messages wrap onto the following screen lines instead of being
     /// cut at the right edge.
     pub fn wraps(&self) -> bool {
@@ -1317,9 +1842,32 @@ impl App {
     /// When the selected line gets folded away, its entry's first line takes its
     /// place.
     pub fn apply(&mut self, action: Action) {
+        self.dispatch(action);
+        if self.shows_details {
+            self.track_details_entry();
+        }
+    }
+
+    fn dispatch(&mut self, action: Action) {
         self.pending_step = None;
         if let Some(panel) = self.panel.take() {
             self.apply_in_panel(panel, action);
+            return;
+        }
+        let moves = matches!(
+            action,
+            Action::Up | Action::Down | Action::PageUp | Action::PageDown
+        );
+        if moves && self.focus == Focus::Details {
+            self.scroll_details(action);
+            return;
+        }
+        let histogram_action = matches!(
+            action,
+            Action::ScrollLeft | Action::ScrollRight | Action::Confirm
+        );
+        if histogram_action && self.focus == Focus::Histogram {
+            self.act_on_histogram(action);
             return;
         }
         if matches!(
@@ -1346,6 +1894,8 @@ impl App {
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
+            Action::CycleFocus => self.cycle_focus(),
+            Action::ToggleHistogram => self.toggle_histogram(),
             Action::ToggleLineNumbers => self.shows_line_numbers = !self.shows_line_numbers,
             Action::ToggleWrap => self.wraps = !self.wraps,
             Action::CyclePreset => self.cycle_preset(),
@@ -1390,7 +1940,22 @@ impl App {
             Action::SearchBackward => self.open_search(true),
             Action::NextMatch => self.step_search(false),
             Action::PreviousMatch => self.step_search(true),
-            Action::Confirm | Action::Cancel => {}
+            Action::NextException => self.jump_exception(false),
+            Action::PreviousException => self.jump_exception(true),
+            Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::NextBookmark => self.jump_bookmark(false),
+            Action::PreviousBookmark => self.jump_bookmark(true),
+            Action::Export => self.panel = Some(Panel::Export(self.export_prompt())),
+            Action::Copy => self.copy_entry(),
+            Action::Confirm => self.toggle_details(),
+            Action::Cancel => self.cancel_export(),
+            Action::Help => {
+                self.panel = Some(Panel::Help(HelpPanel {
+                    scroll: 0,
+                    height: 0,
+                    lines: 0,
+                }))
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -1453,19 +2018,123 @@ impl App {
     ///   stays where it is, and the [notice](Self::notice) says `no entry has a
     ///   timestamp`.
     ///
+    /// The export prompt is edited like a jump prompt. `Enter` exports, in turn:
+    /// - a path naming the viewed file, by its inode or its canonical path, keeps the
+    ///   prompt open with the error `cannot export to the file being viewed`;
+    /// - a path naming an existing regular file keeps the prompt open,
+    ///   [asking](ExportPrompt::overwrite) to overwrite it: `y` goes on, any other
+    ///   key goes back to editing the path (`Ctrl-c` still quits); a directory goes
+    ///   straight on and fails as below;
+    /// - the prompt closes. While the index or the filters are still at work, the
+    ///   notice says `export waits for the filters` and [`poll_index`](Self::poll_index)
+    ///   finishes the export once they are done; `Esc` with no panel open, or any
+    ///   change to the filters, drops a waiting export with the notice `export
+    ///   cancelled`;
+    /// - if the filters show no entry, the notice says `nothing to export` and no file
+    ///   is written;
+    /// - otherwise it writes every entry the filters show, in file order, with all its
+    ///   lines, folded or not, as [`export::write_entries`](crate::export::write_entries)
+    ///   does, and the notice says `exported N entries to <path as typed>` (`1 entry`
+    ///   for one). If the file can't be written, the notice says `export failed: ` and
+    ///   the error.
+    ///
     /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
+        self.last_click = None;
         let action = match &mut self.panel {
             Some(Panel::Classes(panel)) => panel.key(key),
             Some(Panel::Time(panel)) => panel.key(key),
             Some(Panel::Text(prompt)) => prompt.key(key),
             Some(Panel::Jump(prompt)) => prompt.key(key),
             Some(Panel::Search { prompt, .. }) => prompt.key(key),
+            Some(Panel::Export(prompt)) => prompt.key(key),
+            Some(Panel::Help(_)) => help_action(key),
             _ => action(key),
         };
         if let Some(action) = action {
             self.apply(action);
+        }
+    }
+
+    /// Where the last screen drew what the mouse can act on, set by
+    /// [`ui::render`](crate::ui::render); empty before the first screen.
+    pub fn hit_map(&self) -> &HitMap {
+        &self.hit_map
+    }
+
+    /// Keeps `map` as the layout of the last screen drawn.
+    pub fn set_hit_map(&mut self, map: HitMap) {
+        self.hit_map = map;
+    }
+
+    /// Acts on a mouse event that came at `at`, by what the [last screen
+    /// drawn](Self::hit_map) shows under it. Nothing happens while a panel is open,
+    /// and only the wheel and the left button do anything:
+    ///
+    /// - the wheel over the details pane scrolls it by 3 lines, like 3 times
+    ///   [`Action::Up`] or [`Action::Down`] with the focus there; anywhere else it
+    ///   scrolls the rows by 3: the screen and the selection move 3 rows together,
+    ///   like a page of 3 rows ([`Action::PageUp`], [`Action::PageDown`]), and
+    ///   scrolling up stops following the file;
+    /// - a click on a row selects it, like [`Viewport::goto`], and stops following the
+    ///   file; a row gone since the screen was drawn is left alone. A second click on
+    ///   the same row (on any of its screen lines) at most 400 ms after the first, with
+    ///   no key in between, is a double click, which also
+    ///   [toggles its fold](Action::ToggleFold); the click after a double click starts
+    ///   over;
+    /// - a click on a bucket of the histogram sets the time filter to it, as
+    ///   [`Action::Confirm`] does with the focus on the histogram
+    ///   ([`histogram_bucket`](Self::histogram_bucket));
+    /// - a click anywhere else does nothing.
+    pub fn mouse(&mut self, event: MouseEvent, at: Instant) {
+        if self.panel.is_some() {
+            return;
+        }
+        self.pending_step = None;
+        let target = self.hit_map.target(event.column, event.row);
+        match event.kind {
+            MouseEventKind::ScrollUp => self.wheel(target, true),
+            MouseEventKind::ScrollDown => self.wheel(target, false),
+            MouseEventKind::Down(MouseButton::Left) => self.click(target, at),
+            _ => {}
+        }
+        if self.shows_details {
+            self.track_details_entry();
+        }
+    }
+
+    fn wheel(&mut self, target: Option<Target>, up: bool) {
+        if target == Some(Target::Details) {
+            let action = if up { Action::Up } else { Action::Down };
+            for _ in 0..WHEEL_STEP {
+                self.scroll_details(action);
+            }
+        } else if up {
+            self.following = false;
+            self.viewport.scroll_up(WHEEL_STEP);
+        } else {
+            self.viewport.scroll_down(WHEEL_STEP);
+        }
+    }
+
+    fn click(&mut self, target: Option<Target>, at: Instant) {
+        match target {
+            Some(Target::Row(row)) if row < self.viewport.total() => {
+                let double = self.last_click.is_some_and(|(last, time)| {
+                    last == row && at.saturating_duration_since(time) <= DOUBLE_CLICK
+                });
+                self.following = false;
+                self.viewport.goto(row);
+                if double {
+                    self.toggle_fold();
+                    self.last_click = None;
+                } else {
+                    self.last_click = Some((row, at));
+                }
+            }
+            Some(Target::Bucket(bucket)) => self.filter_to_bucket(bucket),
+            _ => {}
         }
     }
 
@@ -1474,7 +2143,7 @@ impl App {
     /// [`Action::HideClass`] on an entry without a class (or with no row selected),
     /// which then change nothing.
     pub fn notice(&self) -> Option<&str> {
-        self.notice
+        self.notice.as_deref()
     }
 
     /// Whether [`Action::Quit`] has been applied.
@@ -1503,6 +2172,7 @@ impl App {
         // The engine reads the entries in the preset it started with.
         if self.filter.is_some() {
             self.start_filter();
+            self.histogram.reset();
         }
         self.start_search();
         self.read_tail();
@@ -1562,17 +2232,110 @@ impl App {
         let next = find_match(matches.filtered(), self.selected_entry(), backward, counted);
         match next {
             Next::Wait => self.pending_step = Some(backward),
-            Next::Nothing => self.notice = Some("pattern not found"),
+            Next::Nothing => self.notice = Some(Cow::Borrowed("pattern not found")),
             Next::Match { entry, wrapped } => match self.entry_row(entry) {
                 // The filters' results haven't caught up with the entry yet.
                 None => self.pending_step = Some(backward),
                 Some(row) => {
                     self.following = false;
                     self.viewport.goto(row);
-                    self.notice = wrapped.then_some("search wrapped");
+                    self.notice = wrapped.then_some(Cow::Borrowed("search wrapped"));
                 }
             },
         }
+    }
+
+    fn jump_exception(&mut self, backward: bool) {
+        let found = self.find_shown(backward, Record::has_exception);
+        self.land(found, "exceptions wrapped", "no exceptions");
+    }
+
+    fn jump_bookmark(&mut self, backward: bool) {
+        if self.bookmarks.is_empty() {
+            self.notice = Some(Cow::Borrowed("no bookmarks"));
+            return;
+        }
+        let found = self.find_shown(backward, |record| self.is_bookmarked(record));
+        self.land(found, "bookmarks wrapped", "no bookmarks");
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(row) = self.viewport.selected().and_then(|row| self.fold_row(row)) else {
+            return;
+        };
+        let (entry, _) = self.shown_folds().line_at(row);
+        let bytes = self.shown_record(entry).bytes();
+        let inside: Vec<u64> = self.bookmarks.range(bytes.clone()).copied().collect();
+        if inside.is_empty() {
+            self.bookmarks.insert(bytes.start);
+            self.notice = Some(Cow::Borrowed("bookmarked"));
+        } else {
+            for offset in inside {
+                self.bookmarks.remove(&offset);
+            }
+            self.notice = Some(Cow::Borrowed("bookmark removed"));
+        }
+    }
+
+    /// Moves to the row of `found`, an entry and whether the walk wrapped to reach
+    /// it, or says `none`.
+    fn land(&mut self, found: Option<(usize, bool)>, wrapped: &'static str, none: &'static str) {
+        let Some((entry, did_wrap)) = found else {
+            self.notice = Some(Cow::Borrowed(none));
+            return;
+        };
+        let row = self.lead_rows() + self.shown_folds().row_of(entry, 0);
+        self.following = false;
+        self.viewport.goto(row);
+        self.notice = did_wrap.then_some(Cow::Borrowed(wrapped));
+    }
+
+    /// The next shown entry whose record satisfies `matches`, up the rows if
+    /// `backward`, and whether the walk wrapped around to reach it. It walks the shown
+    /// entries rather than the index so that it also covers the file's last entries
+    /// shown before the index is complete.
+    fn find_shown(
+        &self,
+        backward: bool,
+        matches: impl Fn(&Record) -> bool,
+    ) -> Option<(usize, bool)> {
+        let folds = self.shown_folds();
+        let count = folds.entries();
+        let current = self
+            .viewport
+            .selected()
+            .and_then(|row| self.fold_row(row))
+            .map(|row| folds.line_at(row).0);
+        let split = if backward {
+            current.unwrap_or(count)
+        } else {
+            current.map_or(0, |entry| entry + 1)
+        };
+        // One guard for the whole scan: a lock per entry would queue behind the indexer.
+        let index = read(&self.index);
+        let hit = |entry: &usize| {
+            let record = match (&self.opening, &self.filter) {
+                (Opening::Tail(records, _), _) => &records[*entry],
+                (_, Some(filter)) => &index.records[filter.entry(*entry)],
+                (_, None) => &index.records[*entry],
+            };
+            matches(record)
+        };
+        let find = |mut entries: Range<usize>| {
+            if backward {
+                entries.rfind(hit)
+            } else {
+                entries.find(hit)
+            }
+        };
+        let (first, second) = if backward {
+            (0..split, split..count)
+        } else {
+            (split..count, 0..split)
+        };
+        find(first)
+            .map(|entry| (entry, false))
+            .or_else(|| find(second).map(|entry| (entry, true)))
     }
 
     /// The index entry that viewport row `row` shows, `None` for the truncation row and
@@ -1646,11 +2409,14 @@ impl App {
             Rerun::after(&slide, matches, &index.records, from).apply(matches, &self.filters);
         }
         let Some(filter) = &mut self.filter else {
+            self.histogram.invalidate_from(from);
             return;
         };
         let rerun = Rerun::after(&slide, &filter.engine, &index.records, from);
         drop(index);
         filter.rerun(&rerun, &self.filters);
+        self.histogram
+            .invalidate_from(filter.engine.filtered().entries.len());
         let total = read(&self.index).records.len();
         if total.saturating_sub(filter.engine.filtered().evaluated) <= FILTER_CHUNK {
             filter.catch_up(&self.folds, total, Instant::now() + CATCH_UP);
@@ -1756,6 +2522,8 @@ impl App {
             &index.records[appended_from(known)..],
             Count::Remove,
         );
+        self.histogram
+            .uncount(self.filter.as_ref(), &index.records, appended_from(known));
         index::append(&mut index.records, self.source.bytes(), &self.settings);
         count_levels(
             &mut self.level_counts,
@@ -1782,6 +2550,7 @@ impl App {
         self.index_brings_new = true;
         self.unseen = 0;
         self.folds.truncate(0);
+        self.bookmarks.clear();
         self.index_again(Opening::Index);
     }
 
@@ -1860,6 +2629,11 @@ impl App {
                         self.panel = Some(Panel::Jump(prompt));
                     }
                 }
+                Panel::Export(mut prompt) => {
+                    if !self.export(&mut prompt) {
+                        self.panel = Some(Panel::Export(prompt));
+                    }
+                }
                 Panel::Search {
                     mut prompt,
                     backward,
@@ -1872,8 +2646,10 @@ impl App {
                         self.panel = Some(Panel::Search { prompt, backward });
                     }
                 },
+                Panel::Help(panel) => self.panel = Some(Panel::Help(panel)),
             },
             Action::Cancel => {}
+            Action::Help if matches!(panel, Panel::Help(_)) => {}
             Action::Quit => {
                 self.quit = true;
                 self.panel = Some(panel);
@@ -1883,6 +2659,103 @@ impl App {
                 self.panel = Some(panel);
             }
         }
+    }
+
+    fn cancel_export(&mut self) {
+        if self.pending_export.take().is_some() {
+            self.notice = Some(Cow::Borrowed("export cancelled"));
+        }
+    }
+
+    fn export_prompt(&self) -> ExportPrompt {
+        let name = self.name.strip_suffix(".gz").unwrap_or(&self.name);
+        ExportPrompt {
+            text: format!("{name}.filtered.log"),
+            error: None,
+            overwrite: false,
+        }
+    }
+
+    /// Exports as `prompt` asks and returns whether it is done with the prompt. If
+    /// not, `prompt` says why, or asks to overwrite the file. While the index or the
+    /// filters are still at work, the export waits for them in `pending_export`.
+    fn export(&mut self, prompt: &mut ExportPrompt) -> bool {
+        let target = self.current_dir.join(&prompt.text);
+        if self.is_viewed_file(&target) {
+            prompt.error = Some("cannot export to the file being viewed".to_owned());
+            return false;
+        }
+        if !prompt.overwrite && target.is_file() {
+            prompt.overwrite = true;
+            return false;
+        }
+        let export = PendingExport {
+            target,
+            typed: mem::take(&mut prompt.text),
+        };
+        if self.progress.is_complete() && !self.filtering() {
+            self.finish_export(&export);
+        } else {
+            self.notice = Some(Cow::Borrowed("export waits for the filters"));
+            self.pending_export = Some(export);
+        }
+        true
+    }
+
+    /// Whether `target` is the file being viewed, however it is named or linked to.
+    /// Creating it would truncate the mapped file.
+    fn is_viewed_file(&self, target: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let (Ok(viewed), Ok(target)) = (fs::metadata(&self.path), fs::metadata(target)) {
+                return (viewed.dev(), viewed.ino()) == (target.dev(), target.ino());
+            }
+        }
+        let viewed = fs::canonicalize(&self.path).ok();
+        viewed.is_some() && fs::canonicalize(target).ok() == viewed
+    }
+
+    /// Writes the export once the index and the filters' results are complete.
+    fn finish_export(&mut self, export: &PendingExport) {
+        let count = self.shown_ranges(&read(&self.index)).count();
+        let notice = if count == 0 {
+            "nothing to export".to_owned()
+        } else {
+            match self.write_export(&export.target) {
+                Ok(()) => {
+                    let noun = if count == 1 { "entry" } else { "entries" };
+                    format!("exported {count} {noun} to {}", export.typed)
+                }
+                Err(error) => format!("export failed: {error}"),
+            }
+        };
+        self.notice = Some(Cow::Owned(notice));
+    }
+
+    /// The byte ranges of the entries the filters show, in file order, from `index`.
+    fn shown_ranges<'a>(
+        &'a self,
+        index: &'a Indexed<Source>,
+    ) -> impl Iterator<Item = Range<usize>> + 'a {
+        let all = self.filter.is_none().then(|| index.records.iter());
+        let matched = self.filter.iter().flat_map(|filter| {
+            filter
+                .engine
+                .filtered()
+                .entries
+                .iter()
+                .map(|&entry| &index.records[entry as usize])
+        });
+        all.into_iter().flatten().chain(matched).map(file_range)
+    }
+
+    /// Streams the entries the filters show from the file to `target`.
+    fn write_export(&self, target: &Path) -> io::Result<()> {
+        let mut out = io::BufWriter::new(File::create(target)?);
+        let index = read(&self.index);
+        export::write_entries(&mut out, self.source.bytes(), self.shown_ranges(&index))?;
+        out.flush()
     }
 
     /// Jumps as a prompt for `to` asks with `text` typed into it. A blank text jumps
@@ -1911,7 +2784,9 @@ impl App {
         // Too many digits for a `u64` is a line past the end of any file.
         let line: u64 = text.parse().unwrap_or(u64::MAX);
         if matches!(self.opening, Opening::Tail(..)) {
-            self.notice = Some("line numbers are not known until the file is indexed");
+            self.notice = Some(Cow::Borrowed(
+                "line numbers are not known until the file is indexed",
+            ));
             return Ok(None);
         }
         let folds = self.shown_folds();
@@ -1954,7 +2829,7 @@ impl App {
             (_, filter) => (index.records.as_slice(), filter.as_ref()),
         };
         let Some((_, last)) = last_dated(records, 0, None) else {
-            self.notice = Some("no entry has a timestamp");
+            self.notice = Some(Cow::Borrowed("no entry has a timestamp"));
             return Ok(None);
         };
         let start = spec.start(last, &self.settings.zone);
@@ -1997,7 +2872,7 @@ impl App {
     /// says that it has none.
     fn change_classes(&mut self, change: impl FnOnce(&mut Classes, String)) {
         let Some(class) = self.selected_class() else {
-            self.notice = Some(NO_CLASS);
+            self.notice = Some(Cow::Borrowed(NO_CLASS));
             return;
         };
         let mut classes = self.filters.classes.clone();
@@ -2113,6 +2988,26 @@ fn push_appended(folds: &mut Folds, bytes: &[u8], records: &[Record], known: usi
         if was.is_some() && unfolded(folds, entry) != was {
             folds.toggle(entry);
         }
+    }
+}
+
+/// How many entries the histogram counts: the filters' matches, or the index's
+/// entries without filters.
+fn histogram_sources(filter: Option<&Filter>, records: &[Record]) -> usize {
+    filter.map_or(records.len(), |filter| {
+        filter.engine.filtered().entries.len()
+    })
+}
+
+/// The record of the histogram's `i`th source entry, see [`histogram_sources`].
+fn counted_record<'a>(
+    filter: Option<&Filter>,
+    records: &'a [Record],
+    i: usize,
+) -> Option<&'a Record> {
+    match filter {
+        None => records.get(i),
+        Some(filter) => records.get(*filter.engine.filtered().entries.get(i)? as usize),
     }
 }
 

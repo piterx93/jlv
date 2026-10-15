@@ -136,14 +136,16 @@ impl Viewport {
         self.select(self.selected, self.top);
     }
 
-    fn scroll_up(&mut self, page: usize) {
+    /// Like [`page_up`](Self::page_up) with a page of `page` rows.
+    pub fn scroll_up(&mut self, page: usize) {
         self.select(
             self.selected.saturating_sub(page),
             self.top.saturating_sub(page),
         );
     }
 
-    fn scroll_down(&mut self, page: usize) {
+    /// Like [`page_down`](Self::page_down) with a page of `page` rows.
+    pub fn scroll_down(&mut self, page: usize) {
         self.select(
             self.selected.saturating_add(page),
             self.top.saturating_add(page),

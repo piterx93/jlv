@@ -221,6 +221,30 @@ pub fn numbered_log(n: usize) -> String {
         .collect()
 }
 
+/// A Logback log of two hours on 2026-10-07: an INFO entry `Tick` every minute from
+/// 10:00 to 11:59, and among them a WARN at 10:12:30, two at 10:47 and 10:48, a
+/// spike of 9 ERRORs at 11:03:00 to 11:03:08 and 5 more at 11:06:00 to 11:06:04, and
+/// a WARN at 11:31:40.
+pub fn spike_log() -> String {
+    let mut entries: Vec<(u32, &str, &str)> = (0..120).map(|m| (m * 60, "INFO", "Tick")).collect();
+    entries.push((12 * 60 + 30, "WARN", "Slow response"));
+    entries.push((47 * 60 + 10, "WARN", "Slow response"));
+    entries.push((48 * 60 + 20, "WARN", "Slow response"));
+    entries.extend((0..9).map(|s| (63 * 60 + s, "ERROR", "Payment failed")));
+    entries.extend((0..5).map(|s| (66 * 60 + s, "ERROR", "Payment failed")));
+    entries.push((91 * 60 + 40, "WARN", "Slow response"));
+    entries.sort_by_key(|&(second, ..)| second);
+    entries
+        .iter()
+        .map(|(second, level, message)| {
+            let (hour, minute, second) = (10 + second / 3600, second / 60 % 60, second % 60);
+            format!(
+                "2026-10-07 {hour:02}:{minute:02}:{second:02}.000 [main] {level:<5} com.example.App - {message}\n"
+            )
+        })
+        .collect()
+}
+
 /// Hides `app`'s line numbers if they are shown, so that rows start with the `▶`
 /// marker.
 pub fn hide_line_numbers(app: &mut App) {
