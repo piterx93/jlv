@@ -1601,13 +1601,34 @@ fn truncation_row_starts_the_new_content() {
 }
 
 #[test]
-fn missing_file_shows_waiting_for_file_in_the_header() {
-    let out = lines_after(
-        &mut changed(three_lines_followed(), FileChange::Gone),
-        &[],
-        0..=0,
-    );
-    assert_snapshot!(out, @"jlv ─ app.log ─ 153 B ─ Raw ─ WAITING FOR FILE ○");
+fn missing_file_shows_an_empty_table_and_waiting_for_file_in_the_header() {
+    let mut app = changed(three_lines_followed(), FileChange::Gone);
+    assert_snapshot!(screen_after(&mut app, &[]), @r#"
+    "jlv ─ app.log ─ 0 B ─ Raw ─ WAITING FOR FILE ○                                  "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
 }
 
 /// The header's cell with the dot. The header is in reverse video, so the dot's

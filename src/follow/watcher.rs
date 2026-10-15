@@ -25,7 +25,8 @@ pub enum Event {
     /// to `len`. Comes for the file followed so far, also right before
     /// [`Gone`](Event::Gone), [`Replaced`](Event::Replaced) or [`Back`](Event::Back),
     /// when it got more bytes since it was last read: its end is read before the
-    /// watcher lets go of it.
+    /// watcher lets go of it. Never comes after `Gone`, whatever is still written to
+    /// the deleted file.
     Grew { len: u64 },
     /// The followed file was cut short, and maybe written again since. It holds `len`
     /// bytes; read it from the start up to there.
@@ -33,8 +34,9 @@ pub enum Event {
     /// Another file now lives at the path. `file` is that file, opened, holding `len`
     /// bytes; read it from the start up to there and follow it from now on.
     Replaced { file: File, len: u64 },
-    /// Nothing is at the path. What comes next is [`Back`](Event::Back), once a file
-    /// is there again, maybe after the old file's last [`Grew`](Event::Grew).
+    /// Nothing is at the path. The watcher has let go of the file, after reporting its
+    /// last bytes; the viewer is to let go of it too. What comes next is
+    /// [`Back`](Event::Back), once a file is there again.
     Gone,
     /// A file is at the path again after [`Gone`](Event::Gone). As with
     /// [`Replaced`](Event::Replaced), `file` is that file, opened, holding `len`
@@ -94,7 +96,7 @@ impl Watcher {
         let (wake, wakes) = mpsc::channel();
         let follow = Follow {
             path,
-            file,
+            file: Some(file),
             read,
             tracker,
             gone: false,
@@ -145,7 +147,8 @@ struct Follow {
     path: PathBuf,
     /// The watcher's own descriptor of the followed file: it shows how far the file
     /// grew after it left the path, and keeps its inode from being reused meanwhile.
-    file: File,
+    /// `None` while the file is gone: it is let go of, so that it can be freed.
+    file: Option<File>,
     read: u64,
     tracker: Tracker,
     /// Whether [`Event::Gone`] was sent and no file came back since.
@@ -197,7 +200,7 @@ impl Follow {
                     return Ok(());
                 };
                 self.drain()?;
-                self.file = own;
+                self.file = Some(own);
                 self.gone = false;
                 Some(if change == Change::Back {
                     Event::Back { file, len }
@@ -224,6 +227,7 @@ impl Follow {
         }
         self.gone = true;
         self.drain()?;
+        self.file = None;
         self.events.send(Event::Gone)
     }
 
@@ -231,7 +235,10 @@ impl Follow {
     /// watcher lets go of it.
     fn drain(&mut self) -> Result<(), SendError<Event>> {
         // A descriptor that can't be inspected can't be read from either.
-        let Ok(len) = self.file.metadata().map(|meta| meta.len()) else {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        let Ok(len) = file.metadata().map(|meta| meta.len()) else {
             return Ok(());
         };
         if len <= self.read {

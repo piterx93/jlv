@@ -201,7 +201,7 @@ Wheel scrolls; click selects a row; double-click toggles fold; click on a histog
 - **Rotation handling** (`tail -F` semantics):
   - inode change (rename+create, or delete and recreate): finish reading the old file, then reopen the path and show the new file from its start.
   - size shrink (copytruncate): drop the rows of the old content, whose bytes are gone, and show `── file truncated ──` as the first row, followed by the new content.
-  - if the file disappears, wait and keep retrying; show `WAITING FOR FILE` in the header.
+  - if the file disappears and nothing takes its place, let go of it: unmap and close it, so that deleting it frees its disk space, and empty the view (rows, filter and search results, folds, bookmarks, details pane; a waiting export is cancelled). Show `WAITING FOR FILE` in the header and keep retrying; a file that shows up at the path again is shown from its start, as after an inode change.
 - Active filters apply live to new entries.
 - `.gz` files (detected by the gzip magic bytes, not the name) are read-only: never followed, `READ-ONLY` in the header. A damaged file shows what could be decompressed, with `truncated .gz` in the header. Progress is printed on stderr while decompressing, before the TUI starts.
 

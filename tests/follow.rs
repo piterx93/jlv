@@ -240,6 +240,33 @@ fn follows_the_file_when_it_reappears() {
 }
 
 #[test]
+fn lets_go_of_the_deleted_file_even_while_it_is_written_to() {
+    let (_dir, path) = log_with("a\n");
+    let mut follower = follow(&path);
+    let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    follower.wait_for(PATIENCE, "a\n", true);
+    // The writer still has the deleted file open, but the watcher no longer does.
+    writer.write_all(b"b\n").unwrap();
+    fs::write(&path, "c\n").unwrap();
+    follower.wait_for(PATIENCE, "a\n[new file]c\n", false);
+}
+
+#[test]
+fn delete_and_recreate_between_two_looks_is_a_replacement() {
+    let options = Options {
+        notify: false,
+        poll: Duration::from_secs(1),
+    };
+    // The look at start has just been taken in, so the next one is a second away.
+    let (_dir, path, mut follower) = follow_past_first_look(options);
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, "c\n").unwrap();
+    follower.wait_for(PATIENCE, "a\nb\n[new file]c\n", false);
+    assert_eq!(follower.events, 2, "the file was reported gone in between");
+}
+
+#[test]
 fn follows_by_polling_when_the_parent_directory_cannot_be_watched() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().join("logs");

@@ -730,7 +730,7 @@ pub enum FileChange {
     /// Another file is at the path, after a rotation or after the file was gone. The
     /// source maps it.
     Replaced(Source),
-    /// Nothing is at the path.
+    /// Nothing is at the path. The viewer lets go of the file and shows nothing.
     Gone,
 }
 
@@ -765,7 +765,8 @@ struct LineMark {
 #[derive(Debug)]
 struct Watch {
     watcher: Watcher,
-    file: File,
+    /// `None` while the file is gone: the viewer holds nothing of it.
+    file: Option<File>,
 }
 
 impl Watch {
@@ -785,10 +786,13 @@ impl Watch {
             Event::Grew { .. } => FileChange::Grew(self.map()?),
             Event::Truncated { .. } => FileChange::Truncated(self.map()?),
             Event::Replaced { file, .. } | Event::Back { file, .. } => {
-                self.file = file;
+                self.file = Some(file);
                 FileChange::Replaced(self.map()?)
             }
-            Event::Gone => FileChange::Gone,
+            Event::Gone => {
+                self.file = None;
+                FileChange::Gone
+            }
         };
         Some(change)
     }
@@ -796,7 +800,7 @@ impl Watch {
     /// [`FileChange::Truncated`] if the file is now shorter than `mapped` bytes,
     /// whether or not the watcher has seen it yet.
     fn truncation(&self, mapped: u64) -> Option<FileChange> {
-        let len = self.file.metadata().ok()?.len();
+        let len = self.file.as_ref()?.metadata().ok()?.len();
         if len < mapped {
             self.map().map(FileChange::Truncated)
         } else {
@@ -805,7 +809,7 @@ impl Watch {
     }
 
     fn map(&self) -> Option<Source> {
-        self.file.try_clone().and_then(Source::map).ok()
+        self.file.as_ref()?.try_clone().and_then(Source::map).ok()
     }
 }
 
@@ -1304,8 +1308,9 @@ impl App {
     ///   unfolding all carries over to them.
     /// - [`Replaced`](FileChange::Replaced): the same without the truncation row, and
     ///   the viewer no longer waits for the file.
-    /// - [`Gone`](FileChange::Gone): the rows stay, and the viewer
-    ///   [waits for the file](Self::waiting_for_file).
+    /// - [`Gone`](FileChange::Gone): the viewer lets go of the file and is opened on an
+    ///   empty one, as for `Replaced`, and [waits for the file](Self::waiting_for_file).
+    ///   Filters and the follow mode stay as they are.
     ///
     /// While the viewer follows the file, the last row stays selected. While it
     /// doesn't, every new entry counts in [`new_entries`](Self::new_entries); after
@@ -1323,7 +1328,12 @@ impl App {
                 self.waiting = false;
                 self.reopen(source, false);
             }
-            FileChange::Gone => self.waiting = true,
+            FileChange::Gone => {
+                self.waiting = true;
+                self.cancel_export();
+                self.reopen(Source::empty(), false);
+                self.track_details_entry();
+            }
         }
         self.update_rows();
     }
@@ -1338,7 +1348,10 @@ impl App {
             return Ok(());
         }
         let watcher = Watcher::spawn(path.to_owned(), file.try_clone()?, self.size(), options)?;
-        self.watch = Some(Watch { watcher, file });
+        self.watch = Some(Watch {
+            watcher,
+            file: Some(file),
+        });
         Ok(())
     }
 

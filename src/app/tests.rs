@@ -1065,21 +1065,88 @@ fn unfolded_last_entry_shows_the_lines_appended_to_it() {
     assert_eq!(app.line(3), FRAME.trim_end());
 }
 
+/// The viewer lets go of a deleted file, so nothing of it is left to show, not even
+/// in the header's level counters or its size.
 #[test]
-fn deleted_file_is_waited_for_with_its_rows_kept() {
-    let app = changed(twenty_lines_followed(), FileChange::Gone);
+fn deleted_file_empties_the_view_and_is_waited_for() {
+    let app = followed(Preset::LogbackBasic, &numbered_log(20));
+    let app = changed(app, FileChange::Gone);
     assert!(app.waiting_for_file());
-    assert_eq!(app.viewport().total(), 20);
-    assert_eq!(pos(&app), (10, Some(19)));
+    assert_eq!(app.viewport().total(), 0);
+    assert_eq!(app.viewport().selected(), None);
+    assert_eq!(app.size(), 0);
+    assert_eq!(app.level_counts(), [0; 6]);
+    assert!(app.following());
 }
 
 #[test]
-fn growth_of_the_deleted_file_keeps_waiting() {
-    // The watcher reads the old file's last bytes after it reported it gone.
-    let app = changed(twenty_lines_followed(), FileChange::Gone);
-    let app = grown(app, &numbered_log(21));
-    assert!(app.waiting_for_file());
-    assert_eq!(app.viewport().total(), 21);
+fn deleted_file_drops_the_new_entry_count_and_stays_paused() {
+    let app = applied(twenty_lines_followed(), &[Action::Up]);
+    let app = changed(grown(app, &numbered_log(25)), FileChange::Gone);
+    assert_eq!(app.viewport().total(), 0);
+    assert_eq!(app.new_entries(), 0);
+    assert!(!app.following());
+}
+
+#[test]
+fn deleted_file_drops_the_filters_results_but_keeps_the_filters() {
+    let app = filtered(
+        followed(Preset::Logback, &[STARTED, FAILED, DONE].concat()),
+        text_filter("Failed"),
+    );
+    let mut app = changed(app, FileChange::Gone);
+    wait_for_filter(&mut app);
+    assert!(rows(&app).is_empty());
+    assert!(!app.nothing_matches());
+    let mut app = changed(
+        app,
+        FileChange::Replaced(test_support::source([DONE, FAILED].concat().as_bytes())),
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+}
+
+#[test]
+fn deleted_file_stops_a_filter_still_evaluating_it() {
+    let mut app = unindexed_app(Preset::Raw, numbered_log(5_000).as_bytes());
+    app.set_filters(text_filter("step 4"));
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    while !app.filtering() {
+        assert!(Instant::now() < deadline, "the filter never fell behind");
+        app.poll_index();
+    }
+    let mut app = changed(app, FileChange::Gone);
+    wait_for_filter(&mut app);
+    assert_eq!(app.viewport().total(), 0);
+}
+
+#[test]
+fn deleted_file_drops_the_search_matches() {
+    let app = searched(twenty_lines_followed(), '/', "step 1");
+    assert_eq!(app.match_count(), Some((1, 11)));
+    let mut app = changed(app, FileChange::Gone);
+    wait_for_search(&mut app);
+    assert_eq!(app.match_count(), Some((0, 0)));
+}
+
+#[test]
+fn deleted_file_empties_the_details_pane() {
+    let app = applied(details_focused(), &[Action::Down]);
+    assert_eq!(app.details_scroll(), 1);
+    let app = changed(app, FileChange::Gone);
+    assert!(app.details_entry().is_none());
+    assert_eq!(app.details_scroll(), 0);
+}
+
+#[test]
+fn deleted_file_cancels_a_waiting_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = export_before_polling(&dir);
+    app.file_changed(FileChange::Gone);
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    app.poll_index();
+    assert!(!dir.path().join("out.log").exists());
 }
 
 #[test]
@@ -1295,9 +1362,12 @@ proptest! {
         wait_for_index(&mut app);
         let mut content = start;
         let mut truncation_row = false;
+        // Once the file is gone, only another file at the path comes from the watcher.
+        let mut gone = false;
         for step in steps {
             match step {
                 Step::Apply(action) => app.apply(action),
+                Step::Append(_) | Step::Truncate(_) if gone => {}
                 Step::Append(bytes) => {
                     content.extend(bytes);
                     app.file_changed(FileChange::Grew(test_support::source(&content)));
@@ -1310,9 +1380,15 @@ proptest! {
                 Step::Replace(bytes) => {
                     content = bytes;
                     truncation_row = false;
+                    gone = false;
                     app.file_changed(FileChange::Replaced(test_support::source(&content)));
                 }
-                Step::Gone => app.file_changed(FileChange::Gone),
+                Step::Gone => {
+                    content.clear();
+                    truncation_row = false;
+                    gone = true;
+                    app.file_changed(FileChange::Gone);
+                }
             }
             wait_for_index(&mut app);
             let total = app.viewport().total();
@@ -3849,9 +3925,13 @@ fn unbookmarking_an_entry_removes_every_bookmark_inside_it() {
 }
 
 #[test]
-fn truncation_and_another_file_at_the_path_remove_every_bookmark() {
+fn truncation_deletion_and_another_file_at_the_path_remove_every_bookmark() {
     let content = EXCEPTIONS.concat();
-    let changes: [fn(Source) -> FileChange; 2] = [FileChange::Truncated, FileChange::Replaced];
+    let changes: [fn(Source) -> FileChange; 3] = [
+        FileChange::Truncated,
+        |_| FileChange::Gone,
+        FileChange::Replaced,
+    ];
     for change in changes {
         let app = pressed(followed(Preset::Logback, &content), &[char_key('m')]);
         assert_eq!(bookmarks(&app), [4]);
