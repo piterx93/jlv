@@ -1143,10 +1143,18 @@ fn deleted_file_cancels_a_waiting_export() {
     let dir = tempfile::TempDir::new().unwrap();
     let mut app = export_before_polling(&dir);
     app.file_changed(FileChange::Gone);
-    assert_eq!(app.notice(), Some("export cancelled"));
-    wait_for_filter(&mut app);
-    app.poll_index();
-    assert!(!dir.path().join("out.log").exists());
+    assert_export_cancelled(app, &dir);
+}
+
+#[test]
+fn truncation_or_rotation_cancels_a_waiting_export() {
+    let changes: [fn(Source) -> FileChange; 2] = [FileChange::Truncated, FileChange::Replaced];
+    for change in changes {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut app = export_before_polling(&dir);
+        app.file_changed(change(test_support::source(TWO_TRACES.concat().as_bytes())));
+        assert_export_cancelled(app, &dir);
+    }
 }
 
 #[test]
@@ -4477,6 +4485,14 @@ fn export_before_polling(dir: &tempfile::TempDir) -> App {
     exported_to(app, "out.log")
 }
 
+/// Asserts that `app` says its export to `out.log` in `dir` is cancelled and that no
+/// file is written once the index and the filters are done.
+fn assert_export_cancelled(mut app: App, dir: &tempfile::TempDir) {
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    assert!(!dir.path().join("out.log").exists());
+}
+
 #[test]
 fn export_waits_for_the_index_and_the_filters() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -4495,21 +4511,15 @@ fn export_waits_for_the_index_and_the_filters() {
 #[test]
 fn esc_cancels_a_waiting_export() {
     let dir = tempfile::TempDir::new().unwrap();
-    let mut app = pressed(export_before_polling(&dir), &[key(KeyCode::Esc)]);
-    assert_eq!(app.notice(), Some("export cancelled"));
-    wait_for_filter(&mut app);
-    app.poll_index();
-    assert!(!dir.path().join("out.log").exists());
+    let app = pressed(export_before_polling(&dir), &[key(KeyCode::Esc)]);
+    assert_export_cancelled(app, &dir);
 }
 
 #[test]
 fn changing_the_filters_cancels_a_waiting_export() {
     let dir = tempfile::TempDir::new().unwrap();
-    let mut app = pressed(export_before_polling(&dir), &[char_key('x')]);
-    assert_eq!(app.notice(), Some("export cancelled"));
-    wait_for_filter(&mut app);
-    app.poll_index();
-    assert!(!dir.path().join("out.log").exists());
+    let app = pressed(export_before_polling(&dir), &[char_key('x')]);
+    assert_export_cancelled(app, &dir);
 }
 
 #[test]
@@ -4638,6 +4648,108 @@ fn export_failure_shows_in_the_notice() {
         Some("export failed: Permission denied (os error 13)")
     );
     assert_eq!(app.panel(), None);
+}
+
+/// [`export_before_polling`], with a file written to `out.log` while the export
+/// waits, and the index and the filter done since.
+fn file_appeared_while_waiting(dir: &tempfile::TempDir) -> App {
+    let mut app = export_before_polling(dir);
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    wait_for_filter(&mut app);
+    app
+}
+
+#[test]
+fn waiting_export_asks_before_overwriting_a_file_that_appeared() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_appeared_while_waiting(&dir);
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, true)));
+    assert_eq!(app.notice(), None);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn y_overwrites_a_file_that_appeared_while_the_export_waited() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(file_appeared_while_waiting(&dir), &[char_key('y')]);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        [FAILED, EXCEPTION, FRAME, DONE, FRAME].concat()
+    );
+}
+
+#[test]
+fn file_that_appeared_is_asked_about_once_the_open_panel_closes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = export_before_polling(&dir);
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    let mut app = pressed(app, &[char_key('/'), char_key('a')]);
+    wait_for_filter(&mut app);
+    assert_eq!(search_prompt(&app).0.pattern, "a");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+    let mut app = pressed(app, &[key(KeyCode::Esc)]);
+    app.poll_index();
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, true)));
+}
+
+#[test]
+fn waiting_export_over_a_file_agreed_to_does_not_ask_again() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    let mut app = pressed(export_before_polling(&dir), &[char_key('y')]);
+    wait_for_filter(&mut app);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+}
+
+/// Bytes a [`FailingFile`] takes before it fails.
+const WRITTEN_BEFORE_FAILING: usize = 10;
+
+/// A file that takes [`WRITTEN_BEFORE_FAILING`] bytes, then fails every write as a
+/// full disk does.
+struct FailingFile {
+    file: File,
+    left: usize,
+}
+
+impl Write for FailingFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.left == 0 {
+            return Err(io::Error::other("no space left on device"));
+        }
+        let written = self.file.write(&buf[..buf.len().min(self.left)])?;
+        self.left -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+fn create_failing_file(path: &Path) -> io::Result<Box<dyn Write>> {
+    Ok(Box::new(FailingFile {
+        file: File::create(path)?,
+        left: WRITTEN_BEFORE_FAILING,
+    }))
+}
+
+#[test]
+fn export_failing_half_way_removes_the_partial_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = exporting_traces(&dir);
+    app.set_export_opener(create_failing_file);
+    let app = exported_to(app, "out.log");
+    assert_eq!(app.notice(), Some("export failed: no space left on device"));
+    assert!(!dir.path().join("out.log").exists());
 }
 
 // --- mouse ---

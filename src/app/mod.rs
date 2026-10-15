@@ -463,6 +463,8 @@ struct PendingExport {
     target: PathBuf,
     /// The path as the user typed it, for the notice.
     typed: String,
+    /// Whether the user agreed to overwrite a file at the target.
+    overwrite: bool,
 }
 
 /// The panel open over the rows.
@@ -897,6 +899,8 @@ pub struct App {
     /// there is a time filter.
     last_dated: Option<(usize, Timestamp)>,
     clock: fn() -> Timestamp,
+    /// Creates the file an export writes to.
+    export_create: fn(&Path) -> io::Result<Box<dyn Write>>,
     /// At work since the first [`set_filters`](Self::set_filters).
     filter: Option<Filter>,
     search: Option<Search>,
@@ -1045,6 +1049,7 @@ impl App {
             time_filter: None,
             last_dated: None,
             clock: Timestamp::now,
+            export_create: |path| Ok(Box::new(File::create(path)?)),
             filter: None,
             search: None,
             bookmarks: BTreeSet::new(),
@@ -1162,6 +1167,7 @@ impl App {
         }
         if self.progress.is_complete()
             && !self.filtering()
+            && self.panel.is_none()
             && let Some(export) = self.pending_export.take()
         {
             self.finish_export(&export);
@@ -1337,7 +1343,6 @@ impl App {
             }
             FileChange::Gone => {
                 self.waiting = true;
-                self.cancel_export();
                 self.reopen(Source::empty(), false);
                 self.track_details_entry();
             }
@@ -1522,6 +1527,12 @@ impl App {
     /// [`Base::Now`](crate::filter::Base::Now). It is the system clock at first.
     pub fn set_clock(&mut self, now: fn() -> Timestamp) {
         self.clock = now;
+    }
+
+    /// Creates the file an export writes to with `create` from here on. It is
+    /// [`File::create`] at first.
+    pub fn set_export_opener(&mut self, create: fn(&Path) -> io::Result<Box<dyn Write>>) {
+        self.export_create = create;
     }
 
     /// Puts what [`Action::Copy`] copies on `clipboard` from here on. There is none
@@ -2135,16 +2146,20 @@ impl App {
     ///   straight on and fails as below;
     /// - the prompt closes. While the index or the filters are still at work, the
     ///   notice says `export waits for the filters` and [`poll_index`](Self::poll_index)
-    ///   finishes the export once they are done; `Esc` with no panel open, or any
-    ///   change to the filters, drops a waiting export with the notice `export
-    ///   cancelled`;
+    ///   finishes the export once they are done; `Esc` with no panel open, any
+    ///   change to the filters, or the file being cut short, replaced or deleted,
+    ///   drops a waiting export with the notice `export cancelled`. If a regular file
+    ///   appeared at the path while it waited, nothing is written and the prompt opens
+    ///   again asking to overwrite it, without a notice; a file the user already
+    ///   agreed to overwrite is not asked about again;
     /// - if the filters show no entry, the notice says `nothing to export` and no file
     ///   is written;
     /// - otherwise it writes every entry the filters show, in file order, with all its
     ///   lines, folded or not, as [`export::write_entries`](crate::export::write_entries)
     ///   does, and the notice says `exported N entries to <path as typed>` (`1 entry`
     ///   for one). If the file can't be written, the notice says `export failed: ` and
-    ///   the error.
+    ///   the error, and a file left half written is removed (if it can't be, the
+    ///   notice adds `, partial file left`).
     ///
     /// Otherwise it [applies](Self::apply) the action bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
@@ -2671,6 +2686,7 @@ impl App {
     /// Shows `source`, the file that took the place of the one shown, from its start,
     /// after the truncation row if `truncated`.
     fn reopen(&mut self, source: Source, truncated: bool) {
+        self.cancel_export();
         self.set_source(source);
         self.grown = None;
         self.truncated = truncated;
@@ -2819,6 +2835,7 @@ impl App {
         let export = PendingExport {
             target,
             typed: mem::take(&mut prompt.text),
+            overwrite: prompt.overwrite,
         };
         if self.progress.is_complete() && !self.filtering() {
             self.finish_export(&export);
@@ -2845,6 +2862,16 @@ impl App {
 
     /// Writes the export once the index and the filters' results are complete.
     fn finish_export(&mut self, export: &PendingExport) {
+        if !export.overwrite && export.target.is_file() {
+            // A file appeared while the export waited; the user hasn't agreed to lose it.
+            self.panel = Some(Panel::Export(ExportPrompt {
+                text: export.typed.clone(),
+                error: None,
+                overwrite: true,
+            }));
+            self.notice = None;
+            return;
+        }
         let count = self.shown_ranges(&read(&self.index)).count();
         let notice = if count == 0 {
             "nothing to export".to_owned()
@@ -2878,8 +2905,18 @@ impl App {
     }
 
     /// Streams the entries the filters show from the file to `target`.
-    fn write_export(&self, target: &Path) -> io::Result<()> {
-        let mut out = io::BufWriter::new(File::create(target)?);
+    /// A file left half written is removed; the error says if that failed too.
+    fn write_export(&self, target: &Path) -> Result<(), String> {
+        let file = (self.export_create)(target).map_err(|error| error.to_string())?;
+        self.write_entries_to(file)
+            .map_err(|error| match fs::remove_file(target) {
+                Ok(()) => error.to_string(),
+                Err(_) => format!("{error}, partial file left"),
+            })
+    }
+
+    fn write_entries_to(&self, file: Box<dyn Write>) -> io::Result<()> {
+        let mut out = io::BufWriter::new(file);
         let index = read(&self.index);
         export::write_entries(&mut out, self.source.bytes(), self.shown_ranges(&index))?;
         out.flush()
