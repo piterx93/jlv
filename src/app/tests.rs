@@ -19,11 +19,12 @@ use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
 use crate::format::Level;
 use crate::index::Progress;
+use crate::keymap::Keymap;
 use crate::matcher::{self, Matcher};
 use crate::test_support;
 use crate::test_support::{
-    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
-    key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
+    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
+    following_app, key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
     wait_for_index_within, wait_for_search,
 };
 
@@ -4728,7 +4729,7 @@ fn help_scroll(app: &App) -> Option<usize> {
 
 /// How many lines the help overlay has.
 fn help_lines() -> usize {
-    crate::keymap::help().len()
+    Keymap::default().help().len()
 }
 
 /// `app` with the help overlay open, showing `height` lines at a time, and `keys`
@@ -4842,6 +4843,17 @@ fn f1_does_nothing_in_another_panel() {
 }
 
 // --- configuration ---
+
+/// A remapped action answers to its new key and no longer to its default `T`.
+#[test]
+fn configured_keys_decide_what_keys_do() {
+    let mut app = hundred_lines();
+    app.configure(&Config::parse("[keys]\ntoggle_thread = \"v\"\n").unwrap());
+    app.key(char_key('v'));
+    assert!(app.shows_thread());
+    app.key(char_key('T'));
+    assert!(app.shows_thread());
+}
 
 #[test]
 fn configure_takes_the_ui_toggles_from_the_config() {

@@ -9,10 +9,12 @@ use std::time::Duration;
 use jiff::civil;
 use ratatui::style::{Color, Style};
 use serde::Deserialize;
-use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 
+use crate::app::Action;
 use crate::filter::Classes;
 use crate::format::Level;
+use crate::keymap::{self, Key, Keymap};
 
 #[cfg(test)]
 mod tests;
@@ -25,10 +27,12 @@ pub struct Config {
     pub colors: Colors,
     pub follow: Follow,
     pub filters: Filters,
+    /// The `[keys]` section: the default key bindings with the actions it names
+    /// bound to the keys it gives them.
+    pub keys: Keymap,
 }
 
-/// The file as written. `keys` is accepted and left alone until the keymap reads
-/// it (#39), which will give it a typed field here and in [`Config`].
+/// The file as written.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct File {
@@ -40,8 +44,8 @@ struct File {
     follow: Follow,
     #[serde(default)]
     filters: Filters,
-    #[allow(dead_code)]
-    keys: Option<toml::Table>,
+    #[serde(default, deserialize_with = "keys")]
+    keys: Keymap,
 }
 
 /// The `[ui]` section.
@@ -122,6 +126,7 @@ impl Default for Config {
             },
             follow: Follow::default(),
             filters: Filters::default(),
+            keys: Keymap::default(),
         }
     }
 }
@@ -159,20 +164,23 @@ impl Config {
     /// or section jlv doesn't know, a value of the wrong type, an unknown colour, a
     /// timestamp format strftime can't use, a class rule that doesn't parse and a
     /// `poll_interval_ms` of 0 are errors that say which line they are on and name
-    /// the key. A `[keys]` table is accepted and not looked at.
+    /// the key. So are, in `[keys]`, an action name jlv doesn't know, an empty list
+    /// of keys and a key outside the [key syntax](crate::keymap::Key); a key bound
+    /// to two actions is an error that names both.
     pub fn parse(text: &str) -> Result<Config, String> {
         let File {
             ui,
             colors,
             follow,
             filters,
-            ..
+            keys,
         } = toml::from_str(text).map_err(|err| err.to_string())?;
         Ok(Config {
             ui,
             colors,
             follow,
             filters,
+            keys,
         })
     }
 }
@@ -237,6 +245,85 @@ fn poll_interval<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration,
     match u64::deserialize(deserializer)? {
         0 => Err(de::Error::custom("poll_interval_ms must be at least 1")),
         ms => Ok(Duration::from_millis(ms)),
+    }
+}
+
+/// The `[keys]` section: action names, each with one key or a list of keys.
+fn keys<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Keymap, D::Error> {
+    struct KeysVisitor;
+
+    impl<'de> Visitor<'de> for KeysVisitor {
+        type Value = Keymap;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a table of action names and keys")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keymap, A::Error> {
+            let mut remaps = Vec::new();
+            while let Some(ActionName(action)) = map.next_key()? {
+                remaps.push((action, map.next_value_seed(KeyList(action))?));
+            }
+            Keymap::remapped(&remaps).map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_map(KeysVisitor)
+}
+
+/// An action name of the `[keys]` section.
+struct ActionName(Action);
+
+impl<'de> Deserialize<'de> for ActionName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        keymap::named(&name)
+            .map(ActionName)
+            .ok_or_else(|| de::Error::custom(format!("unknown action '{name}'")))
+    }
+}
+
+/// The keys of one action: a single key or a non-empty list.
+struct KeyList(Action);
+
+impl<'de> de::DeserializeSeed<'de> for KeyList {
+    type Value = Vec<Key>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<Key>, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for KeyList {
+    type Value = Vec<Key>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a key or a list of keys")
+    }
+
+    fn visit_str<E: de::Error>(self, text: &str) -> Result<Vec<Key>, E> {
+        text.parse().map(|key| vec![key]).map_err(E::custom)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Key>, A::Error> {
+        let mut keys = Vec::new();
+        while let Some(KeyText(key)) = seq.next_element()? {
+            keys.push(key);
+        }
+        if keys.is_empty() {
+            let name = keymap::name(self.0);
+            return Err(de::Error::custom(format!("{name}: no keys")));
+        }
+        Ok(keys)
+    }
+}
+
+struct KeyText(Key);
+
+impl<'de> Deserialize<'de> for KeyText {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map(KeyText).map_err(de::Error::custom)
     }
 }
 

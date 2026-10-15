@@ -14,15 +14,15 @@ use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
-use crate::app::{Action, FileChange, action};
+use crate::app::{Action, FileChange};
 use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::Preset;
 use crate::matcher::{self, Matcher};
 use crate::mouse::HitMap;
 use crate::test_support::{
-    self, EXAMPLES, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
-    hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
+    self, EXAMPLES, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
+    following_app, hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
     wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
 };
 
@@ -2987,7 +2987,57 @@ fn help_overlay_in_a_tall_terminal_is_as_high_as_its_lines_and_border() {
     let (top, bottom) = (find("┌ Help "), find("└"));
     assert_eq!(
         usize::from(bottom - top) + 1,
-        crate::keymap::help().len() + 2
+        crate::keymap::Keymap::default().help().len() + 2
     );
     assert!(row(&terminal, top + 1).contains("│ k ↑ "));
+}
+
+/// The overlay opens with the key `help` is remapped to and lists the remapped keys
+/// in place of the defaults; the footer names the first key of each action. `q`
+/// closes the overlay whatever `quit` is bound to.
+#[test]
+fn help_overlay_lists_remapped_keys() {
+    let mut app = hundred_lines();
+    let config = "[keys]\nup = \"i\"\ndown = [\"o\", \"Down\"]\nhelp = \"h\"\n";
+    app.configure(&Config::parse(config).unwrap());
+    assert_snapshot!(screen_after_pressing(&mut app, &[char_key('h')]), @r#"
+    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
+    " 12:00:00.002 [ma│ i             Move up                      │                 "
+    " 12:00:00.003 [ma│ o ↓           Move down                    │                 "
+    " 12:00:00.004 [ma│ PgUp          Page up                      │                 "
+    " 12:00:00.005 [ma│ PgDn          Page down                    │                 "
+    " 12:00:00.006 [ma│ Ctrl-u        Half page up                 │                 "
+    " 12:00:00.007 [ma│ Ctrl-d        Half page down               │                 "
+    " 12:00:00.008 [ma│ g Home        Go to top                    │                 "
+    " 12:00:00.009 [ma│ G End         Go to bottom and follow      │                 "
+    " 12:00:00.010 [ma│ ←             Scroll left                  │                 "
+    " 12:00:00.011 [ma│ →             Scroll right                 │                 "
+    " 12:00:00.012 [ma│ Tab           Focus next pane              │                 "
+    " 12:00:00.013 [ma│ Enter         Details panel                │                 "
+    " 12:00:00.014 [ma│ Esc           Cancel waiting export        │                 "
+    " 12:00:00.015 [ma│ F             Toggle follow                │                 "
+    " 12:00:00.016 [ma│ P             Cycle format preset          │                 "
+    " 12:00:00.017 [ma│ /             Search forward               │                 "
+    " 12:00:00.018 [ma│ ?             Search backward              │                 "
+    " 12:00:00.019 [ma│ n             Next match                   │                 "
+    " 12:00:00.020 [ma│ N             Previous match               │                 "
+    " 12:00:00.021 [ma│ :             Jump to line                 │                 "
+    " 12:00:00.022 [ma└────────────────────────────────────────────┘                 "
+    "o/i Scroll  PgUp/PgDn Page  h/Esc/q Close                                       "
+    "#);
+}
+
+/// The footer names the first key of each action it lists; a pair is shortened to
+/// `Ctrl-u/d` only when both keys are Ctrl keys.
+#[test]
+fn key_hints_show_remapped_keys() {
+    let mut app = hundred_lines();
+    let config = "[keys]\nhalf_page_up = \"u\"\nquit = [\"Q\", \"F10\"]\n";
+    app.configure(&Config::parse(config).unwrap());
+    let terminal = drawn(&mut app, 80, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 23),
+        "j/k Move  PgUp/PgDn Page  u/Ctrl-d Half page  g/G Top/Bottom  Q Quit"
+    );
 }

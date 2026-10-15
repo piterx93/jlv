@@ -1,7 +1,9 @@
-//! The key bindings: the one table that [`action`](crate::app::action) looks keys up
-//! in and the help overlay lists, so that the overlay always shows the keys that work.
+//! The key bindings: the one table that [`Keymap::action`] looks keys up in and the
+//! help overlay lists, so that the overlay always shows the keys that work.
 
-use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+use std::str::FromStr;
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::Action;
 use crate::format::Level;
@@ -18,10 +20,247 @@ pub struct Binding {
     pub action: Action,
 }
 
-/// The default bindings, in the order the help overlay lists them, each key at most
-/// once.
-pub fn bindings() -> &'static [Binding] {
-    BINDINGS
+/// A key as the configuration file names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Key {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+/// The key syntax of the `[keys]` section, case-sensitive: a single character other
+/// than a control character, `F1`–`F12`, `Enter`, `Esc`, `Space`, `Tab`, `Up`,
+/// `Down`, `Left`, `Right`, `PgUp`, `PgDn`, `Home` and `End`, each of them optionally
+/// after `Ctrl-`, as `Ctrl-x`. Anything else is an error that quotes the text.
+impl FromStr for Key {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Key, String> {
+        let unknown = || format!("unknown key '{text}'");
+        let (modifiers, base) = match text.strip_prefix("Ctrl-") {
+            Some(base) => (KeyModifiers::CONTROL, base),
+            None => (KeyModifiers::NONE, text),
+        };
+        // Terminals report Ctrl with a letter in lower case, so `Ctrl-F` would never fire.
+        if modifiers == KeyModifiers::CONTROL
+            && base.len() == 1
+            && base.as_bytes()[0].is_ascii_uppercase()
+        {
+            return Err(unknown());
+        }
+        let code = match base {
+            "Enter" => KeyCode::Enter,
+            "Esc" => KeyCode::Esc,
+            "Space" => KeyCode::Char(' '),
+            "Tab" => KeyCode::Tab,
+            "Up" => KeyCode::Up,
+            "Down" => KeyCode::Down,
+            "Left" => KeyCode::Left,
+            "Right" => KeyCode::Right,
+            "PgUp" => KeyCode::PageUp,
+            "PgDn" => KeyCode::PageDown,
+            "Home" => KeyCode::Home,
+            "End" => KeyCode::End,
+            _ => function_key(base)
+                .or_else(|| single_char(base))
+                .ok_or_else(unknown)?,
+        };
+        Ok(Key { code, modifiers })
+    }
+}
+
+/// The key bindings in effect: the defaults with the `[keys]` section of the
+/// configuration applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keymap {
+    bindings: Vec<Binding>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap {
+            bindings: DEFAULTS.to_vec(),
+        }
+    }
+}
+
+impl Keymap {
+    /// The default bindings with each action of `remaps` bound to its keys instead
+    /// of its defaults. A remapped action's keys take the place of its first default
+    /// key, in the order given, each once. A key bound to two actions is an error
+    /// that [names](name) both actions and the key.
+    pub fn remapped(remaps: &[(Action, Vec<Key>)]) -> Result<Keymap, String> {
+        let remap = |action| remaps.iter().find(|(a, _)| *a == action);
+        let mut bindings: Vec<Binding> = Vec::new();
+        for default in DEFAULTS {
+            let Some((action, keys)) = remap(default.action) else {
+                bindings.push(*default);
+                continue;
+            };
+            if bindings.iter().any(|b| b.action == *action) {
+                continue;
+            }
+            for key in keys {
+                let binding = Binding {
+                    code: key.code,
+                    modifiers: key.modifiers,
+                    action: *action,
+                };
+                if !bindings.contains(&binding) {
+                    bindings.push(binding);
+                }
+            }
+        }
+        for (i, first) in bindings.iter().enumerate() {
+            let clash = bindings[i + 1..]
+                .iter()
+                .find(|b| (b.code, b.modifiers) == (first.code, first.modifiers));
+            if let Some(second) = clash {
+                return Err(format!(
+                    "key {} is bound to both {} and {}",
+                    key_name(first.code, first.modifiers),
+                    name(first.action),
+                    name(second.action),
+                ));
+            }
+        }
+        Ok(Keymap { bindings })
+    }
+
+    /// The bindings, in the order the help overlay lists them, each key at most once.
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
+    /// The action bound to `key`, `None` for keys that do nothing.
+    ///
+    /// Characters ignore Shift (the character already says which case it is) but not
+    /// Ctrl or Alt; other keys do nothing with any other modifier. Key releases do
+    /// nothing; held keys repeat.
+    pub fn action(&self, key: KeyEvent) -> Option<Action> {
+        let (code, modifiers) = normalized(key)?;
+        self.bindings
+            .iter()
+            .find(|binding| binding.code == code && binding.modifiers == modifiers)
+            .map(|binding| binding.action)
+    }
+
+    /// The lines of the help overlay, made from [`bindings`](Self::bindings): one per
+    /// [`description`], in the order of its first binding, with the
+    /// [names](key_name) of the keys bound to actions with that description, in
+    /// keymap order and a space apart, as `("k ↑", "Move up")`.
+    pub fn help(&self) -> Vec<(String, &'static str)> {
+        let mut lines: Vec<(String, &'static str)> = Vec::new();
+        for binding in &self.bindings {
+            let name = key_name(binding.code, binding.modifiers);
+            let description = description(binding.action);
+            match lines.iter_mut().find(|(_, d)| *d == description) {
+                Some((keys, _)) => {
+                    keys.push(' ');
+                    keys.push_str(&name);
+                }
+                None => lines.push((name, description)),
+            }
+        }
+        lines
+    }
+}
+
+/// The code and modifiers of `key` as the bindings see them, `None` for a release.
+/// A character ignores Shift, as it already says which case it is.
+pub(crate) fn normalized(key: KeyEvent) -> Option<(KeyCode, KeyModifiers)> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let modifiers = match key.code {
+        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
+        _ => key.modifiers,
+    };
+    Some((key.code, modifiers))
+}
+
+fn function_key(text: &str) -> Option<KeyCode> {
+    let digits = text.strip_prefix('F')?;
+    if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits
+        .parse()
+        .ok()
+        .filter(|n| (1..=12).contains(n))
+        .map(KeyCode::F)
+}
+
+fn single_char(text: &str) -> Option<KeyCode> {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if !c.is_control() => Some(KeyCode::Char(c)),
+        _ => None,
+    }
+}
+
+/// The name of `action` in the `[keys]` section: the snake_case of its variant, as
+/// `toggle_follow`, with the level after `toggle_level_`, as `toggle_level_info`.
+pub fn name(action: Action) -> &'static str {
+    match action {
+        Action::Up => "up",
+        Action::Down => "down",
+        Action::PageUp => "page_up",
+        Action::PageDown => "page_down",
+        Action::HalfPageUp => "half_page_up",
+        Action::HalfPageDown => "half_page_down",
+        Action::Top => "top",
+        Action::Bottom => "bottom",
+        Action::ScrollLeft => "scroll_left",
+        Action::ScrollRight => "scroll_right",
+        Action::CycleFocus => "cycle_focus",
+        Action::Confirm => "confirm",
+        Action::Cancel => "cancel",
+        Action::ToggleFollow => "toggle_follow",
+        Action::CyclePreset => "cycle_preset",
+        Action::SearchForward => "search_forward",
+        Action::SearchBackward => "search_backward",
+        Action::NextMatch => "next_match",
+        Action::PreviousMatch => "previous_match",
+        Action::LinePrompt => "line_prompt",
+        Action::TimePrompt => "time_prompt",
+        Action::ToggleLevel(Level::Trace) => "toggle_level_trace",
+        Action::ToggleLevel(Level::Debug) => "toggle_level_debug",
+        Action::ToggleLevel(Level::Info) => "toggle_level_info",
+        Action::ToggleLevel(Level::Warn) => "toggle_level_warn",
+        Action::ToggleLevel(Level::Error) => "toggle_level_error",
+        Action::ToggleLevel(Level::Fatal) => "toggle_level_fatal",
+        Action::LevelPanel => "level_panel",
+        Action::TextPanel => "text_panel",
+        Action::TimePanel => "time_panel",
+        Action::ClassPanel => "class_panel",
+        Action::OnlyClass => "only_class",
+        Action::HideClass => "hide_class",
+        Action::ClearFilters => "clear_filters",
+        Action::ToggleFold => "toggle_fold",
+        Action::FoldAll => "fold_all",
+        Action::UnfoldAll => "unfold_all",
+        Action::NextException => "next_exception",
+        Action::PreviousException => "previous_exception",
+        Action::ToggleBookmark => "toggle_bookmark",
+        Action::NextBookmark => "next_bookmark",
+        Action::PreviousBookmark => "previous_bookmark",
+        Action::Copy => "copy",
+        Action::Export => "export",
+        Action::ToggleThread => "toggle_thread",
+        Action::ToggleLineNumbers => "toggle_line_numbers",
+        Action::ToggleHistogram => "toggle_histogram",
+        Action::ToggleWrap => "toggle_wrap",
+        Action::Help => "help",
+        Action::Quit => "quit",
+    }
+}
+
+/// The action whose [`name`] is `text`, `None` for a name jlv doesn't know.
+pub fn named(text: &str) -> Option<Action> {
+    DEFAULTS
+        .iter()
+        .map(|binding| binding.action)
+        .find(|action| name(*action) == text)
 }
 
 const fn plain(code: KeyCode, action: Action) -> Binding {
@@ -44,7 +283,7 @@ const fn ctrl(c: char, action: Action) -> Binding {
     }
 }
 
-static BINDINGS: &[Binding] = &[
+static DEFAULTS: &[Binding] = &[
     ch('k', Action::Up),
     plain(KeyCode::Up, Action::Up),
     ch('j', Action::Down),
@@ -186,24 +425,4 @@ pub fn description(action: Action) -> &'static str {
         Action::Help => "Help",
         Action::Quit => "Quit",
     }
-}
-
-/// The lines of the help overlay, made from [`bindings`]: one per [`description`], in
-/// the order of its first binding, with the [names](key_name) of the keys bound to
-/// actions with that description, in keymap order and a space apart, as
-/// `("k ↑", "Move up")`.
-pub fn help() -> Vec<(String, &'static str)> {
-    let mut lines: Vec<(String, &'static str)> = Vec::new();
-    for binding in bindings() {
-        let name = key_name(binding.code, binding.modifiers);
-        let description = description(binding.action);
-        match lines.iter_mut().find(|(_, d)| *d == description) {
-            Some((keys, _)) => {
-                keys.push(' ');
-                keys.push_str(&name);
-            }
-            None => lines.push((name, description)),
-        }
-    }
-    lines
 }

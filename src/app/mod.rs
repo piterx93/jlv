@@ -17,7 +17,7 @@ use jiff::tz::TimeZone;
 use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 use crate::clipboard::{Clipboard, CopyError, entry_text};
@@ -32,7 +32,7 @@ use crate::follow::{Event, Liveness, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
-use crate::keymap;
+use crate::keymap::{Keymap, normalized};
 use crate::matcher::{self, Matcher};
 use crate::mouse::{HitMap, Target};
 use crate::source::{self, Origin, Source};
@@ -134,36 +134,9 @@ pub enum Action {
     /// export that waits for the filters.
     Cancel,
     /// Opens the help overlay ([`App::panel`]), which lists the
-    /// [key bindings](crate::keymap::bindings).
+    /// [key bindings](crate::keymap::Keymap::bindings).
     Help,
     Quit,
-}
-
-/// The action bound to a key in the [keymap](crate::keymap::bindings), `None` for
-/// keys that do nothing.
-///
-/// Characters ignore Shift (the character already says which case it is) but not Ctrl
-/// or Alt; other keys do nothing with any modifier. Key releases do nothing; held keys
-/// repeat.
-pub fn action(key: KeyEvent) -> Option<Action> {
-    let (code, modifiers) = normalized(key)?;
-    keymap::bindings()
-        .iter()
-        .find(|binding| binding.code == code && binding.modifiers == modifiers)
-        .map(|binding| binding.action)
-}
-
-/// The code and modifiers of `key` as the bindings see them, `None` for a release.
-/// A character ignores Shift, as it already says which case it is.
-fn normalized(key: KeyEvent) -> Option<(KeyCode, KeyModifiers)> {
-    if key.kind == KeyEventKind::Release {
-        return None;
-    }
-    let modifiers = match key.code {
-        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
-        _ => key.modifiers,
-    };
-    Some((key.code, modifiers))
 }
 
 /// A key in a panel that is typed into.
@@ -510,7 +483,7 @@ pub enum Panel {
     Help(HelpPanel),
 }
 
-/// The help overlay, which lists the lines of [`keymap::help`](crate::keymap::help).
+/// The help overlay, which lists the lines of [`Keymap::help`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpPanel {
     /// How many of its lines are scrolled off above the overlay.
@@ -538,11 +511,11 @@ impl HelpPanel {
 
 /// What `key` is while the help overlay is open: `q` closes it like `Esc` and `F1`,
 /// and only the scrolling keys and `Ctrl-c` do anything else.
-fn help_action(key: KeyEvent) -> Option<Action> {
+fn help_action(keymap: &Keymap, key: KeyEvent) -> Option<Action> {
     match normalized(key)? {
         (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Cancel),
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
-        _ => action(key).filter(|action| {
+        _ => keymap.action(key).filter(|action| {
             matches!(
                 action,
                 Action::Up
@@ -966,6 +939,7 @@ pub struct App {
     wraps: bool,
     timestamps: Timestamps,
     colors: Colors,
+    keymap: Keymap,
     shows_details: bool,
     shows_histogram: bool,
     focus: Focus,
@@ -1096,6 +1070,7 @@ impl App {
             wraps: false,
             timestamps: Timestamps::of(&defaults.ui),
             colors: defaults.colors,
+            keymap: defaults.keys,
             panel: None,
             notice: None,
             path: path.to_owned(),
@@ -1414,18 +1389,26 @@ impl App {
     /// them afterwards. A viewer that is never configured shows the line numbers
     /// only, with the timestamps and colours of [`Config::default`].
     pub fn configure(&mut self, config: &Config) {
-        let Config { ui, colors, .. } = config;
+        let Config {
+            ui, colors, keys, ..
+        } = config;
         self.shows_thread = ui.show_thread;
         self.shows_histogram = ui.show_histogram;
         self.shows_line_numbers = ui.show_line_numbers;
         self.wraps = ui.wrap;
         self.timestamps = Timestamps::of(ui);
         self.colors = *colors;
+        self.keymap = keys.clone();
     }
 
     /// The timestamp format, and the width of the column it makes, from 100 columns.
     pub fn timestamps(&self) -> &Timestamps {
         &self.timestamps
+    }
+
+    /// The key bindings in effect.
+    pub fn keymap(&self) -> &Keymap {
+        &self.keymap
     }
 
     /// The styles of the levels and the line numbers.
@@ -1718,7 +1701,7 @@ impl App {
     pub fn fit_help(&mut self, height: usize) {
         if let Some(Panel::Help(panel)) = &mut self.panel {
             panel.height = height;
-            panel.lines = keymap::help().len();
+            panel.lines = self.keymap.help().len();
             panel.scroll = panel.scroll.min(panel.max_scroll());
         }
     }
@@ -2142,7 +2125,7 @@ impl App {
     ///   for one). If the file can't be written, the notice says `export failed: ` and
     ///   the error.
     ///
-    /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
+    /// Otherwise it [applies](Self::apply) the action bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
         self.last_click = None;
@@ -2153,8 +2136,8 @@ impl App {
             Some(Panel::Jump(prompt)) => prompt.key(key),
             Some(Panel::Search { prompt, .. }) => prompt.key(key),
             Some(Panel::Export(prompt)) => prompt.key(key),
-            Some(Panel::Help(_)) => help_action(key),
-            _ => action(key),
+            Some(Panel::Help(_)) => help_action(&self.keymap, key),
+            _ => self.keymap.action(key),
         };
         if let Some(action) = action {
             self.apply(action);

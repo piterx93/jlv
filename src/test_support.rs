@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App};
 use crate::format::Preset;
+use crate::keymap::Keymap;
 use crate::source::{self, Source};
 
 /// The example lines of PRD §6.1, one per preset but `Raw`.
@@ -251,6 +252,11 @@ pub fn hide_line_numbers(app: &mut App) {
     if app.shows_line_numbers() {
         app.apply(Action::ToggleLineNumbers);
     }
+}
+
+/// The action the default keymap binds to `key`.
+pub fn action(key: KeyEvent) -> Option<Action> {
+    Keymap::default().action(key)
 }
 
 pub fn key(code: KeyCode) -> KeyEvent {

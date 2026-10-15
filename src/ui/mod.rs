@@ -11,11 +11,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
+use crate::app::{Action, App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
 use crate::follow::Liveness;
 use crate::format::Level;
-use crate::keymap;
+use crate::keymap::{self, Keymap};
 use crate::mouse::HitMap;
 use crate::source::Origin;
 use layout::Screen;
@@ -62,12 +62,10 @@ const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
 const TOO_SMALL: &str = "terminal too small (80×24 needed)";
 const NO_MATCHES: &str = "no entries match the current filters";
-const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
 const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel";
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
 const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel";
-const HELP_HINTS: &str = "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close";
 const SEARCH_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel";
 const TAB_STOP: usize = 4;
 
@@ -152,7 +150,7 @@ const TAB_STOP: usize = 4;
 /// While the help overlay is open, it is drawn the same way, a box titled ` Help `,
 /// as wide as its widest line and the border need (the widest keys and the widest
 /// description plus 5 columns) and as high as its lines and the border need, but no
-/// wider and no higher than the body: one line per line of [`keymap::help`](crate::keymap::help), from the first
+/// wider and no higher than the body: one line per line of [`Keymap::help`](crate::keymap::Keymap::help), from the first
 /// that [`HelpPanel::scroll`](crate::app::HelpPanel::scroll) leaves, as ` k ↑
 /// Move up`: a space, the keys left-aligned in a column as wide as the widest keys,
 /// two spaces and the description. It tells the app how many lines it shows
@@ -298,7 +296,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         render_help_panel(frame, app, body);
     }
     let hints = match app.panel() {
-        None => KEY_HINTS.into(),
+        None => key_hints(app.keymap()).into(),
         Some(Panel::Levels(panel)) => {
             if fits {
                 render_level_panel(frame, panel, body);
@@ -354,13 +352,52 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             }
             panel_hints(prompt.error.as_deref(), SEARCH_PROMPT_HINTS)
         }
-        Some(Panel::Help(_)) => HELP_HINTS.into(),
+        Some(Panel::Help(_)) => help_hints(app.keymap()).into(),
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
 }
 
+fn first_key(keymap: &Keymap, action: Action) -> String {
+    keymap
+        .bindings()
+        .iter()
+        .find(|binding| binding.action == action)
+        .map(|binding| keymap::key_name(binding.code, binding.modifiers))
+        .unwrap_or_default()
+}
+
+/// The first keys of two actions as `a/b`, with `Ctrl-u/d` for `Ctrl-u/Ctrl-d`.
+fn pair(keymap: &Keymap, first: Action, second: Action) -> String {
+    let (first, second) = (first_key(keymap, first), first_key(keymap, second));
+    match second.strip_prefix("Ctrl-") {
+        Some(rest) if first.starts_with("Ctrl-") => format!("{first}/{rest}"),
+        _ => format!("{first}/{second}"),
+    }
+}
+
+fn key_hints(keymap: &Keymap) -> String {
+    format!(
+        "{} Move  {} Page  {} Half page  {} Top/Bottom  {} Quit",
+        pair(keymap, Action::Down, Action::Up),
+        pair(keymap, Action::PageUp, Action::PageDown),
+        pair(keymap, Action::HalfPageUp, Action::HalfPageDown),
+        pair(keymap, Action::Top, Action::Bottom),
+        first_key(keymap, Action::Quit),
+    )
+}
+
+fn help_hints(keymap: &Keymap) -> String {
+    format!(
+        "{} Scroll  {} Page  {}/{}/q Close",
+        pair(keymap, Action::Down, Action::Up),
+        pair(keymap, Action::PageUp, Action::PageDown),
+        first_key(keymap, Action::Help),
+        first_key(keymap, Action::Cancel),
+    )
+}
+
 fn render_help_panel(frame: &mut Frame, app: &mut App, body: Rect) {
-    let help = keymap::help();
+    let help = app.keymap().help();
     let height = u16::try_from(help.len() + 2).map_or(body.height, |h| h.min(body.height));
     let keys_width = help.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
     let widest = help.iter().map(|(_, d)| d.width()).max().unwrap_or(0);

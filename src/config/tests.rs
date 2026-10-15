@@ -4,6 +4,8 @@ use proptest::prelude::*;
 use ratatui::style::Color;
 
 use super::*;
+use crate::app::Action;
+use crate::keymap::Key;
 
 fn fg(color: Color) -> Style {
     Style::new().fg(color)
@@ -49,6 +51,7 @@ fn defaults_are_those_of_the_prd() {
         filters: Filters {
             default_class_excludes: Classes::default(),
         },
+        keys: Keymap::default(),
     };
     assert_eq!(Config::default(), expected);
 }
@@ -152,12 +155,32 @@ fn filters_section_makes_each_class_exclude_an_exclude_rule() {
     );
 }
 
-/// Key bindings are read by the keymap, which takes the table as it is.
+fn key(text: &str) -> Key {
+    text.parse().unwrap()
+}
+
+/// Quit, given a list, loses its default `Ctrl-c`.
 #[test]
-fn keys_section_is_accepted() {
+fn keys_section_binds_each_named_action_to_one_key_or_a_list() {
+    let config = parsed("[keys]\ntoggle_follow = \"f\"\nquit = [\"q\", \"F10\"]\n");
+    let expected = Keymap::remapped(&[
+        (Action::ToggleFollow, vec![key("f")]),
+        (Action::Quit, vec![key("q"), key("F10")]),
+    ])
+    .unwrap();
+    assert_eq!(config.keys, expected);
+}
+
+#[test]
+fn key_of_another_action_is_free_once_that_action_is_remapped_too() {
+    let keys = parsed("[keys]\ntoggle_follow = \"q\"\nquit = \"Q\"\n").keys;
+    let press = |text| {
+        let Key { code, modifiers } = key(text);
+        keys.action(ratatui::crossterm::event::KeyEvent::new(code, modifiers))
+    };
     assert_eq!(
-        parsed("[keys]\ntoggle_follow = \"f\"\nquit = [\"q\", \"F10\"]\n"),
-        Config::default()
+        (press("q"), press("Q"), press("F")),
+        (Some(Action::ToggleFollow), Some(Action::Quit), None)
     );
 }
 
@@ -249,6 +272,58 @@ fn class_exclude_that_names_no_class_is_an_error_naming_the_key_and_its_line() {
     );
 }
 
+#[test]
+fn key_bound_to_two_actions_is_an_error_naming_both() {
+    let cases = [
+        ("[keys]\ntoggle_follow = \"q\"\n", ["toggle_follow", "quit"]),
+        (
+            "[keys]\ncopy = \"v\"\ntoggle_wrap = [\"w\", \"v\"]\n",
+            ["copy", "toggle_wrap"],
+        ),
+    ];
+    for (text, actions) in cases {
+        assert_error(text, &actions);
+    }
+}
+
+#[test]
+fn unknown_action_is_an_error_naming_it_and_its_line() {
+    assert_error(
+        "[keys]\nquit = \"x\"\ntoggle_folow = \"f\"\n",
+        &["unknown action", "toggle_folow", "line 3"],
+    );
+}
+
+#[test]
+fn empty_key_list_is_an_error_naming_the_action_and_its_line() {
+    assert_error(
+        "[keys]\nquit = \"x\"\ntoggle_follow = []\n",
+        &["toggle_follow", "line 3"],
+    );
+}
+
+#[test]
+fn key_outside_the_syntax_is_an_error_naming_it_and_its_line() {
+    assert_error(
+        "[keys]\nhelp = \"h\"\nquit = [\"x\", \"Ctl-q\"]\n",
+        &["unknown key", "Ctl-q", "line 3"],
+    );
+}
+
+#[test]
+fn keys_of_the_wrong_type_are_errors_saying_what_was_expected() {
+    let cases = [
+        (
+            "keys = \"q\"\n",
+            "expected a table of action names and keys",
+        ),
+        ("[keys]\nquit = 5\n", "expected a key or a list of keys"),
+    ];
+    for (text, expected) in cases {
+        assert_error(text, &[expected]);
+    }
+}
+
 // --- where the file is ---
 
 fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -306,6 +381,10 @@ fn config_line() -> impl Strategy<Value = String> {
             "poll_interval_ms = 18446744073709551615",
             "poll_interval_ms = -1",
             "default_class_excludes = [\"org.hibernate.SQL\", \"!\"]",
+            "toggle_follow = \"q\"",
+            "quit = [\"Q\", \"Ctrl-\"]",
+            "help = []",
+            "toggle_level_info = [\"i\", \"i\"]",
         ])
         .prop_map(String::from),
         "[a-z_]{1,20} = (true|\"[a-z%#. ]{0,12}\"|[0-9]{1,6}|\\[\\])",
