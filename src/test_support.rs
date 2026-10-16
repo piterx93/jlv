@@ -154,8 +154,9 @@ fn opened(format: Option<Preset>, content: &[u8], follow: bool) -> App {
 /// It takes milliseconds, even in a debug build.
 pub const INDEX_DEADLINE: Duration = Duration::from_secs(1);
 
-/// How long indexing a test file of some 2 MB may take before the test fails. It
-/// takes well under a second on a few cores, even in a debug build.
+/// How long indexing a test file of a few MB may take before the test fails. It
+/// takes well under a second on a few cores, even in a debug build, but more on a
+/// two-core CI runner under coverage.
 pub const LARGE_INDEX_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Polls `app`'s index until it is complete. Fails the test after

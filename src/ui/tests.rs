@@ -2862,7 +2862,10 @@ fn spike_between(first: &'static str, at: &'static str, n: usize, last: &'static
         .into_iter()
         .chain(errors)
         .chain([(last, "INFO")]);
-    logback(entries)
+    // A six-digit spike is some 6 MB of log.
+    let mut app = unindexed_app(Preset::Logback, logback_log(entries).as_bytes());
+    wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
+    app
 }
 
 /// 12345 errors at 12:00 on the 7th, between entries that span 57 hours: at 80
