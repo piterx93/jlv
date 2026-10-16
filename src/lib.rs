@@ -4,7 +4,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{self, Write};
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -19,7 +19,8 @@ use ratatui::crossterm::execute;
 use crate::app::App;
 use crate::cli::Args;
 use crate::clipboard::{Env, System};
-use crate::filter::{Base, Filters, TimeFilter};
+use crate::config::Config;
+use crate::filter::{Base, Classes, Filters, TimeFilter};
 use crate::follow::Options;
 use crate::source::{OpenError, Source};
 use crate::ui::Theme;
@@ -27,6 +28,7 @@ use crate::ui::Theme;
 pub mod app;
 pub mod cli;
 pub mod clipboard;
+pub mod config;
 pub mod export;
 pub mod filter;
 pub mod fold;
@@ -59,16 +61,23 @@ pub fn version_string(version: &str, commit: Option<&str>) -> String {
 pub struct Launch {
     pub args: Args,
     pub source: Source,
+    pub config: Config,
 }
 
-/// Parses the command line (program name first) and opens the log file. A gzip file
-/// is decompressed here, with the progress on stderr. Whatever ends
-/// jlv before the viewer starts is printed here and returned as `Err(exit code)`:
+/// Parses the command line (program name first), reads the configuration file and
+/// opens the log file. The configuration file is the one `--config` names, which
+/// has to exist, or else the one at [`config::default_path`], read only if it
+/// exists; without either jlv runs on the defaults. `var` gives the environment
+/// variables. A gzip file is decompressed here, with the progress on stderr.
+/// Whatever ends jlv before the viewer starts is printed here and returned as `Err(exit code)`:
 /// 0 after `--help` or `--version`, 1 for runtime errors such as an unusable file,
-/// 2 for usage errors. `version` is what `--version` prints after `jlv`.
+/// 2 for usage errors. A configuration file that can't be read or is invalid is a
+/// runtime error that names the file. `version` is what `--version` prints after
+/// `jlv`.
 pub fn start<I, T>(
     argv: I,
     version: &str,
+    var: impl Fn(&str) -> Option<OsString>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<Launch, u8>
@@ -84,12 +93,40 @@ where
         let _ = writeln!(stderr, "jlv: -: reading from stdin is not supported yet");
         return Err(USAGE);
     }
+    let config = load_config(args.config.as_deref(), var).map_err(|(path, err)| {
+        let _ = writeln!(stderr, "jlv: {}: {}", path.display(), err.trim_end());
+        FAILURE
+    })?;
     match open_showing_progress(&args.file, stderr) {
-        Ok(source) => Ok(Launch { args, source }),
+        Ok(source) => Ok(Launch {
+            args,
+            source,
+            config,
+        }),
         Err(err) => {
             let _ = writeln!(stderr, "jlv: {}: {err}", args.file.display());
             Err(FAILURE)
         }
+    }
+}
+
+/// The configuration `given` names, which has to exist, or else the one at the
+/// default path if there is a file; the path comes back with the error.
+fn load_config(
+    given: Option<&Path>,
+    var: impl Fn(&str) -> Option<OsString>,
+) -> Result<Config, (PathBuf, String)> {
+    let (path, required) = match given {
+        Some(path) => (path.to_owned(), true),
+        None => match config::default_path(var) {
+            Some(path) => (path, false),
+            None => return Ok(Config::default()),
+        },
+    };
+    match fs::read_to_string(&path) {
+        Ok(text) => Config::parse(&text).map_err(|err| (path, err)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound && !required => Ok(Config::default()),
+        Err(err) => Err((path, err.to_string())),
     }
 }
 
@@ -131,7 +168,11 @@ fn open_showing_progress(path: &Path, stderr: &mut dyn Write) -> Result<Source, 
 /// from the file's modification time. Events are read from the terminal; a wait
 /// with a timeout ends with `None` when nothing came.
 pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
-    let Launch { args, source } = launch;
+    let Launch {
+        args,
+        source,
+        config,
+    } = launch;
     // Without an mtime a time-only log is dated from now, the latest its entries can be.
     let mtime = source.modified().unwrap_or_else(Timestamp::now);
     let follow = !args.no_follow;
@@ -145,7 +186,8 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         mtime,
         follow,
     );
-    if let Some(filters) = initial_filters(&args) {
+    app.configure(&config);
+    if let Some(filters) = initial_filters(&args, &config) {
         app.set_filters(filters);
     }
     if let Some(filter) = initial_time_filter(&args) {
@@ -154,16 +196,16 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
     app.set_clipboard(Box::new(System::new(Env::from_vars(|name| {
         env::var_os(name)
     }))));
-    app.watch(&args.file, file, Options::default())
+    app.watch(&args.file, file, watch_options(&config))
         .map_err(|err| in_file(&args.file, err))?;
     // try_init can fail after raw mode is on; restore ignores what isn't set up.
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
-    let captures_mouse = captures_mouse(&args);
+    let captures_mouse = captures_mouse(&args, &config);
     if captures_mouse && let Err(err) = capture_mouse() {
         ratatui::restore();
         return Err(err);
     }
-    let result = event_loop(&mut terminal, &mut app, theme, |timeout| {
+    let result = event_loop(&mut terminal, &mut app, theme, Instant::now, |timeout| {
         let ready = timeout.map_or(Ok(true), event::poll)?;
         ready.then(event::read).transpose()
     });
@@ -187,22 +229,38 @@ fn capture_mouse() -> io::Result<()> {
     Ok(())
 }
 
-/// Whether the viewer turns on mouse capture: always, unless `--no-mouse` was given.
-pub fn captures_mouse(args: &Args) -> bool {
-    !args.no_mouse
+/// Whether the viewer turns on mouse capture: when the configuration's `mouse` says
+/// so and `--no-mouse` wasn't given.
+pub fn captures_mouse(args: &Args, config: &Config) -> bool {
+    config.ui.mouse && !args.no_mouse
 }
 
-/// The filters the viewer starts with: the levels of `--level` and the class rules of
-/// `--class`, every other filter off. `None` without either, so that no filter runs.
-pub fn initial_filters(args: &Args) -> Option<Filters> {
-    if args.level.is_none() && args.class.is_none() {
+/// The filters the viewer starts with: the levels of `--level`, and the class rules
+/// of `--class` or else the configuration's `default_class_excludes`, every other
+/// filter off. `None` without `--level`, `--class` and class excludes, so that no
+/// filter runs.
+pub fn initial_filters(args: &Args, config: &Config) -> Option<Filters> {
+    let classes = args
+        .class
+        .as_ref()
+        .unwrap_or(&config.filters.default_class_excludes);
+    if args.level.is_none() && *classes == Classes::default() {
         return None;
     }
     Some(Filters {
         levels: args.level.unwrap_or_default(),
-        classes: args.class.clone().unwrap_or_default(),
+        classes: classes.clone(),
         ..Filters::default()
     })
+}
+
+/// How the watcher follows the file: `notify` on, and a look every
+/// `poll_interval_ms` of the configuration.
+pub fn watch_options(config: &Config) -> Options {
+    Options {
+        notify: true,
+        poll: config.follow.poll_interval,
+    }
 }
 
 /// The time filter the viewer starts with: the spec of `--since`, counted from the
@@ -219,16 +277,19 @@ pub fn initial_time_filter(args: &Args) -> Option<TimeFilter> {
 /// app ([`App::key`]), and again, until the app should quit. Other events, and a wait
 /// that timed out, only redraw. Errors from drawing or reading events end the loop.
 ///
-/// Before every drawing the app takes in what its index found since the last one
-/// ([`App::poll_index`]), and what happened to the file if it watches one. While
-/// indexing goes on, and while the app [watches](App::watch) the file, `next_event`
-/// is asked to wait at most 100 ms, so that the screen keeps up with them;
-/// `next_event(Some(timeout))` returns `Ok(None)` when nothing came in time.
-/// Otherwise it is asked to wait for as long as it takes (`None`).
+/// Before every drawing the app is told the time `now` says ([`App::tick`]) and takes
+/// in what its index found since the last one ([`App::poll_index`]), and what
+/// happened to the file if it watches one. While indexing goes on, and while the app
+/// [watches](App::watch) the file, `next_event` is asked to wait at most 100 ms, so
+/// that the screen keeps up with them; `next_event(Some(timeout))` returns `Ok(None)`
+/// when nothing came in time. It is asked to wait no longer than until the dot in the
+/// header changes, so that the dot changes on screen without a key. Otherwise it is
+/// asked to wait for as long as it takes (`None`).
 pub fn event_loop<B>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     theme: Theme,
+    mut now: impl FnMut() -> Instant,
     mut next_event: impl FnMut(Option<Duration>) -> io::Result<Option<Event>>,
 ) -> io::Result<()>
 where
@@ -236,14 +297,16 @@ where
     B::Error: Send + Sync + 'static,
 {
     while !app.should_quit() {
+        app.tick(now());
         app.poll_index();
         terminal
             .draw(|frame| ui::render(frame, app, theme))
             .map_err(io::Error::other)?;
-        let timeout = app.expects_updates().then_some(REDRAW);
+        let redraw = app.expects_updates().then_some(REDRAW);
+        let timeout = [redraw, app.dot_changes_in()].into_iter().flatten().min();
         match next_event(timeout)? {
             Some(Event::Key(key)) => app.key(key),
-            Some(Event::Mouse(mouse)) => app.mouse(mouse, Instant::now()),
+            Some(Event::Mouse(mouse)) => app.mouse(mouse, now()),
             _ => {}
         }
     }

@@ -146,6 +146,15 @@ impl Source {
         })
     }
 
+    /// A source without a file behind it, for a file that was deleted.
+    pub(crate) fn empty() -> Self {
+        Self {
+            map: None,
+            modified: None,
+            origin: Origin::Plain,
+        }
+    }
+
     /// The file's content as it was when it was mapped.
     pub fn bytes(&self) -> &[u8] {
         self.map.as_deref().unwrap_or_default()

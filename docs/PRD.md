@@ -169,7 +169,7 @@ Colors are configurable (§11).
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Header:** file name, size, detected format, follow status, number of new lines since pause, counters per level. The counters respect the class, time and text filters but ignore the level filter, so hidden levels don't drop to zero.
+- **Header:** file name, size, detected format, follow status with the liveness dot (`FOLLOW ●`, `PAUSED ◐`, `PAUSED +N new ◐`, `READ-ONLY ○`, see §8), counters per level. The counters respect the class, time and text filters but ignore the level filter, so hidden levels don't drop to zero.
 - **Filter bar:** active filters; hidden when there are none.
 - **Histogram (toggleable):** WARN/ERROR counts per time bucket. The bucket size adapts to the visible range. Selecting a bucket (mouse click or keys) sets the time filter to that bucket.
 - **Table:** Timestamp | Level | Class | Message, plus optional **Thread** (hidden by default, toggle key). In v2 a **Source** column is added for multi-file views.
@@ -190,12 +190,18 @@ Wheel scrolls; click selects a row; double-click toggles fold; click on a histog
 ## 8. Follow mode
 
 - Starts in follow mode at end of file (override `--no-follow`, which opens at the top).
-- Behaves like `less +F`. Any move away from the bottom **pauses** follow. The header shows `FOLLOW ●` while following and `PAUSED +N new` once entries arrive during a pause (N counts entries, not lines). `F` toggles follow; `End` and `G` jump to the bottom and resume.
+- Behaves like `less +F`. Any move away from the bottom **pauses** follow. The header shows `FOLLOW` while following, `PAUSED` during a pause and `PAUSED +N new` once entries arrive during it (N counts entries, not lines). `F` toggles follow; `End` and `G` jump to the bottom and resume.
+- **Liveness dot:** after the follow status (`FOLLOW ●`, `PAUSED ○`, `PAUSED +N new ◐`, `WAITING FOR FILE ○`, `READ-ONLY ○`) a dot says whether the file is alive, whether or not the view follows it:
+  - green `●`: the file changed (grew, was truncated or replaced) in the last 10 s;
+  - yellow `◐`: the last change was 10 s to 5 min ago;
+  - grey `○`: no change for 5 min or more, a `.gz` file, or the file is gone.
+
+  The time counts from the last change the watcher reported, or from opening for a file that hasn't changed since. The shape carries the state on its own, so it reads under `NO_COLOR` too. The screen redraws when the dot is due to change, without a key press.
 - File watching uses `notify` (inotify/kqueue), with a polling fallback every 250 ms for NFS and similar filesystems.
 - **Rotation handling** (`tail -F` semantics):
   - inode change (rename+create, or delete and recreate): finish reading the old file, then reopen the path and show the new file from its start.
   - size shrink (copytruncate): drop the rows of the old content, whose bytes are gone, and show `── file truncated ──` as the first row, followed by the new content.
-  - if the file disappears, wait and keep retrying; show `WAITING FOR FILE` in the header.
+  - if the file disappears and nothing takes its place, let go of it: unmap and close it, so that deleting it frees its disk space, and empty the view (rows, filter and search results, folds, bookmarks, details pane; a waiting export is cancelled). Show `WAITING FOR FILE` in the header and keep retrying; a file that shows up at the path again is shown from its start, as after an inode change.
 - Active filters apply live to new entries.
 - `.gz` files (detected by the gzip magic bytes, not the name) are read-only: never followed, `READ-ONLY` in the header. A damaged file shows what could be decompressed, with `truncated .gz` in the header. Progress is printed on stderr while decompressing, before the TUI starts.
 

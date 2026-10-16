@@ -17,21 +17,22 @@ use jiff::tz::TimeZone;
 use memchr::{memchr, memchr_iter, memrchr};
 
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 use crate::clipboard::{Clipboard, CopyError, entry_text};
+use crate::config::{Colors, Config, Ui};
 use crate::export;
 use crate::filter::{
     self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
     TimeSpec,
 };
 use crate::fold::Folds;
-use crate::follow::{Event, Options, Watcher};
+use crate::follow::{Event, Liveness, Options, Watcher};
 use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
-use crate::keymap;
+use crate::keymap::{Keymap, normalized};
 use crate::matcher::{self, Matcher};
 use crate::mouse::{HitMap, Target};
 use crate::source::{self, Origin, Source};
@@ -133,36 +134,9 @@ pub enum Action {
     /// export that waits for the filters.
     Cancel,
     /// Opens the help overlay ([`App::panel`]), which lists the
-    /// [key bindings](crate::keymap::bindings).
+    /// [key bindings](crate::keymap::Keymap::bindings).
     Help,
     Quit,
-}
-
-/// The action bound to a key in the [keymap](crate::keymap::bindings), `None` for
-/// keys that do nothing.
-///
-/// Characters ignore Shift (the character already says which case it is) but not Ctrl
-/// or Alt; other keys do nothing with any modifier. Key releases do nothing; held keys
-/// repeat.
-pub fn action(key: KeyEvent) -> Option<Action> {
-    let (code, modifiers) = normalized(key)?;
-    keymap::bindings()
-        .iter()
-        .find(|binding| binding.code == code && binding.modifiers == modifiers)
-        .map(|binding| binding.action)
-}
-
-/// The code and modifiers of `key` as the bindings see them, `None` for a release.
-/// A character ignores Shift, as it already says which case it is.
-fn normalized(key: KeyEvent) -> Option<(KeyCode, KeyModifiers)> {
-    if key.kind == KeyEventKind::Release {
-        return None;
-    }
-    let modifiers = match key.code {
-        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
-        _ => key.modifiers,
-    };
-    Some((key.code, modifiers))
 }
 
 /// A key in a panel that is typed into.
@@ -489,6 +463,8 @@ struct PendingExport {
     target: PathBuf,
     /// The path as the user typed it, for the notice.
     typed: String,
+    /// Whether the user agreed to overwrite a file at the target.
+    overwrite: bool,
 }
 
 /// The panel open over the rows.
@@ -509,7 +485,7 @@ pub enum Panel {
     Help(HelpPanel),
 }
 
-/// The help overlay, which lists the lines of [`keymap::help`](crate::keymap::help).
+/// The help overlay, which lists the lines of [`Keymap::help`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpPanel {
     /// How many of its lines are scrolled off above the overlay.
@@ -537,11 +513,11 @@ impl HelpPanel {
 
 /// What `key` is while the help overlay is open: `q` closes it like `Esc` and `F1`,
 /// and only the scrolling keys and `Ctrl-c` do anything else.
-fn help_action(key: KeyEvent) -> Option<Action> {
+fn help_action(keymap: &Keymap, key: KeyEvent) -> Option<Action> {
     match normalized(key)? {
         (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Cancel),
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
-        _ => action(key).filter(|action| {
+        _ => keymap.action(key).filter(|action| {
             matches!(
                 action,
                 Action::Up
@@ -756,7 +732,7 @@ pub enum FileChange {
     /// Another file is at the path, after a rotation or after the file was gone. The
     /// source maps it.
     Replaced(Source),
-    /// Nothing is at the path.
+    /// Nothing is at the path. The viewer lets go of the file and shows nothing.
     Gone,
 }
 
@@ -791,7 +767,8 @@ struct LineMark {
 #[derive(Debug)]
 struct Watch {
     watcher: Watcher,
-    file: File,
+    /// `None` while the file is gone: the viewer holds nothing of it.
+    file: Option<File>,
 }
 
 impl Watch {
@@ -811,10 +788,13 @@ impl Watch {
             Event::Grew { .. } => FileChange::Grew(self.map()?),
             Event::Truncated { .. } => FileChange::Truncated(self.map()?),
             Event::Replaced { file, .. } | Event::Back { file, .. } => {
-                self.file = file;
+                self.file = Some(file);
                 FileChange::Replaced(self.map()?)
             }
-            Event::Gone => FileChange::Gone,
+            Event::Gone => {
+                self.file = None;
+                FileChange::Gone
+            }
         };
         Some(change)
     }
@@ -822,7 +802,7 @@ impl Watch {
     /// [`FileChange::Truncated`] if the file is now shorter than `mapped` bytes,
     /// whether or not the watcher has seen it yet.
     fn truncation(&self, mapped: u64) -> Option<FileChange> {
-        let len = self.file.metadata().ok()?.len();
+        let len = self.file.as_ref()?.metadata().ok()?.len();
         if len < mapped {
             self.map().map(FileChange::Truncated)
         } else {
@@ -831,7 +811,7 @@ impl Watch {
     }
 
     fn map(&self) -> Option<Source> {
-        self.file.try_clone().and_then(Source::map).ok()
+        self.file.as_ref()?.try_clone().and_then(Source::map).ok()
     }
 }
 
@@ -846,7 +826,16 @@ struct HistogramState {
     /// Bumped when `counter` changes, to tell when `cached` is stale.
     version: u64,
     cached: Option<CachedHistogram>,
+    /// The label width the row settled on for a row width, valid for one `version`.
+    label_width: Option<SettledLabel>,
     bucket: usize,
+}
+
+#[derive(Debug)]
+struct SettledLabel {
+    row_width: u16,
+    version: u64,
+    width: u16,
 }
 
 #[derive(Debug)]
@@ -887,6 +876,19 @@ impl HistogramState {
     }
 }
 
+/// The latest time the app was told, and the time of the file's last change.
+#[derive(Debug, Clone, Copy)]
+struct Clock {
+    now: Instant,
+    changed: Instant,
+}
+
+impl Clock {
+    fn since_change(self) -> Duration {
+        self.now.saturating_duration_since(self.changed)
+    }
+}
+
 /// A log file being viewed.
 #[derive(Debug)]
 pub struct App {
@@ -906,6 +908,8 @@ pub struct App {
     /// there is a time filter.
     last_dated: Option<(usize, Timestamp)>,
     clock: fn() -> Timestamp,
+    /// Creates the file an export writes to.
+    export_create: fn(&Path) -> io::Result<Box<dyn Write>>,
     /// At work since the first [`set_filters`](Self::set_filters).
     filter: Option<Filter>,
     search: Option<Search>,
@@ -916,6 +920,9 @@ pub struct App {
     matches: Option<Engine>,
     /// The way a move to a match is waiting to go, for matches not yet counted.
     pending_step: Option<bool>,
+    /// An exception or bookmark jump, and its way, waiting for the index and the filters
+    /// to settle a wrap or a miss.
+    pending_jump: Option<(Seek, bool)>,
     /// An export waiting for the index and the filters' results.
     pending_export: Option<PendingExport>,
     /// The last line looked up. Rows on screen are neighbours, so stepping from it is
@@ -935,6 +942,8 @@ pub struct App {
     /// Whether the rows start with the truncation row.
     truncated: bool,
     waiting: bool,
+    /// Set by the first [`tick`](Self::tick).
+    ticks: Option<Clock>,
     /// The file grown while the index wasn't complete yet, mapped.
     grown: Option<Source>,
     watch: Option<Watch>,
@@ -948,6 +957,9 @@ pub struct App {
     shows_thread: bool,
     shows_line_numbers: bool,
     wraps: bool,
+    timestamps: Timestamps,
+    colors: Colors,
+    keymap: Keymap,
     shows_details: bool,
     shows_histogram: bool,
     focus: Focus,
@@ -965,6 +977,24 @@ pub struct App {
     /// Where [`Action::Copy`] puts the selected entry.
     clipboard: Option<Box<dyn Clipboard>>,
     quit: bool,
+}
+
+/// How the table shows a timestamp from 100 columns on.
+#[derive(Debug, Clone)]
+pub struct Timestamps {
+    /// In strftime syntax.
+    pub format: String,
+    /// How many columns the formatted text takes.
+    pub width: usize,
+}
+
+impl Timestamps {
+    fn of(ui: &Ui) -> Self {
+        Timestamps {
+            format: ui.timestamp_format.clone(),
+            width: ui.timestamp_width(),
+        }
+    }
 }
 
 impl App {
@@ -997,6 +1027,7 @@ impl App {
         mtime: Timestamp,
         follow: bool,
     ) -> Self {
+        let defaults = Config::default();
         let picked = format.or_else(|| detect(source::lines(source.bytes())));
         let following = follow && source.origin() == Origin::Plain;
         // A path like `..` has no last component; showing it whole is the next best thing.
@@ -1027,11 +1058,13 @@ impl App {
             time_filter: None,
             last_dated: None,
             clock: Timestamp::now,
+            export_create: |path| Ok(Box::new(File::create(path)?)),
             filter: None,
             search: None,
             bookmarks: BTreeSet::new(),
             matches: None,
             pending_step: None,
+            pending_jump: None,
             pending_export: None,
             line_mark: Cell::default(),
             opening: Opening::new(follow),
@@ -1041,6 +1074,7 @@ impl App {
             index_brings_new: false,
             truncated: false,
             waiting: false,
+            ticks: None,
             grown: None,
             watch: None,
             progress,
@@ -1056,6 +1090,9 @@ impl App {
             shows_thread: false,
             shows_line_numbers: true,
             wraps: false,
+            timestamps: Timestamps::of(&defaults.ui),
+            colors: defaults.colors,
+            keymap: defaults.keys,
             panel: None,
             notice: None,
             path: path.to_owned(),
@@ -1134,8 +1171,12 @@ impl App {
         if let Some(backward) = self.pending_step.take() {
             self.step(backward);
         }
+        if let Some((seek, backward)) = self.pending_jump.take() {
+            self.seek(seek, backward);
+        }
         if self.progress.is_complete()
             && !self.filtering()
+            && self.panel.is_none()
             && let Some(export) = self.pending_export.take()
         {
             self.finish_export(&export);
@@ -1229,6 +1270,41 @@ impl App {
         self.waiting
     }
 
+    /// Tells the viewer the time it is, for its [`liveness`](Self::liveness). The
+    /// first tick is when it opened the file; every change to the file it takes in
+    /// afterwards ([`file_changed`](Self::file_changed), also through
+    /// [`poll_index`](Self::poll_index)) happened at the latest tick.
+    pub fn tick(&mut self, now: Instant) {
+        let clock = self.ticks.get_or_insert(Clock { now, changed: now });
+        clock.now = now;
+    }
+
+    /// How recently the file changed, as of the latest [`tick`](Self::tick):
+    /// [`Liveness::since`] its last change, or since it opened if it hasn't changed
+    /// since. A gzip file, and a file the viewer [waits for](Self::waiting_for_file),
+    /// are [`Idle`](Liveness::Idle). Before the first tick the file is
+    /// [`Live`](Liveness::Live). Growth, a truncation and another file at the path
+    /// count as changes, whether or not the viewer follows the file.
+    pub fn liveness(&self) -> Liveness {
+        if !self.can_follow() || self.waiting {
+            return Liveness::Idle;
+        }
+        self.ticks.map_or(Liveness::Live, |clock| {
+            Liveness::since(clock.since_change())
+        })
+    }
+
+    /// How long after the latest [`tick`](Self::tick) the dot in the header changes if
+    /// nothing else happens ([`Liveness::changes_in`]); `None` while the file is
+    /// [`Idle`](Liveness::Idle), as the dot can't change any more.
+    pub(crate) fn dot_changes_in(&self) -> Option<Duration> {
+        if self.liveness() == Liveness::Idle {
+            return None;
+        }
+        self.ticks
+            .and_then(|clock| Liveness::changes_in(clock.since_change()))
+    }
+
     /// Whether the file is plain or gzip. A gzip file is read-only: the viewer opens
     /// it at the end or the top as [`new`](Self::new) says, but never follows it, and
     /// never [watches](Self::watch) it. [`Action::Bottom`] goes to the last row
@@ -1254,14 +1330,18 @@ impl App {
     ///   unfolding all carries over to them.
     /// - [`Replaced`](FileChange::Replaced): the same without the truncation row, and
     ///   the viewer no longer waits for the file.
-    /// - [`Gone`](FileChange::Gone): the rows stay, and the viewer
-    ///   [waits for the file](Self::waiting_for_file).
+    /// - [`Gone`](FileChange::Gone): the viewer lets go of the file and is opened on an
+    ///   empty one, as for `Replaced`, and [waits for the file](Self::waiting_for_file).
+    ///   Filters and the follow mode stay as they are.
     ///
     /// While the viewer follows the file, the last row stays selected. While it
     /// doesn't, every new entry counts in [`new_entries`](Self::new_entries); after
     /// growth the view stays where it was, after a truncation or another file the
     /// first row is selected and the count is the new file's entries.
     pub fn file_changed(&mut self, change: FileChange) {
+        if let Some(clock) = &mut self.ticks {
+            clock.changed = clock.now;
+        }
         match change {
             FileChange::Grew(source) if self.progress.is_complete() => self.grow(source),
             FileChange::Grew(source) => self.grown = Some(source),
@@ -1270,7 +1350,11 @@ impl App {
                 self.waiting = false;
                 self.reopen(source, false);
             }
-            FileChange::Gone => self.waiting = true,
+            FileChange::Gone => {
+                self.waiting = true;
+                self.reopen(Source::empty(), false);
+                self.track_details_entry();
+            }
         }
         self.update_rows();
     }
@@ -1285,7 +1369,10 @@ impl App {
             return Ok(());
         }
         let watcher = Watcher::spawn(path.to_owned(), file.try_clone()?, self.size(), options)?;
-        self.watch = Some(Watch { watcher, file });
+        self.watch = Some(Watch {
+            watcher,
+            file: Some(file),
+        });
         Ok(())
     }
 
@@ -1327,6 +1414,40 @@ impl App {
     /// message on screen ends at the right edge.
     pub fn limit_scroll(&mut self, max: usize) {
         self.scroll = self.scroll.min(max);
+    }
+
+    /// Takes the `[ui]` section and the colours of `config`: whether the thread
+    /// column, the histogram ([`shows_histogram`](Self::shows_histogram)) and the
+    /// line numbers are shown and messages wrap, the timestamp format of the table
+    /// and the styles of the levels and the line numbers. The toggles still change
+    /// them afterwards. A viewer that is never configured shows the line numbers
+    /// only, with the timestamps and colours of [`Config::default`].
+    pub fn configure(&mut self, config: &Config) {
+        let Config {
+            ui, colors, keys, ..
+        } = config;
+        self.shows_thread = ui.show_thread;
+        self.shows_histogram = ui.show_histogram;
+        self.shows_line_numbers = ui.show_line_numbers;
+        self.wraps = ui.wrap;
+        self.timestamps = Timestamps::of(ui);
+        self.colors = *colors;
+        self.keymap = keys.clone();
+    }
+
+    /// The timestamp format, and the width of the column it makes, from 100 columns.
+    pub fn timestamps(&self) -> &Timestamps {
+        &self.timestamps
+    }
+
+    /// The key bindings in effect.
+    pub fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    /// The styles of the levels and the line numbers.
+    pub fn colors(&self) -> &Colors {
+        &self.colors
     }
 
     /// Whether the thread column is shown.
@@ -1415,6 +1536,12 @@ impl App {
     /// [`Base::Now`](crate::filter::Base::Now). It is the system clock at first.
     pub fn set_clock(&mut self, now: fn() -> Timestamp) {
         self.clock = now;
+    }
+
+    /// Creates the file an export writes to with `create` from here on. It is
+    /// [`File::create`] at first.
+    pub fn set_export_opener(&mut self, create: fn(&Path) -> io::Result<Box<dyn Write>>) {
+        self.export_create = create;
     }
 
     /// Puts what [`Action::Copy`] copies on `clipboard` from here on. There is none
@@ -1614,7 +1741,7 @@ impl App {
     pub fn fit_help(&mut self, height: usize) {
         if let Some(Panel::Help(panel)) = &mut self.panel {
             panel.height = height;
-            panel.lines = keymap::help().len();
+            panel.lines = self.keymap.help().len();
             panel.scroll = panel.scroll.min(panel.max_scroll());
         }
     }
@@ -1807,6 +1934,22 @@ impl App {
         self.histogram.cached.as_ref()?.histogram.as_ref()
     }
 
+    /// The label width settled for a row of `row_width` columns, while the counted
+    /// entries are those it was settled for.
+    pub(crate) fn settled_label_width(&self, row_width: u16) -> Option<u16> {
+        let settled = self.histogram.label_width.as_ref()?;
+        let current = settled.row_width == row_width && settled.version == self.histogram.version;
+        current.then_some(settled.width)
+    }
+
+    pub(crate) fn settle_label_width(&mut self, row_width: u16, width: u16) {
+        self.histogram.label_width = Some(SettledLabel {
+            row_width,
+            version: self.histogram.version,
+            width,
+        });
+    }
+
     /// The selected bucket of the histogram, 0 at first. With the focus on the
     /// histogram, [`Action::ScrollLeft`] and [`Action::ScrollRight`] move it by one,
     /// stopping at the first and the last bucket, and [`Action::Confirm`] sets the time
@@ -1850,6 +1993,7 @@ impl App {
 
     fn dispatch(&mut self, action: Action) {
         self.pending_step = None;
+        self.cancel_jump();
         if let Some(panel) = self.panel.take() {
             self.apply_in_panel(panel, action);
             return;
@@ -1940,11 +2084,11 @@ impl App {
             Action::SearchBackward => self.open_search(true),
             Action::NextMatch => self.step_search(false),
             Action::PreviousMatch => self.step_search(true),
-            Action::NextException => self.jump_exception(false),
-            Action::PreviousException => self.jump_exception(true),
+            Action::NextException => self.seek(Seek::Exception, false),
+            Action::PreviousException => self.seek(Seek::Exception, true),
             Action::ToggleBookmark => self.toggle_bookmark(),
-            Action::NextBookmark => self.jump_bookmark(false),
-            Action::PreviousBookmark => self.jump_bookmark(true),
+            Action::NextBookmark => self.seek(Seek::Bookmark, false),
+            Action::PreviousBookmark => self.seek(Seek::Bookmark, true),
             Action::Export => self.panel = Some(Panel::Export(self.export_prompt())),
             Action::Copy => self.copy_entry(),
             Action::Confirm => self.toggle_details(),
@@ -2027,18 +2171,22 @@ impl App {
     ///   straight on and fails as below;
     /// - the prompt closes. While the index or the filters are still at work, the
     ///   notice says `export waits for the filters` and [`poll_index`](Self::poll_index)
-    ///   finishes the export once they are done; `Esc` with no panel open, or any
-    ///   change to the filters, drops a waiting export with the notice `export
-    ///   cancelled`;
+    ///   finishes the export once they are done; `Esc` with no panel open, any
+    ///   change to the filters, or the file being cut short, replaced or deleted,
+    ///   drops a waiting export with the notice `export cancelled`. If a regular file
+    ///   appeared at the path while it waited, nothing is written and the prompt opens
+    ///   again asking to overwrite it, without a notice; a file the user already
+    ///   agreed to overwrite is not asked about again;
     /// - if the filters show no entry, the notice says `nothing to export` and no file
     ///   is written;
     /// - otherwise it writes every entry the filters show, in file order, with all its
     ///   lines, folded or not, as [`export::write_entries`](crate::export::write_entries)
     ///   does, and the notice says `exported N entries to <path as typed>` (`1 entry`
     ///   for one). If the file can't be written, the notice says `export failed: ` and
-    ///   the error.
+    ///   the error, and a file left half written is removed (if it can't be, the
+    ///   notice adds `, partial file left`).
     ///
-    /// Otherwise it [applies](Self::apply) the [`action`] bound to the key, if any.
+    /// Otherwise it [applies](Self::apply) the action bound to the key, if any.
     pub fn key(&mut self, key: KeyEvent) {
         self.notice = None;
         self.last_click = None;
@@ -2049,8 +2197,8 @@ impl App {
             Some(Panel::Jump(prompt)) => prompt.key(key),
             Some(Panel::Search { prompt, .. }) => prompt.key(key),
             Some(Panel::Export(prompt)) => prompt.key(key),
-            Some(Panel::Help(_)) => help_action(key),
-            _ => action(key),
+            Some(Panel::Help(_)) => help_action(&self.keymap, key),
+            _ => self.keymap.action(key),
         };
         if let Some(action) = action {
             self.apply(action);
@@ -2092,6 +2240,7 @@ impl App {
             return;
         }
         self.pending_step = None;
+        self.cancel_jump();
         let target = self.hit_map.target(event.column, event.row);
         match event.kind {
             MouseEventKind::ScrollUp => self.wheel(target, true),
@@ -2245,18 +2394,32 @@ impl App {
         }
     }
 
-    fn jump_exception(&mut self, backward: bool) {
-        let found = self.find_shown(backward, Record::has_exception);
-        self.land(found, "exceptions wrapped", "no exceptions");
+    fn cancel_jump(&mut self) {
+        if self.pending_jump.take().is_some() {
+            self.notice = None;
+        }
     }
 
-    fn jump_bookmark(&mut self, backward: bool) {
-        if self.bookmarks.is_empty() {
+    /// Selects the next exception or bookmark. A match among the entries shown so far
+    /// is taken at once; a wrap or a miss only counts once the index and the filter
+    /// have gone through every entry, so until then the jump waits.
+    fn seek(&mut self, jump: Seek, backward: bool) {
+        if jump == Seek::Bookmark && self.bookmarks.is_empty() {
             self.notice = Some(Cow::Borrowed("no bookmarks"));
             return;
         }
-        let found = self.find_shown(backward, |record| self.is_bookmarked(record));
-        self.land(found, "bookmarks wrapped", "no bookmarks");
+        let found = self.find_shown(jump, backward);
+        let settled = self.progress.is_complete() && !self.filtering();
+        if matches!(found, Some((_, false))) || settled {
+            let (wrapped, none) = match jump {
+                Seek::Exception => ("exceptions wrapped", "no exceptions"),
+                Seek::Bookmark => ("bookmarks wrapped", "no bookmarks"),
+            };
+            self.land(found, wrapped, none);
+        } else {
+            self.pending_jump = Some((jump, backward));
+            self.notice = Some(Cow::Borrowed("searching…"));
+        }
     }
 
     fn toggle_bookmark(&mut self) {
@@ -2290,15 +2453,11 @@ impl App {
         self.notice = did_wrap.then_some(Cow::Borrowed(wrapped));
     }
 
-    /// The next shown entry whose record satisfies `matches`, up the rows if
-    /// `backward`, and whether the walk wrapped around to reach it. It walks the shown
-    /// entries rather than the index so that it also covers the file's last entries
-    /// shown before the index is complete.
-    fn find_shown(
-        &self,
-        backward: bool,
-        matches: impl Fn(&Record) -> bool,
-    ) -> Option<(usize, bool)> {
+    /// The next shown entry that `jump` looks for, up the rows if `backward`, and
+    /// whether the walk wrapped around to reach it. It searches the shown entries
+    /// rather than the index so that it also covers the file's last entries shown
+    /// before the index is complete.
+    fn find_shown(&self, jump: Seek, backward: bool) -> Option<(usize, bool)> {
         let folds = self.shown_folds();
         let count = folds.entries();
         let current = self
@@ -2311,22 +2470,13 @@ impl App {
         } else {
             current.map_or(0, |entry| entry + 1)
         };
-        // One guard for the whole scan: a lock per entry would queue behind the indexer.
+        // One guard for the whole search: a lock per entry would queue behind the indexer.
         let index = read(&self.index);
-        let hit = |entry: &usize| {
-            let record = match (&self.opening, &self.filter) {
-                (Opening::Tail(records, _), _) => &records[*entry],
-                (_, Some(filter)) => &index.records[filter.entry(*entry)],
-                (_, None) => &index.records[*entry],
-            };
-            matches(record)
-        };
-        let find = |mut entries: Range<usize>| {
-            if backward {
-                entries.rfind(hit)
-            } else {
-                entries.find(hit)
-            }
+        let record = |entry: usize| self.record_in(&index, entry);
+        let find = |mut entries: Range<usize>| match jump {
+            Seek::Exception if backward => entries.rfind(|&e| record(e).has_exception()),
+            Seek::Exception => entries.find(|&e| record(e).has_exception()),
+            Seek::Bookmark => self.find_bookmarked(entries, backward, record),
         };
         let (first, second) = if backward {
             (0..split, split..count)
@@ -2336,6 +2486,55 @@ impl App {
         find(first)
             .map(|entry| (entry, false))
             .or_else(|| find(second).map(|entry| (entry, true)))
+    }
+
+    /// The first (last, if `backward`) of the shown `entries` holding a bookmark. The
+    /// shown records are in file order, so each bookmark is mapped to its entry by
+    /// binary search instead of looking at every entry.
+    fn find_bookmarked<'a>(
+        &self,
+        entries: Range<usize>,
+        backward: bool,
+        record: impl Fn(usize) -> &'a Record,
+    ) -> Option<usize> {
+        if entries.is_empty() {
+            return None;
+        }
+        let at = |i: usize| record(entries.start + i).bytes();
+        let len = entries.len();
+        if backward {
+            let mut limit = at(len - 1).end;
+            while let Some(&mark) = self.bookmarks.range(..limit).next_back() {
+                // The last entry starting at or before the bookmark.
+                let i = partition_point(len, |i| at(i).start <= mark).checked_sub(1)?;
+                if mark < at(i).end {
+                    return Some(entries.start + i);
+                }
+                limit = mark;
+            }
+        } else {
+            let mut from = at(0).start;
+            while let Some(&mark) = self.bookmarks.range(from..).next() {
+                // The first entry ending after the bookmark.
+                let i = partition_point(len, |i| at(i).end <= mark);
+                if i == len {
+                    return None;
+                }
+                if at(i).start <= mark {
+                    return Some(entries.start + i);
+                }
+                from = at(i).start;
+            }
+        }
+        None
+    }
+
+    fn record_in<'a>(&'a self, index: &'a Indexed<Source>, entry: usize) -> &'a Record {
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(records, _), _) => &records[entry],
+            (_, Some(filter)) => &index.records[filter.entry(entry)],
+            (_, None) => &index.records[entry],
+        }
     }
 
     /// The index entry that viewport row `row` shows, `None` for the truncation row and
@@ -2380,6 +2579,7 @@ impl App {
 
     /// Starts evaluating the filters over the index, in place of any engine at work.
     fn start_filter(&mut self) {
+        self.cancel_jump();
         let filters = self.filters.clone();
         let preset = self.settings.preset;
         self.filter = Some(Filter::spawn(&self.index, preset, filters, &self.folds));
@@ -2544,6 +2744,7 @@ impl App {
     /// Shows `source`, the file that took the place of the one shown, from its start,
     /// after the truncation row if `truncated`.
     fn reopen(&mut self, source: Source, truncated: bool) {
+        self.cancel_export();
         self.set_source(source);
         self.grown = None;
         self.truncated = truncated;
@@ -2692,6 +2893,7 @@ impl App {
         let export = PendingExport {
             target,
             typed: mem::take(&mut prompt.text),
+            overwrite: prompt.overwrite,
         };
         if self.progress.is_complete() && !self.filtering() {
             self.finish_export(&export);
@@ -2718,6 +2920,16 @@ impl App {
 
     /// Writes the export once the index and the filters' results are complete.
     fn finish_export(&mut self, export: &PendingExport) {
+        if !export.overwrite && export.target.is_file() {
+            // A file appeared while the export waited; the user hasn't agreed to lose it.
+            self.panel = Some(Panel::Export(ExportPrompt {
+                text: export.typed.clone(),
+                error: None,
+                overwrite: true,
+            }));
+            self.notice = None;
+            return;
+        }
         let count = self.shown_ranges(&read(&self.index)).count();
         let notice = if count == 0 {
             "nothing to export".to_owned()
@@ -2751,8 +2963,18 @@ impl App {
     }
 
     /// Streams the entries the filters show from the file to `target`.
-    fn write_export(&self, target: &Path) -> io::Result<()> {
-        let mut out = io::BufWriter::new(File::create(target)?);
+    /// A file left half written is removed; the error says if that failed too.
+    fn write_export(&self, target: &Path) -> Result<(), String> {
+        let file = (self.export_create)(target).map_err(|error| error.to_string())?;
+        self.write_entries_to(file)
+            .map_err(|error| match fs::remove_file(target) {
+                Ok(()) => error.to_string(),
+                Err(_) => format!("{error}, partial file left"),
+            })
+    }
+
+    fn write_entries_to(&self, file: Box<dyn Write>) -> io::Result<()> {
+        let mut out = io::BufWriter::new(file);
         let index = read(&self.index);
         export::write_entries(&mut out, self.source.bytes(), self.shown_ranges(&index))?;
         out.flush()
@@ -3060,6 +3282,12 @@ fn last_dated(
         Some(_) => dated(0..from),
         None => None,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Seek {
+    Exception,
+    Bookmark,
 }
 
 /// Where a move to a match goes.

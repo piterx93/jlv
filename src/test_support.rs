@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App};
 use crate::format::Preset;
+use crate::keymap::Keymap;
 use crate::source::{self, Source};
 
 /// The example lines of PRD §6.1, one per preset but `Raw`.
@@ -153,8 +154,9 @@ fn opened(format: Option<Preset>, content: &[u8], follow: bool) -> App {
 /// It takes milliseconds, even in a debug build.
 pub const INDEX_DEADLINE: Duration = Duration::from_secs(1);
 
-/// How long indexing a test file of some 2 MB may take before the test fails. It
-/// takes well under a second on a few cores, even in a debug build.
+/// How long indexing a test file of a few MB may take before the test fails. It
+/// takes well under a second on a few cores, even in a debug build, but more on a
+/// two-core CI runner under coverage.
 pub const LARGE_INDEX_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Polls `app`'s index until it is complete. Fails the test after
@@ -251,6 +253,11 @@ pub fn hide_line_numbers(app: &mut App) {
     if app.shows_line_numbers() {
         app.apply(Action::ToggleLineNumbers);
     }
+}
+
+/// The action the default keymap binds to `key`.
+pub fn action(key: KeyEvent) -> Option<Action> {
+    Keymap::default().action(key)
 }
 
 pub fn key(code: KeyCode) -> KeyEvent {

@@ -7,14 +7,15 @@ use std::iter;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
+use crate::app::{Action, App, ClassPanel, Jump, LevelPanel, Panel, Prompt, TimePanel};
 use crate::filter::{Classes, Levels, TimeFilter, TimeSpec};
+use crate::follow::Liveness;
 use crate::format::Level;
-use crate::keymap;
+use crate::keymap::{self, Keymap};
 use crate::mouse::HitMap;
 use crate::source::Origin;
 use layout::Screen;
@@ -61,12 +62,10 @@ const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
 const TOO_SMALL: &str = "terminal too small (80×24 needed)";
 const NO_MATCHES: &str = "no entries match the current filters";
-const KEY_HINTS: &str = "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit";
 const LEVEL_PANEL_HINTS: &str = "j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel";
 const CLASS_PANEL_HINTS: &str = "↑/↓ Line (↓ at the end adds one)  Enter Apply  Esc Cancel";
 const TIME_PANEL_HINTS: &str = "↑/↓ Preset  Tab File/now  Enter Apply  Esc Cancel";
 const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc Cancel";
-const HELP_HINTS: &str = "j/k Scroll  PgUp/PgDn Page  F1/Esc/q Close";
 const SEARCH_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel";
 const TAB_STOP: usize = 4;
 
@@ -82,20 +81,24 @@ const TAB_STOP: usize = 4;
 /// file, in dark gray, right-aligned as wide as the last line number of the entries
 /// needs (at least 4) and followed by a space; blank while it isn't known.
 ///
-/// The follow status is ` ─ READ-ONLY` for a gzip file, which is never followed,
+/// The follow status is ` ─ READ-ONLY ○` for a gzip file, which is never followed,
 /// then ` ─ truncated .gz` if it ended early or was corrupt ([`App::origin`]). For a
-/// plain file it is ` ─ WAITING FOR FILE` while the file is gone from its path,
-/// otherwise ` ─ FOLLOW ●` while the app follows the file and ` ─ PAUSED +N new`
-/// while it doesn't and N new entries came in ([`App::new_entries`]); nothing while
-/// it doesn't and none came.
+/// plain file it is ` ─ WAITING FOR FILE ○` while the file is gone from its path,
+/// otherwise ` ─ FOLLOW ` and the dot while the app follows the file,
+/// ` ─ PAUSED +N new ` and the dot while it doesn't and N new entries came in
+/// ([`App::new_entries`]), and ` ─ PAUSED ` and the dot while it doesn't and none
+/// came. The dot shows the file's [liveness](App::liveness): `●` while it is live,
+/// `◐` while it is quiet and `○` while it is idle. Its cell keeps the header's bold
+/// reverse video with a green, yellow or dark gray background, so that it shows in
+/// that colour on the bar; under the plain theme the shape alone tells them apart.
 ///
 /// The row that marks a truncation shows `── file truncated ──` after the gutter.
 ///
 /// Under `Raw` a row is the entry's first line. Under the other presets it is a table
 /// row, columns separated by a space: the timestamp in the app's zone
-/// (`%Y-%m-%d %H:%M:%S%.3f`, `%H:%M:%S%.3f` below 100 columns), the level (5 wide,
-/// in [`level_style`]), the thread if shown (15 wide, a longer name keeps its end
-/// after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
+/// (the configured format, `%H:%M:%S%.3f` below 100 columns), the level (5 wide,
+/// in the style of [`App::colors`]), the thread if shown (15 wide, a longer name keeps
+/// its end after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
 /// cut with `…` if even the abbreviation is too wide) and the message in the rest.
 /// The headless entry has only a message, its first line. A folded entry's message
 /// ends with ` [+N]`, N being the lines it hides; an unfolded entry's continuation
@@ -147,7 +150,7 @@ const TAB_STOP: usize = 4;
 /// While the help overlay is open, it is drawn the same way, a box titled ` Help `,
 /// as wide as its widest line and the border need (the widest keys and the widest
 /// description plus 5 columns) and as high as its lines and the border need, but no
-/// wider and no higher than the body: one line per line of [`keymap::help`](crate::keymap::help), from the first
+/// wider and no higher than the body: one line per line of [`Keymap::help`](crate::keymap::Keymap::help), from the first
 /// that [`HelpPanel::scroll`](crate::app::HelpPanel::scroll) leaves, as ` k ↑
 /// Move up`: a space, the keys left-aligned in a column as wide as the widest keys,
 /// two spaces and the description. It tells the app how many lines it shows
@@ -233,16 +236,23 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         .map_or(String::new(), |(position, total)| {
             format!(" ─ match {position}/{total}")
         });
-    let title = format!(
-        "jlv ─ {} ─ {} ─ {}{}{notice}{indexing}{matches}{key_notice}",
+    let (status, after_dot) = follow_status(app);
+    let before_dot = format!(
+        "jlv ─ {} ─ {} ─ {}{status} ",
         printable(app.file_name()),
         human_size(app.size()),
         app.settings().preset,
-        follow_status(app),
     );
+    let after_dot = format!("{after_dot}{notice}{indexing}{matches}{key_notice}");
     let bar = Style::new().reversed();
-    let title_width = title.width();
-    frame.render_widget(Line::from(title).style(theme.paint(bar.bold())), header);
+    let (dot, colour) = liveness_dot(app.liveness());
+    let title_width = before_dot.width() + dot.width() + after_dot.width();
+    let title = Line::from(vec![
+        Span::raw(before_dot),
+        Span::styled(dot, theme.paint(bar.bold().bg(colour))),
+        Span::raw(after_dot),
+    ]);
+    frame.render_widget(title.style(theme.paint(bar.bold())), header);
     let counters = level_counters(app.level_counts());
     let room = usize::from(area.width).saturating_sub(title_width + 1);
     if !counters.is_empty() && counters.width() <= room {
@@ -286,7 +296,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         render_help_panel(frame, app, body);
     }
     let hints = match app.panel() {
-        None => KEY_HINTS.into(),
+        None => key_hints(app.keymap()).into(),
         Some(Panel::Levels(panel)) => {
             if fits {
                 render_level_panel(frame, panel, body);
@@ -342,13 +352,52 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
             }
             panel_hints(prompt.error.as_deref(), SEARCH_PROMPT_HINTS)
         }
-        Some(Panel::Help(_)) => HELP_HINTS.into(),
+        Some(Panel::Help(_)) => help_hints(app.keymap()).into(),
     };
     frame.render_widget(Line::from(hints).style(theme.paint(bar)), footer);
 }
 
+fn first_key(keymap: &Keymap, action: Action) -> String {
+    keymap
+        .bindings()
+        .iter()
+        .find(|binding| binding.action == action)
+        .map(|binding| keymap::key_name(binding.code, binding.modifiers))
+        .unwrap_or_default()
+}
+
+/// The first keys of two actions as `a/b`, with `Ctrl-u/d` for `Ctrl-u/Ctrl-d`.
+fn pair(keymap: &Keymap, first: Action, second: Action) -> String {
+    let (first, second) = (first_key(keymap, first), first_key(keymap, second));
+    match second.strip_prefix("Ctrl-") {
+        Some(rest) if first.starts_with("Ctrl-") => format!("{first}/{rest}"),
+        _ => format!("{first}/{second}"),
+    }
+}
+
+fn key_hints(keymap: &Keymap) -> String {
+    format!(
+        "{} Move  {} Page  {} Half page  {} Top/Bottom  {} Quit",
+        pair(keymap, Action::Down, Action::Up),
+        pair(keymap, Action::PageUp, Action::PageDown),
+        pair(keymap, Action::HalfPageUp, Action::HalfPageDown),
+        pair(keymap, Action::Top, Action::Bottom),
+        first_key(keymap, Action::Quit),
+    )
+}
+
+fn help_hints(keymap: &Keymap) -> String {
+    format!(
+        "{} Scroll  {} Page  {}/{}/q Close",
+        pair(keymap, Action::Down, Action::Up),
+        pair(keymap, Action::PageUp, Action::PageDown),
+        first_key(keymap, Action::Help),
+        first_key(keymap, Action::Cancel),
+    )
+}
+
 fn render_help_panel(frame: &mut Frame, app: &mut App, body: Rect) {
-    let help = keymap::help();
+    let help = app.keymap().help();
     let height = u16::try_from(help.len() + 2).map_or(body.height, |h| h.min(body.height));
     let keys_width = help.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
     let widest = help.iter().map(|(_, d)| d.width()).max().unwrap_or(0);
@@ -512,13 +561,13 @@ fn filter_bar(app: &App) -> Option<String> {
     (!active.is_empty()).then(|| format!("Filters: {}", active.join("  ")))
 }
 
-/// The follow status of the header, with the ` ─ ` before it; empty while paused
-/// with no new entries.
-fn follow_status(app: &App) -> Cow<'static, str> {
+/// The follow status of the header, with the ` ─ ` before it, split where the
+/// liveness dot goes: what comes before it and what after.
+fn follow_status(app: &App) -> (Cow<'static, str>, &'static str) {
     match app.origin() {
-        Origin::Gzip => " ─ READ-ONLY".into(),
-        Origin::TruncatedGzip => " ─ READ-ONLY ─ truncated .gz".into(),
-        Origin::Plain => plain_follow_status(app),
+        Origin::Gzip => (" ─ READ-ONLY".into(), ""),
+        Origin::TruncatedGzip => (" ─ READ-ONLY".into(), " ─ truncated .gz"),
+        Origin::Plain => (plain_follow_status(app), ""),
     }
 }
 
@@ -526,28 +575,21 @@ fn plain_follow_status(app: &App) -> Cow<'static, str> {
     if app.waiting_for_file() {
         " ─ WAITING FOR FILE".into()
     } else if app.following() {
-        " ─ FOLLOW ●".into()
+        " ─ FOLLOW".into()
     } else {
         match app.new_entries() {
-            0 => "".into(),
+            0 => " ─ PAUSED".into(),
             n => format!(" ─ PAUSED +{n} new").into(),
         }
     }
 }
 
-/// The style of a level in the level column (PRD §6.4): TRACE dark gray, DEBUG cyan,
-/// INFO green, WARN yellow, ERROR red, FATAL bold white on red, and the terminal's
-/// default style for a level jlv doesn't know.
-pub fn level_style(level: Option<Level>) -> Style {
-    let style = Style::new();
-    match level {
-        Some(Level::Trace) => style.fg(Color::DarkGray),
-        Some(Level::Debug) => style.fg(Color::Cyan),
-        Some(Level::Info) => style.fg(Color::Green),
-        Some(Level::Warn) => style.fg(Color::Yellow),
-        Some(Level::Error) => style.fg(Color::Red),
-        Some(Level::Fatal) => style.fg(Color::White).bg(Color::Red).bold(),
-        None => style,
+/// The dot for a liveness and the colour it shows in on the reversed header.
+fn liveness_dot(liveness: Liveness) -> (&'static str, Color) {
+    match liveness {
+        Liveness::Live => ("●", Color::Green),
+        Liveness::Quiet => ("◐", Color::Yellow),
+        Liveness::Idle => ("○", Color::DarkGray),
     }
 }
 

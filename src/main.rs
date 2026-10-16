@@ -14,6 +14,7 @@ fn main() -> ExitCode {
     match jlv::start(
         std::env::args_os(),
         &version,
+        |name| std::env::var_os(name),
         &mut io::stdout(),
         &mut io::stderr(),
     ) {

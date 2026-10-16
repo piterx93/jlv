@@ -15,14 +15,16 @@ use ratatui::layout::Rect;
 
 use super::*;
 use crate::clipboard::{CopyError, Via};
+use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
 use crate::format::Level;
 use crate::index::Progress;
+use crate::keymap::Keymap;
 use crate::matcher::{self, Matcher};
 use crate::test_support;
 use crate::test_support::{
-    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, app, app_in, char_key, ctrl, detected_app, following_app,
-    key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
+    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
+    following_app, key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
     wait_for_index_within, wait_for_search,
 };
 
@@ -1063,21 +1065,96 @@ fn unfolded_last_entry_shows_the_lines_appended_to_it() {
     assert_eq!(app.line(3), FRAME.trim_end());
 }
 
+/// The viewer lets go of a deleted file, so nothing of it is left to show, not even
+/// in the header's level counters or its size.
 #[test]
-fn deleted_file_is_waited_for_with_its_rows_kept() {
-    let app = changed(twenty_lines_followed(), FileChange::Gone);
+fn deleted_file_empties_the_view_and_is_waited_for() {
+    let app = followed(Preset::LogbackBasic, &numbered_log(20));
+    let app = changed(app, FileChange::Gone);
     assert!(app.waiting_for_file());
-    assert_eq!(app.viewport().total(), 20);
-    assert_eq!(pos(&app), (10, Some(19)));
+    assert_eq!(app.viewport().total(), 0);
+    assert_eq!(app.viewport().selected(), None);
+    assert_eq!(app.size(), 0);
+    assert_eq!(app.level_counts(), [0; 6]);
+    assert!(app.following());
 }
 
 #[test]
-fn growth_of_the_deleted_file_keeps_waiting() {
-    // The watcher reads the old file's last bytes after it reported it gone.
-    let app = changed(twenty_lines_followed(), FileChange::Gone);
-    let app = grown(app, &numbered_log(21));
-    assert!(app.waiting_for_file());
-    assert_eq!(app.viewport().total(), 21);
+fn deleted_file_drops_the_new_entry_count_and_stays_paused() {
+    let app = applied(twenty_lines_followed(), &[Action::Up]);
+    let app = changed(grown(app, &numbered_log(25)), FileChange::Gone);
+    assert_eq!(app.viewport().total(), 0);
+    assert_eq!(app.new_entries(), 0);
+    assert!(!app.following());
+}
+
+#[test]
+fn deleted_file_drops_the_filters_results_but_keeps_the_filters() {
+    let app = filtered(
+        followed(Preset::Logback, &[STARTED, FAILED, DONE].concat()),
+        text_filter("Failed"),
+    );
+    let mut app = changed(app, FileChange::Gone);
+    wait_for_filter(&mut app);
+    assert!(rows(&app).is_empty());
+    assert!(!app.nothing_matches());
+    let mut app = changed(
+        app,
+        FileChange::Replaced(test_support::source([DONE, FAILED].concat().as_bytes())),
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [FAILED.trim_end()]);
+}
+
+#[test]
+fn deleted_file_stops_a_filter_still_evaluating_it() {
+    let mut app = unindexed_app(Preset::Raw, numbered_log(5_000).as_bytes());
+    app.set_filters(text_filter("step 4"));
+    let deadline = Instant::now() + INDEX_DEADLINE;
+    while !app.filtering() {
+        assert!(Instant::now() < deadline, "the filter never fell behind");
+        app.poll_index();
+    }
+    let mut app = changed(app, FileChange::Gone);
+    wait_for_filter(&mut app);
+    assert_eq!(app.viewport().total(), 0);
+}
+
+#[test]
+fn deleted_file_drops_the_search_matches() {
+    let app = searched(twenty_lines_followed(), '/', "step 1");
+    assert_eq!(app.match_count(), Some((1, 11)));
+    let mut app = changed(app, FileChange::Gone);
+    wait_for_search(&mut app);
+    assert_eq!(app.match_count(), Some((0, 0)));
+}
+
+#[test]
+fn deleted_file_empties_the_details_pane() {
+    let app = applied(details_focused(), &[Action::Down]);
+    assert_eq!(app.details_scroll(), 1);
+    let app = changed(app, FileChange::Gone);
+    assert!(app.details_entry().is_none());
+    assert_eq!(app.details_scroll(), 0);
+}
+
+#[test]
+fn deleted_file_cancels_a_waiting_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = export_before_polling(&dir);
+    app.file_changed(FileChange::Gone);
+    assert_export_cancelled(app, &dir);
+}
+
+#[test]
+fn truncation_or_rotation_cancels_a_waiting_export() {
+    let changes: [fn(Source) -> FileChange; 2] = [FileChange::Truncated, FileChange::Replaced];
+    for change in changes {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut app = export_before_polling(&dir);
+        app.file_changed(change(test_support::source(TWO_TRACES.concat().as_bytes())));
+        assert_export_cancelled(app, &dir);
+    }
 }
 
 #[test]
@@ -1091,6 +1168,78 @@ fn file_back_at_the_path_is_shown_from_its_start() {
     assert_eq!(screen(&app), ["new 1", "new 2"]);
     assert_eq!(app.viewport().selected(), Some(1));
     assert!(app.following());
+}
+
+// --- liveness ---
+
+const TEN_SECONDS: Duration = Duration::from_secs(10);
+const FIVE_MINUTES: Duration = Duration::from_secs(300);
+
+/// `app` told the time `at`.
+fn ticked(mut app: App, at: Instant) -> App {
+    app.tick(at);
+    app
+}
+
+/// `app` opened at `start` and told the time five minutes later, by when an unchanged
+/// file is idle.
+fn idle(app: App, start: Instant) -> App {
+    ticked(ticked(app, start), start + FIVE_MINUTES)
+}
+
+#[test]
+fn liveness_counts_from_opening_while_the_file_does_not_change() {
+    let start = Instant::now();
+    let app = ticked(twenty_lines_followed(), start);
+    assert_eq!(app.liveness(), Liveness::Live);
+    let app = ticked(app, start + TEN_SECONDS);
+    assert_eq!(app.liveness(), Liveness::Quiet);
+}
+
+/// The change happened at the latest tick, and the liveness counts from there.
+#[test]
+fn growth_is_a_change_also_without_following() {
+    let start = Instant::now();
+    let app = idle(app(numbered_log(20).as_bytes()), start);
+    assert_eq!(app.liveness(), Liveness::Idle);
+    let app = grown(app, &numbered_log(21));
+    let app = ticked(
+        app,
+        start + FIVE_MINUTES + TEN_SECONDS - Duration::from_millis(1),
+    );
+    assert_eq!(app.liveness(), Liveness::Live);
+}
+
+#[test]
+fn truncation_is_a_change() {
+    let start = Instant::now();
+    let app = truncated(idle(twenty_lines_followed(), start), &numbered_log(2));
+    assert_eq!(app.liveness(), Liveness::Live);
+}
+
+#[test]
+fn missing_file_is_idle() {
+    let app = ticked(twenty_lines_followed(), Instant::now());
+    let app = changed(app, FileChange::Gone);
+    assert_eq!(app.liveness(), Liveness::Idle);
+}
+
+/// After a rotation, or once the file is back after it was gone.
+#[test]
+fn another_file_at_the_path_is_a_change() {
+    let start = Instant::now();
+    let app = changed(idle(twenty_lines_followed(), start), FileChange::Gone);
+    let app = changed(
+        app,
+        FileChange::Replaced(test_support::source(b"new 1\nnew 2\n")),
+    );
+    assert_eq!(app.liveness(), Liveness::Live);
+}
+
+#[test]
+fn gzip_file_is_idle() {
+    let app = ticked(hundred_lines_gzipped(), Instant::now());
+    assert_eq!(app.liveness(), Liveness::Idle);
 }
 
 /// Something that happens to a followed Logback file or its viewer.
@@ -1221,9 +1370,12 @@ proptest! {
         wait_for_index(&mut app);
         let mut content = start;
         let mut truncation_row = false;
+        // Once the file is gone, only another file at the path comes from the watcher.
+        let mut gone = false;
         for step in steps {
             match step {
                 Step::Apply(action) => app.apply(action),
+                Step::Append(_) | Step::Truncate(_) if gone => {}
                 Step::Append(bytes) => {
                     content.extend(bytes);
                     app.file_changed(FileChange::Grew(test_support::source(&content)));
@@ -1236,9 +1388,15 @@ proptest! {
                 Step::Replace(bytes) => {
                     content = bytes;
                     truncation_row = false;
+                    gone = false;
                     app.file_changed(FileChange::Replaced(test_support::source(&content)));
                 }
-                Step::Gone => app.file_changed(FileChange::Gone),
+                Step::Gone => {
+                    content.clear();
+                    truncation_row = false;
+                    gone = true;
+                    app.file_changed(FileChange::Gone);
+                }
             }
             wait_for_index(&mut app);
             let total = app.viewport().total();
@@ -3734,6 +3892,13 @@ fn bookmark_jumps_pass_over_the_entries_the_filters_hide() {
 }
 
 #[test]
+fn a_backward_bookmark_jump_passes_over_a_bookmark_the_filters_hide() {
+    let app = applied(hiding_errors(bookmarked_at(&[0, 1], 0)), &[Action::Bottom]);
+    let app = pressed(app, &[char_key('"')]);
+    assert_eq!(landed(&app), (Some(0), None));
+}
+
+#[test]
 fn a_bookmark_the_filters_hide_is_kept_for_when_they_show_it_again() {
     let app = hiding_errors(bookmarked_at(&[1, 3], 0));
     assert_eq!(bookmarks(&app), [2]);
@@ -3765,6 +3930,17 @@ fn cycling_the_preset_moves_a_bookmark_to_the_entry_that_holds_its_offset() {
 }
 
 #[test]
+fn bookmark_jumps_land_on_the_entry_that_holds_a_bookmark_partway_into_it() {
+    // Row 2 under `Raw` lies inside Logback's entry 1, not at its start.
+    let mut app = cycled(marked(exception_lines(), &[2]));
+    wait_for_index(&mut app);
+    for (from, quote) in [(Action::Top, '\''), (Action::Bottom, '"')] {
+        app = pressed(applied(app, &[from]), &[char_key(quote)]);
+        assert_eq!(landed(&app), (Some(1), None), "{quote}");
+    }
+}
+
+#[test]
 fn unbookmarking_an_entry_removes_every_bookmark_inside_it() {
     let mut app = cycled(marked(exception_lines(), &[2, 3]));
     wait_for_index(&mut app);
@@ -3775,9 +3951,13 @@ fn unbookmarking_an_entry_removes_every_bookmark_inside_it() {
 }
 
 #[test]
-fn truncation_and_another_file_at_the_path_remove_every_bookmark() {
+fn truncation_deletion_and_another_file_at_the_path_remove_every_bookmark() {
     let content = EXCEPTIONS.concat();
-    let changes: [fn(Source) -> FileChange; 2] = [FileChange::Truncated, FileChange::Replaced];
+    let changes: [fn(Source) -> FileChange; 3] = [
+        FileChange::Truncated,
+        |_| FileChange::Gone,
+        FileChange::Replaced,
+    ];
     for change in changes {
         let app = pressed(followed(Preset::Logback, &content), &[char_key('m')]);
         assert_eq!(bookmarks(&app), [4]);
@@ -3794,6 +3974,133 @@ fn a_bookmark_set_before_the_index_is_complete_stays_on_its_entry() {
     assert_eq!(bookmarks(&app), [4]);
     wait_for_index(&mut app);
     assert_eq!(bookmarks(&app), [4]);
+}
+
+// --- jumps while the filter is evaluating ---
+
+/// A Logback log of `n` entries, `… - step 1` to `… - step n`, in which the entries
+/// at the indexes in `traced` have a stack trace.
+fn traced_log(n: usize, traced: &[usize]) -> String {
+    (0..n)
+        .map(|i| {
+            let trace = if traced.contains(&i) {
+                [EXCEPTION, FRAME].concat()
+            } else {
+                String::new()
+            };
+            format!(
+                "2026-10-07 12:00:00.000 [main] INFO  com.example.App - step {}\n{trace}",
+                i + 1
+            )
+        })
+        .collect()
+}
+
+/// [`traced_log`] of `n` entries with traces at `traced`, on a 10-line screen.
+fn traced_app(n: usize, traced: &[usize]) -> App {
+    let mut app = app_in(Preset::Logback, traced_log(n, traced).as_bytes());
+    app.resize(10);
+    app
+}
+
+/// `app` filtered to the entries whose message contains `word`, before any of the
+/// filter's results come in.
+fn filter_set(mut app: App, word: &str) -> App {
+    app.set_filters(text_filter(word));
+    assert!(app.filtering());
+    app
+}
+
+/// [`traced_log`] of 100 entries with a trace at entry 20, under a filter that shows
+/// every entry, with entry `at` selected, then grown to 3,100 entries with another
+/// trace at entry 3000: more than the filter evaluates again at once.
+fn traced_then_grown(at: usize) -> App {
+    let mut app = filter_set(traced_app(100, &[20]), "step");
+    wait_for_filter(&mut app);
+    let mut app = applied(app, &vec![Action::Down; at]);
+    let source = test_support::source(traced_log(3100, &[20, 3000]).as_bytes());
+    app.file_changed(FileChange::Grew(source));
+    assert!(app.filtering());
+    assert_eq!(selected(&app), Some(at));
+    app
+}
+
+#[test]
+fn an_exception_jump_waits_for_the_filter_and_lands_on_the_exception_it_finds() {
+    let mut app = pressed(traced_then_grown(50), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(50), Some("searching…")));
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(3000), None));
+    assert!(!app.following());
+}
+
+#[test]
+fn an_exception_jump_wraps_only_once_the_filter_has_evaluated_every_entry() {
+    let mut app = pressed(traced_then_grown(10), &[char_key('[')]);
+    assert_eq!(landed(&app), (Some(10), Some("searching…")));
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(3000), Some("exceptions wrapped")));
+}
+
+#[test]
+fn an_exception_jump_to_an_entry_already_evaluated_moves_at_once() {
+    let app = pressed(traced_then_grown(10), &[char_key(']')]);
+    assert_eq!(landed(&app), (Some(20), None));
+}
+
+#[test]
+fn an_exception_jump_waits_for_the_index_and_lands_on_the_exception_it_finds() {
+    let mut app = unindexed_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    app.resize(10);
+    let mut app = pressed(app, &[char_key(']')]);
+    assert_eq!(app.notice(), Some("searching…"));
+    wait_for_index(&mut app);
+    assert_eq!(landed(&app), (Some(1), None));
+}
+
+#[test]
+fn a_bookmark_jump_waits_for_the_filter_and_lands_on_the_bookmark_it_finds() {
+    let app = filter_set(marked(traced_app(100, &[]), &[80]), "step");
+    let mut app = pressed(app, &[char_key('\'')]);
+    assert_eq!(app.notice(), Some("searching…"));
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(80), None));
+}
+
+#[test]
+fn a_jump_that_finds_nothing_once_the_filter_is_done_says_so() {
+    for (jump, none) in [(']', "no exceptions"), ('\'', "no bookmarks")] {
+        // Entry 3, `step 4`, has the only trace and the only bookmark.
+        let app = filter_set(marked(traced_app(100, &[3]), &[3]), "step 5");
+        let mut app = pressed(app, &[char_key(jump)]);
+        assert_eq!(app.notice(), Some("searching…"), "{jump}");
+        wait_for_filter(&mut app);
+        assert_eq!(app.notice(), Some(none), "{jump}");
+    }
+}
+
+#[test]
+fn a_key_while_a_jump_waits_cancels_it() {
+    let mut app = pressed(traced_then_grown(50), &[char_key(']'), char_key('j')]);
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(51), None));
+}
+
+#[test]
+fn a_click_while_a_jump_waits_cancels_it() {
+    let app = mapped(pressed(traced_then_grown(50), &[char_key(']')]));
+    let top = app.viewport().top();
+    let mut app = clicked(app, &[(4, 0)]);
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(top + 3), None));
+}
+
+#[test]
+fn a_filter_change_while_a_jump_waits_cancels_it() {
+    let app = pressed(traced_then_grown(50), &[char_key(']')]);
+    let mut app = applied(app, &[Action::ToggleLevel(Level::Debug)]);
+    wait_for_filter(&mut app);
+    assert_eq!(landed(&app), (Some(0), None));
 }
 
 // --- histogram ---
@@ -4196,6 +4503,14 @@ fn export_before_polling(dir: &tempfile::TempDir) -> App {
     exported_to(app, "out.log")
 }
 
+/// Asserts that `app` says its export to `out.log` in `dir` is cancelled and that no
+/// file is written once the index and the filters are done.
+fn assert_export_cancelled(mut app: App, dir: &tempfile::TempDir) {
+    assert_eq!(app.notice(), Some("export cancelled"));
+    wait_for_filter(&mut app);
+    assert!(!dir.path().join("out.log").exists());
+}
+
 #[test]
 fn export_waits_for_the_index_and_the_filters() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -4214,21 +4529,15 @@ fn export_waits_for_the_index_and_the_filters() {
 #[test]
 fn esc_cancels_a_waiting_export() {
     let dir = tempfile::TempDir::new().unwrap();
-    let mut app = pressed(export_before_polling(&dir), &[key(KeyCode::Esc)]);
-    assert_eq!(app.notice(), Some("export cancelled"));
-    wait_for_filter(&mut app);
-    app.poll_index();
-    assert!(!dir.path().join("out.log").exists());
+    let app = pressed(export_before_polling(&dir), &[key(KeyCode::Esc)]);
+    assert_export_cancelled(app, &dir);
 }
 
 #[test]
 fn changing_the_filters_cancels_a_waiting_export() {
     let dir = tempfile::TempDir::new().unwrap();
-    let mut app = pressed(export_before_polling(&dir), &[char_key('x')]);
-    assert_eq!(app.notice(), Some("export cancelled"));
-    wait_for_filter(&mut app);
-    app.poll_index();
-    assert!(!dir.path().join("out.log").exists());
+    let app = pressed(export_before_polling(&dir), &[char_key('x')]);
+    assert_export_cancelled(app, &dir);
 }
 
 #[test]
@@ -4357,6 +4666,108 @@ fn export_failure_shows_in_the_notice() {
         Some("export failed: Permission denied (os error 13)")
     );
     assert_eq!(app.panel(), None);
+}
+
+/// [`export_before_polling`], with a file written to `out.log` while the export
+/// waits, and the index and the filter done since.
+fn file_appeared_while_waiting(dir: &tempfile::TempDir) -> App {
+    let mut app = export_before_polling(dir);
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    wait_for_filter(&mut app);
+    app
+}
+
+#[test]
+fn waiting_export_asks_before_overwriting_a_file_that_appeared() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_appeared_while_waiting(&dir);
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, true)));
+    assert_eq!(app.notice(), None);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn y_overwrites_a_file_that_appeared_while_the_export_waited() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = pressed(file_appeared_while_waiting(&dir), &[char_key('y')]);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        [FAILED, EXCEPTION, FRAME, DONE, FRAME].concat()
+    );
+}
+
+#[test]
+fn file_that_appeared_is_asked_about_once_the_open_panel_closes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = export_before_polling(&dir);
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    let mut app = pressed(app, &[char_key('/'), char_key('a')]);
+    wait_for_filter(&mut app);
+    assert_eq!(search_prompt(&app).0.pattern, "a");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out.log")).unwrap(),
+        "old\n"
+    );
+    let mut app = pressed(app, &[key(KeyCode::Esc)]);
+    app.poll_index();
+    assert_eq!(app.panel(), Some(&export_prompt("out.log", None, true)));
+}
+
+#[test]
+fn waiting_export_over_a_file_agreed_to_does_not_ask_again() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(dir.path().join("out.log"), "old\n").unwrap();
+    let mut app = pressed(export_before_polling(&dir), &[char_key('y')]);
+    wait_for_filter(&mut app);
+    assert_eq!(app.panel(), None);
+    assert_eq!(app.notice(), Some("exported 2 entries to out.log"));
+}
+
+/// Bytes a [`FailingFile`] takes before it fails.
+const WRITTEN_BEFORE_FAILING: usize = 10;
+
+/// A file that takes [`WRITTEN_BEFORE_FAILING`] bytes, then fails every write as a
+/// full disk does.
+struct FailingFile {
+    file: File,
+    left: usize,
+}
+
+impl Write for FailingFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.left == 0 {
+            return Err(io::Error::other("no space left on device"));
+        }
+        let written = self.file.write(&buf[..buf.len().min(self.left)])?;
+        self.left -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+fn create_failing_file(path: &Path) -> io::Result<Box<dyn Write>> {
+    Ok(Box::new(FailingFile {
+        file: File::create(path)?,
+        left: WRITTEN_BEFORE_FAILING,
+    }))
+}
+
+#[test]
+fn export_failing_half_way_removes_the_partial_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut app = exporting_traces(&dir);
+    app.set_export_opener(create_failing_file);
+    let app = exported_to(app, "out.log");
+    assert_eq!(app.notice(), Some("export failed: no space left on device"));
+    assert!(!dir.path().join("out.log").exists());
 }
 
 // --- mouse ---
@@ -4655,7 +5066,7 @@ fn help_scroll(app: &App) -> Option<usize> {
 
 /// How many lines the help overlay has.
 fn help_lines() -> usize {
-    crate::keymap::help().len()
+    Keymap::default().help().len()
 }
 
 /// `app` with the help overlay open, showing `height` lines at a time, and `keys`
@@ -4766,4 +5177,35 @@ fn help_overlay_opens_again_at_its_first_line() {
 fn f1_does_nothing_in_another_panel() {
     let app = pressed(hundred_lines(), &[key(KeyCode::F(2)), key(KeyCode::F(1))]);
     assert!(matches!(app.panel(), Some(Panel::Levels(_))));
+}
+
+// --- configuration ---
+
+/// A remapped action answers to its new key and no longer to its default `T`.
+#[test]
+fn configured_keys_decide_what_keys_do() {
+    let mut app = hundred_lines();
+    app.configure(&Config::parse("[keys]\ntoggle_thread = \"v\"\n").unwrap());
+    app.key(char_key('v'));
+    assert!(app.shows_thread());
+    app.key(char_key('T'));
+    assert!(app.shows_thread());
+}
+
+#[test]
+fn configure_takes_the_ui_toggles_from_the_config() {
+    for on in [true, false] {
+        let text = format!(
+            "[ui]\nshow_thread = {on}\nshow_histogram = {on}\nshow_line_numbers = {on}\nwrap = {on}\n"
+        );
+        let mut app = hundred_lines();
+        app.configure(&Config::parse(&text).unwrap());
+        let shown = (
+            app.shows_thread(),
+            app.shows_histogram(),
+            app.shows_line_numbers(),
+            app.wraps(),
+        );
+        assert_eq!(shown, (on, on, on, on));
+    }
 }

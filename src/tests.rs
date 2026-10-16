@@ -11,6 +11,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::Args;
+use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
 use crate::format::{Level, Preset};
 use crate::test_support;
@@ -50,16 +51,27 @@ impl Outcome {
     }
 }
 
-fn jlv_with_version<S: AsRef<OsStr>>(version: &str, args: &[S]) -> Outcome {
+/// `start` with `version` and the environment variables `var` gives.
+fn jlv_in<S: AsRef<OsStr>>(
+    version: &str,
+    var: impl Fn(&str) -> Option<OsString>,
+    args: &[S],
+) -> Outcome {
     let argv = std::iter::once(OsString::from("jlv"))
         .chain(args.iter().map(|arg| arg.as_ref().to_owned()));
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    let result = start(argv, version, &mut stdout, &mut stderr);
+    let result = start(argv, version, var, &mut stdout, &mut stderr);
     Outcome {
         result,
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     }
+}
+
+/// `start` in an environment without `XDG_CONFIG_HOME` and `HOME`, so that no
+/// configuration file is read but the one `--config` names.
+fn jlv_with_version<S: AsRef<OsStr>>(version: &str, args: &[S]) -> Outcome {
+    jlv_in(version, |_| None, args)
 }
 
 fn jlv<S: AsRef<OsStr>>(args: &[S]) -> Outcome {
@@ -239,29 +251,95 @@ fn empty_regular_file_is_handed_over() {
     assert_eq!(launch.source.bytes(), b"");
 }
 
-#[test]
-fn mouse_is_captured_by_default() {
-    assert!(captures_mouse(&defaults("app.log")));
+fn config(text: &str) -> Config {
+    Config::parse(text).unwrap()
 }
 
 #[test]
-fn no_mouse_leaves_mouse_capture_off() {
+fn mouse_is_captured_by_default() {
+    assert!(captures_mouse(&defaults("app.log"), &Config::default()));
+}
+
+#[test]
+fn config_can_turn_mouse_capture_off() {
+    let config = config("[ui]\nmouse = false\n");
+    assert!(!captures_mouse(&defaults("app.log"), &config));
+}
+
+#[test]
+fn no_mouse_turns_mouse_capture_off_whatever_the_config_says() {
     let args = Args {
         no_mouse: true,
         ..defaults("app.log")
     };
-    assert!(!captures_mouse(&args));
+    assert!(!captures_mouse(&args, &config("[ui]\nmouse = true\n")));
 }
 
 /// `initial_filters` for `-l` and `-c` as given, the rest of the command line at its
-/// defaults.
-fn initial(level: Option<&[Level]>, class: Option<&[&str]>) -> Option<Filters> {
+/// defaults, with `config`.
+fn initial_with(
+    config: &Config,
+    level: Option<&[Level]>,
+    class: Option<&[&str]>,
+) -> Option<Filters> {
     let args = Args {
         level: level.map(Levels::only),
         class: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
         ..defaults("app.log")
     };
-    initial_filters(&args)
+    initial_filters(&args, config)
+}
+
+/// `initial_filters` for `-l` and `-c` as given with the default configuration.
+fn initial(level: Option<&[Level]>, class: Option<&[&str]>) -> Option<Filters> {
+    initial_with(&Config::default(), level, class)
+}
+
+const EXCLUDES_HIBERNATE: &str = "[filters]\ndefault_class_excludes = [\"org.hibernate.SQL\"]\n";
+
+#[test]
+fn config_class_excludes_seed_the_class_filter() {
+    let filters = initial_with(&config(EXCLUDES_HIBERNATE), None, None).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (
+            Levels::default(),
+            Classes::parse(["!org.hibernate.SQL"]).unwrap()
+        )
+    );
+}
+
+#[test]
+fn class_flag_replaces_the_config_class_excludes() {
+    let filters = initial_with(&config(EXCLUDES_HIBERNATE), None, Some(&["com.myco.*"])).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (Levels::default(), Classes::parse(["com.myco.*"]).unwrap())
+    );
+}
+
+#[test]
+fn level_flag_keeps_the_config_class_excludes() {
+    let filters = initial_with(&config(EXCLUDES_HIBERNATE), Some(&[Level::Warn]), None).unwrap();
+    assert_eq!(
+        levels_and_classes(filters),
+        (
+            Levels::only(&[Level::Warn]),
+            Classes::parse(["!org.hibernate.SQL"]).unwrap()
+        )
+    );
+}
+
+#[test]
+fn watcher_polls_as_often_as_the_config_says_and_uses_notify() {
+    let config = config("[follow]\npoll_interval_ms = 1000\n");
+    assert_eq!(
+        watch_options(&config),
+        follow::Options {
+            notify: true,
+            poll: Duration::from_secs(1),
+        }
+    );
 }
 
 /// The levels and class rules of `filters`, failing the test if any other filter is on.
@@ -331,6 +409,8 @@ fn without_since_there_is_no_initial_time_filter() {
 fn every_option_is_handed_over() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, "app.log");
+    let config = dir.path().join("jlv.toml");
+    fs::write(&config, "").unwrap();
     let launch = jlv(&[
         OsStr::new("-f"),
         OsStr::new("logback-basic"),
@@ -343,7 +423,7 @@ fn every_option_is_handed_over() {
         OsStr::new("-s"),
         OsStr::new("10m"),
         OsStr::new("--config"),
-        OsStr::new("/nonexistent/config.toml"),
+        config.as_os_str(),
         file.as_os_str(),
     ])
     .launch();
@@ -357,9 +437,92 @@ fn every_option_is_handed_over() {
             class: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
             since: Some(TimeSpec::parse("10m").unwrap()),
             no_mouse: true,
-            config: Some(PathBuf::from("/nonexistent/config.toml")),
+            config: Some(config),
         }
     );
+}
+
+// --- the configuration file ---
+
+/// `start` in an environment where only `XDG_CONFIG_HOME` is set, to `config_home`.
+fn jlv_with_config_home<S: AsRef<OsStr>>(config_home: &Path, args: &[S]) -> Outcome {
+    let config_home = config_home.as_os_str().to_owned();
+    jlv_in(
+        "0.3.0",
+        move |name| (name == "XDG_CONFIG_HOME").then(|| config_home.clone()),
+        args,
+    )
+}
+
+/// Writes `text` to `jlv/config.toml` under `config_home`, where jlv looks for its
+/// configuration file with `XDG_CONFIG_HOME` set to it, and returns the file's path.
+fn default_config_file(config_home: &TempDir, text: &str) -> PathBuf {
+    let path = config_home.path().join("jlv/config.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn without_a_config_file_jlv_runs_on_the_defaults() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    let launch = jlv_with_config_home(config_home.path(), &[&file]).launch();
+    assert_eq!(launch.config, Config::default());
+}
+
+#[test]
+fn config_file_is_read_from_the_default_path() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    default_config_file(&config_home, "[ui]\nwrap = true\n");
+    let launch = jlv_with_config_home(config_home.path(), &[&file]).launch();
+    assert_eq!(launch.config, config("[ui]\nwrap = true\n"));
+}
+
+#[test]
+fn config_flag_names_the_file_read_instead_of_the_default_one() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    default_config_file(&config_home, "[ui]\nshow_thread = true\n");
+    let given = dir.path().join("jlv.toml");
+    fs::write(&given, "[ui]\nwrap = true\n").unwrap();
+    let args = [OsStr::new("--config"), given.as_os_str(), file.as_os_str()];
+    let launch = jlv_with_config_home(config_home.path(), &args).launch();
+    assert_eq!(launch.config, config("[ui]\nwrap = true\n"));
+}
+
+#[test]
+fn missing_config_flag_file_exits_with_1_naming_it() {
+    let dir = TempDir::new().unwrap();
+    let file = log_file(&dir, "app.log");
+    let missing = dir.path().join("jlv.toml");
+    let out = jlv(&[
+        OsStr::new("--config"),
+        missing.as_os_str(),
+        file.as_os_str(),
+    ]);
+    assert_eq!(out.exit_code(), Some(1));
+    let prefix = format!("jlv: {}: ", missing.display());
+    assert!(out.stderr.starts_with(&prefix), "{:?}", out.stderr);
+}
+
+#[test]
+fn invalid_config_file_exits_with_1_naming_the_file_the_key_and_the_line() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    let path = default_config_file(&config_home, "[ui]\nwarp = true\n");
+    let out = jlv_with_config_home(config_home.path(), &[&file]);
+    assert_eq!(out.exit_code(), Some(1));
+    let prefix = format!("jlv: {}: ", path.display());
+    assert!(out.stderr.starts_with(&prefix), "{:?}", out.stderr);
+    for needle in ["warp", "line 2"] {
+        assert!(
+            out.stderr.contains(needle),
+            "{needle:?} in {:?}",
+            out.stderr
+        );
+    }
 }
 
 #[test]
@@ -609,6 +772,7 @@ proptest! {
 // --- event loop ---
 
 mod event_loop {
+    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::io;
     use std::thread;
@@ -624,8 +788,8 @@ mod event_loop {
     use crate::event_loop;
     use crate::format::Preset;
     use crate::test_support::{
-        LARGE_INDEX_DEADLINE, app, char_key, following_app, hide_line_numbers, numbered_log, row,
-        unindexed_app,
+        LARGE_INDEX_DEADLINE, app, char_key, following_app, gzip, gzip_app, hide_line_numbers,
+        numbered_log, row, unindexed_app, wait_for_index,
     };
     use crate::ui::Theme;
 
@@ -655,7 +819,13 @@ mod event_loop {
     fn q_ends_the_loop() {
         let mut terminal = terminal();
         let mut app = hundred_lines();
-        let result = event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q")));
+        let result = event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(keys("q")),
+        );
         assert!(result.is_ok(), "{result:?}");
         assert!(app.should_quit());
     }
@@ -664,7 +834,14 @@ mod event_loop {
     fn first_screen_is_drawn_before_waiting_for_a_key() {
         let mut terminal = terminal();
         let mut app = hundred_lines();
-        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(keys("q")),
+        )
+        .unwrap();
         assert_eq!(
             row(&terminal, 1),
             "▶12:00:00.001 [main] INFO  com.example.App - step 1"
@@ -677,7 +854,14 @@ mod event_loop {
         // Several chunks of the index, so it is far from complete at the first screen.
         let mut app = following_app(Preset::Raw, numbered_log(10_000).as_bytes());
         hide_line_numbers(&mut app);
-        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("q"))).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(keys("q")),
+        )
+        .unwrap();
         assert_eq!(
             row(&terminal, 1),
             " 12:00:00.9979 [main] INFO  com.example.App - step 9979"
@@ -692,7 +876,14 @@ mod event_loop {
     fn keys_are_applied_and_the_screen_redrawn() {
         let mut terminal = terminal();
         let mut app = hundred_lines();
-        event_loop(&mut terminal, &mut app, Theme::Styled, script(keys("Gq"))).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(keys("Gq")),
+        )
+        .unwrap();
         assert_eq!(app.viewport().selected(), Some(99));
         assert_eq!(
             row(&terminal, 22),
@@ -709,7 +900,14 @@ mod event_loop {
             Event::Key(char_key('q')),
             Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         ];
-        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(events),
+        )
+        .unwrap();
         match app.panel() {
             Some(Panel::Classes(panel)) => assert_eq!(panel.lines, ["q"]),
             other => panic!("the class panel is not open: {other:?}"),
@@ -734,7 +932,14 @@ mod event_loop {
             Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             Event::Key(char_key('q')),
         ];
-        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(events),
+        )
+        .unwrap();
         assert_eq!(app.viewport().selected(), Some(1));
     }
 
@@ -749,7 +954,14 @@ mod event_loop {
             modifiers: KeyModifiers::NONE,
         };
         let events = vec![Event::Mouse(click), Event::Key(char_key('q'))];
-        event_loop(&mut terminal, &mut app, Theme::Styled, script(events)).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            script(events),
+        )
+        .unwrap();
         assert_eq!(app.viewport().selected(), Some(3));
     }
 
@@ -757,7 +969,14 @@ mod event_loop {
     fn theme_is_used_for_drawing() {
         let mut terminal = terminal();
         let mut app = hundred_lines();
-        event_loop(&mut terminal, &mut app, Theme::Plain, script(keys("q"))).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Plain,
+            Instant::now,
+            script(keys("q")),
+        )
+        .unwrap();
         let empty = ratatui::buffer::Cell::EMPTY.style();
         assert!(
             terminal
@@ -778,23 +997,76 @@ mod event_loop {
             reads += 1;
             Err(io::Error::other("terminal went away"))
         };
-        let err = event_loop(&mut terminal, &mut app, Theme::Styled, failing).unwrap_err();
+        let err = event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            failing,
+        )
+        .unwrap_err();
         assert_eq!(err.to_string(), "terminal went away");
         assert_eq!(reads, 1);
     }
 
+    /// A gzip file, whose dot never changes.
     #[test]
     fn waits_without_a_timeout_once_the_index_is_complete() {
         let mut terminal = terminal();
-        let mut app = hundred_lines();
+        let mut app = gzip_app(&gzip(numbered_log(100).as_bytes()));
+        wait_for_index(&mut app);
         let mut waits = Vec::new();
         let mut events = script(keys("jq"));
-        event_loop(&mut terminal, &mut app, Theme::Styled, |timeout| {
-            waits.push(timeout);
-            events(timeout)
-        })
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            Instant::now,
+            |timeout| {
+                waits.push(timeout);
+                events(timeout)
+            },
+        )
         .unwrap();
         assert_eq!(waits, [None, None]);
+    }
+
+    /// The terminal waits out every timeout on a clock of its own, and nothing comes;
+    /// asked to wait without a timeout, it answers `q`.
+    #[test]
+    fn waits_until_the_dot_changes_and_redraws_it() {
+        let mut terminal = terminal();
+        let mut app = following_app(Preset::Raw, numbered_log(3).as_bytes());
+        hide_line_numbers(&mut app);
+        wait_for_index(&mut app);
+        let time = Cell::new(Instant::now());
+        let mut waits = Vec::new();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            Theme::Styled,
+            || time.get(),
+            |timeout| {
+                waits.push(timeout);
+                Ok(match timeout {
+                    Some(timeout) => {
+                        time.set(time.get() + timeout);
+                        None
+                    }
+                    None => Some(Event::Key(char_key('q'))),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            waits,
+            [
+                Some(Duration::from_secs(10)),
+                Some(Duration::from_secs(290)),
+                None
+            ]
+        );
+        assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 153 B ─ Raw ─ FOLLOW ○");
     }
 
     #[test]
@@ -803,7 +1075,7 @@ mod event_loop {
         let mut app = hundred_lines();
         let mut events = VecDeque::from([None, Some(Event::Key(char_key('q')))]);
         let mut reads = 0;
-        event_loop(&mut terminal, &mut app, Theme::Styled, |_| {
+        event_loop(&mut terminal, &mut app, Theme::Styled, Instant::now, |_| {
             reads += 1;
             Ok(events.pop_front().expect("read past the last event"))
         })
@@ -817,17 +1089,27 @@ mod event_loop {
         unindexed_app(Preset::LogbackBasic, numbered_log(40_000).as_bytes())
     }
 
+    /// A clock that stands still, so that the file stays live and its dot changes
+    /// 10 s from now.
+    fn frozen() -> impl FnMut() -> Instant {
+        let now = Instant::now();
+        move || now
+    }
+
     /// Waits as a terminal would, up to the timeout, and says nothing came. Asked to
-    /// wait without a timeout, it answers `q`; so does it once indexing should long
-    /// be over, to end a loop that never gets there.
-    fn quit_once_waiting_without_timeout(
+    /// wait longer than 100 ms, or without a timeout, it answers `q`; so does it once
+    /// indexing should long be over, to end a loop that never gets there.
+    fn quit_once_done_indexing(
         waits: &mut Vec<Option<Duration>>,
     ) -> impl FnMut(Option<Duration>) -> io::Result<Option<Event>> + '_ {
         let started = Instant::now();
         move |timeout| {
             waits.push(timeout);
             match timeout {
-                Some(timeout) if started.elapsed() < LARGE_INDEX_DEADLINE => {
+                Some(timeout)
+                    if timeout <= Duration::from_millis(100)
+                        && started.elapsed() < LARGE_INDEX_DEADLINE =>
+                {
                     thread::sleep(timeout.min(Duration::from_millis(10)));
                     Ok(None)
                 }
@@ -845,11 +1127,13 @@ mod event_loop {
             &mut terminal,
             &mut app,
             Theme::Styled,
-            quit_once_waiting_without_timeout(&mut waits),
+            frozen(),
+            quit_once_done_indexing(&mut waits),
         )
         .unwrap();
         let (last, before) = waits.split_last().unwrap();
-        assert_eq!(*last, None);
+        // then only until the dot changes
+        assert_eq!(*last, Some(Duration::from_secs(10)));
         assert!(!before.is_empty());
         assert!(
             before.iter().all(|wait| wait
@@ -868,14 +1152,15 @@ mod event_loop {
             &mut terminal,
             &mut app,
             Theme::Styled,
-            quit_once_waiting_without_timeout(&mut waits),
+            frozen(),
+            quit_once_done_indexing(&mut waits),
         )
         .unwrap();
         assert!(app.progress().is_complete());
         assert_eq!(app.viewport().total(), 40_000);
         assert_eq!(
             row(&terminal, 0),
-            "jlv ─ app.log ─ 2.2 MB ─ Logback basic                                   I:40000"
+            "jlv ─ app.log ─ 2.2 MB ─ Logback basic ─ PAUSED ●                        I:40000"
         );
         assert_eq!(
             row(&terminal, 1),
