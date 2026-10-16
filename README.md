@@ -14,6 +14,12 @@ and over SSH. It opens multi-gigabyte files without reading them into memory.
 Prebuilt binaries for Linux x86_64 (static, musl), plus `.deb` and `.rpm`
 packages, are on the [releases page](https://github.com/piterx93/jlv/releases).
 
+With Homebrew:
+
+```sh
+brew install piterx93/tap/jlv
+```
+
 With Rust 1.88 or newer:
 
 ```sh

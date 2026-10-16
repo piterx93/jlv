@@ -1,12 +1,18 @@
 [package]
 name = "jlv"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Terminal log viewer for Java application logs"
 authors = ["Piotr Owczarek <piter19993@gmail.com>"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/piterx93/jlv"
+homepage = "https://github.com/piterx93/jlv"
+readme = "README.md"
+keywords = ["log", "viewer", "tui", "java", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
 publish = false
+exclude = ["docs/demos/", "demo-wildfly.log", "mutants.out*", "scripts/", ".github/"]
 
 [dependencies]
 arboard = { version = "3.6.1", default-features = false }
