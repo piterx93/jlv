@@ -11,7 +11,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jlv::follow::{Event, Options, Watcher};
-use notify::{RecursiveMode, Watcher as _};
 use tempfile::TempDir;
 
 /// How long a test waits for the watcher to catch up: far longer than it takes, so
@@ -296,8 +295,13 @@ fn looks_once_at_start_and_then_only_when_woken() {
     follower.assert_quiet(Duration::from_millis(500));
 }
 
+// inotify reports every open of the file, so a look shows up; FSEvents on macOS
+// reports no opens but replays events from before the listener started.
+#[cfg(target_os = "linux")]
 #[test]
 fn stays_idle_with_notify_while_the_file_does_not_change() {
+    use notify::{RecursiveMode, Watcher as _};
+
     let options = Options {
         notify: true,
         poll: Duration::from_secs(3600),
@@ -313,13 +317,8 @@ fn stays_idle_with_notify_while_the_file_does_not_change() {
     listener
         .watch(dir.path(), RecursiveMode::NonRecursive)
         .unwrap();
-    // FSEvents on macOS may still report the file's creation, which happened before
-    // the listener started; the follower never creates the file, so that is no look.
-    let until = Instant::now() + Duration::from_millis(500);
-    while let Ok(event) = events.recv_timeout(until.saturating_duration_since(Instant::now())) {
-        if !matches!(&event, Ok(event) if event.kind.is_create()) {
-            panic!("the directory was touched: {event:?}");
-        }
+    if let Ok(event) = events.recv_timeout(Duration::from_millis(500)) {
+        panic!("the directory was touched: {event:?}");
     }
 }
 
