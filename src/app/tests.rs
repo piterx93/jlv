@@ -3892,6 +3892,13 @@ fn bookmark_jumps_pass_over_the_entries_the_filters_hide() {
 }
 
 #[test]
+fn a_backward_bookmark_jump_passes_over_a_bookmark_the_filters_hide() {
+    let app = applied(hiding_errors(bookmarked_at(&[0, 1], 0)), &[Action::Bottom]);
+    let app = pressed(app, &[char_key('"')]);
+    assert_eq!(landed(&app), (Some(0), None));
+}
+
+#[test]
 fn a_bookmark_the_filters_hide_is_kept_for_when_they_show_it_again() {
     let app = hiding_errors(bookmarked_at(&[1, 3], 0));
     assert_eq!(bookmarks(&app), [2]);
@@ -3920,6 +3927,17 @@ fn cycling_the_preset_moves_a_bookmark_to_the_entry_that_holds_its_offset() {
     wait_for_index(&mut app);
     assert_eq!(app.settings().preset, Preset::Logback);
     assert_eq!(bookmarks(&app), [1, 3]);
+}
+
+#[test]
+fn bookmark_jumps_land_on_the_entry_that_holds_a_bookmark_partway_into_it() {
+    // Row 2 under `Raw` lies inside Logback's entry 1, not at its start.
+    let mut app = cycled(marked(exception_lines(), &[2]));
+    wait_for_index(&mut app);
+    for (from, quote) in [(Action::Top, '\''), (Action::Bottom, '"')] {
+        app = pressed(applied(app, &[from]), &[char_key(quote)]);
+        assert_eq!(landed(&app), (Some(1), None), "{quote}");
+    }
 }
 
 #[test]

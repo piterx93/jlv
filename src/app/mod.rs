@@ -2408,10 +2408,7 @@ impl App {
             self.notice = Some(Cow::Borrowed("no bookmarks"));
             return;
         }
-        let found = match jump {
-            Seek::Exception => self.find_shown(backward, Record::has_exception),
-            Seek::Bookmark => self.find_shown(backward, |record| self.is_bookmarked(record)),
-        };
+        let found = self.find_shown(jump, backward);
         let settled = self.progress.is_complete() && !self.filtering();
         if matches!(found, Some((_, false))) || settled {
             let (wrapped, none) = match jump {
@@ -2456,15 +2453,11 @@ impl App {
         self.notice = did_wrap.then_some(Cow::Borrowed(wrapped));
     }
 
-    /// The next shown entry whose record satisfies `matches`, up the rows if
-    /// `backward`, and whether the walk wrapped around to reach it. It walks the shown
-    /// entries rather than the index so that it also covers the file's last entries
-    /// shown before the index is complete.
-    fn find_shown(
-        &self,
-        backward: bool,
-        matches: impl Fn(&Record) -> bool,
-    ) -> Option<(usize, bool)> {
+    /// The next shown entry that `jump` looks for, up the rows if `backward`, and
+    /// whether the walk wrapped around to reach it. It searches the shown entries
+    /// rather than the index so that it also covers the file's last entries shown
+    /// before the index is complete.
+    fn find_shown(&self, jump: Seek, backward: bool) -> Option<(usize, bool)> {
         let folds = self.shown_folds();
         let count = folds.entries();
         let current = self
@@ -2477,22 +2470,13 @@ impl App {
         } else {
             current.map_or(0, |entry| entry + 1)
         };
-        // One guard for the whole scan: a lock per entry would queue behind the indexer.
+        // One guard for the whole search: a lock per entry would queue behind the indexer.
         let index = read(&self.index);
-        let hit = |entry: &usize| {
-            let record = match (&self.opening, &self.filter) {
-                (Opening::Tail(records, _), _) => &records[*entry],
-                (_, Some(filter)) => &index.records[filter.entry(*entry)],
-                (_, None) => &index.records[*entry],
-            };
-            matches(record)
-        };
-        let find = |mut entries: Range<usize>| {
-            if backward {
-                entries.rfind(hit)
-            } else {
-                entries.find(hit)
-            }
+        let record = |entry: usize| self.record_in(&index, entry);
+        let find = |mut entries: Range<usize>| match jump {
+            Seek::Exception if backward => entries.rfind(|&e| record(e).has_exception()),
+            Seek::Exception => entries.find(|&e| record(e).has_exception()),
+            Seek::Bookmark => self.find_bookmarked(entries, backward, record),
         };
         let (first, second) = if backward {
             (0..split, split..count)
@@ -2502,6 +2486,55 @@ impl App {
         find(first)
             .map(|entry| (entry, false))
             .or_else(|| find(second).map(|entry| (entry, true)))
+    }
+
+    /// The first (last, if `backward`) of the shown `entries` holding a bookmark. The
+    /// shown records are in file order, so each bookmark is mapped to its entry by
+    /// binary search instead of looking at every entry.
+    fn find_bookmarked<'a>(
+        &self,
+        entries: Range<usize>,
+        backward: bool,
+        record: impl Fn(usize) -> &'a Record,
+    ) -> Option<usize> {
+        if entries.is_empty() {
+            return None;
+        }
+        let at = |i: usize| record(entries.start + i).bytes();
+        let len = entries.len();
+        if backward {
+            let mut limit = at(len - 1).end;
+            while let Some(&mark) = self.bookmarks.range(..limit).next_back() {
+                // The last entry starting at or before the bookmark.
+                let i = partition_point(len, |i| at(i).start <= mark).checked_sub(1)?;
+                if mark < at(i).end {
+                    return Some(entries.start + i);
+                }
+                limit = mark;
+            }
+        } else {
+            let mut from = at(0).start;
+            while let Some(&mark) = self.bookmarks.range(from..).next() {
+                // The first entry ending after the bookmark.
+                let i = partition_point(len, |i| at(i).end <= mark);
+                if i == len {
+                    return None;
+                }
+                if at(i).start <= mark {
+                    return Some(entries.start + i);
+                }
+                from = at(i).start;
+            }
+        }
+        None
+    }
+
+    fn record_in<'a>(&'a self, index: &'a Indexed<Source>, entry: usize) -> &'a Record {
+        match (&self.opening, &self.filter) {
+            (Opening::Tail(records, _), _) => &records[entry],
+            (_, Some(filter)) => &index.records[filter.entry(entry)],
+            (_, None) => &index.records[entry],
+        }
     }
 
     /// The index entry that viewport row `row` shows, `None` for the truncation row and
