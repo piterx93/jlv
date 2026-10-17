@@ -12,7 +12,7 @@ and over SSH. It opens multi-gigabyte files without reading them into memory.
 ## Install
 
 Prebuilt binaries for Linux x86_64 (static, musl), plus `.deb` and `.rpm`
-packages, are on the [releases page](https://github.com/piterx93/jlv/releases).
+packages, are on the [releases page](https://github.com/piterx93/vilog/releases).
 
 With Homebrew:
 
@@ -23,7 +23,7 @@ brew install piterx93/tap/jlv
 With Rust 1.88 or newer:
 
 ```sh
-cargo install --locked --git https://github.com/piterx93/jlv
+cargo install --locked --git https://github.com/piterx93/vilog
 ```
 
 Linux x86_64 is the only target CI builds and tests. jlv is developed on macOS

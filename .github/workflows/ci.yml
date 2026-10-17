@@ -97,7 +97,7 @@ jobs:
       - name: Package
         run: |
           mkdir dist
-          tar -czf "dist/jlv-$VILOG_VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" vilog
+          tar -czf "dist/vilog-$VILOG_VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" vilog
           cargo deb --no-build --no-strip --target "$TARGET" --deb-version "$PKG_VERSION" --output dist/
           cargo generate-rpm --target "$TARGET" --set-metadata "version = \"$PKG_VERSION\"" --output dist/
 
