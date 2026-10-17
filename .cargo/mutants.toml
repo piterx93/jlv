@@ -1,0 +1,117 @@
+# See [profile.mutants] in Cargo.toml.
+profile = "mutants"
+
+# main.rs only hands the command line to the library, where the logic and its tests live.
+exclude_globs = ["src/main.rs"]
+
+exclude_re = [
+    # `run` only sets up the real terminal around `event_loop`; testing it needs a tty.
+    'src/lib\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)$',
+    # The same goes for the flags `run` hands to `App::new`.
+    'src/lib\.rs:\d+:\d+: delete ! in run$',
+    # Turning mouse capture on writes to the real terminal; testing it needs a tty.
+    'src/lib\.rs:\d+:\d+: replace capture_mouse -> io::Result<\(\)> with Ok\(\(\)\)$',
+    # `System` hands `copy` the real clipboard and stdout; testing it needs a display
+    # and a terminal. `copy` itself is tested with both injected.
+    'src/clipboard/mod\.rs:\d+:\d+: replace <impl Clipboard for System>::copy -> Result<Via, CopyError> with Ok\(Default::default\(\)\)$',
+    'src/clipboard/mod\.rs:\d+:\d+: replace <impl Debug for System>::fmt -> fmt::Result with Ok\(Default::default\(\)\)$',
+    # Each byte is shifted into its own 8 bits of a group that starts at 0, so OR and
+    # XOR never see two set bits in the same place.
+    'src/clipboard/mod\.rs:\d+:\d+: replace \| with \^ in base64_into$',
+    # `at >= start` only differs for a first character wider than the whole line; the
+    # message column is at least 19 columns wide and no character is wider than 2.
+    'src/ui/table\.rs:\d+:41: replace > with >= in wrap$',
+    # Stepping from the cached line mark or from the entry's start finds the same line;
+    # the comparison only picks the shorter walk.
+    'src/app/mod\.rs:\d+:\d+: replace > with (==|<|>=) in App::entry_line$',
+    # `unfolded` is only compared with itself, before and after the entries are pushed
+    # again, so flipping whether an entry shows its lines changes no comparison.
+    'src/app/mod\.rs:\d+:61: replace > with == in unfolded$',
+    # The settling time only decides how many looks a burst of writes costs; what is
+    # read stays the same, and counting looks would make a test depend on timing.
+    'src/follow/watcher\.rs:\d+:\d+: replace \+ with - in settle$',
+    # notify resolves a relative path against the working directory, so watching the
+    # empty parent of a bare file name watches `.` just the same.
+    'src/follow/watcher\.rs:\d+:\d+: replace match guard !parent\.as_os_str\(\)\.is_empty\(\) with true in watch_parent$',
+    # Missing a stop while settling only matters when the watcher is dropped within
+    # the few milliseconds after a wakeup; a test for that would race.
+    'src/follow/watcher\.rs:\d+:\d+: replace settle -> bool with true$',
+    # Reading a regular file isn't interrupted by signals, so no test can make it so.
+    'src/follow/watcher\.rs:\d+:\d+: replace match guard err\.kind\(\) == io::ErrorKind::Interrupted with false in snapshot$',
+    # The same goes for decompressing a regular file.
+    'src/source/gzip\.rs:\d+:\d+: replace match guard err\.kind\(\) == io::ErrorKind::Interrupted with false in decompress$',
+    # flate2 reports damaged data as UnexpectedEof, InvalidInput or InvalidData; any
+    # other error would have to come from reading a regular file, which no test can make fail.
+    'src/source/gzip\.rs:\d+:\d+: replace is_damage -> bool with true$',
+    'src/source/gzip\.rs:\d+:\d+: replace match guard is_damage\(&err\) with true in decompress$',
+    # Lines that never run out make every test that reads them to the end allocate until
+    # the machine runs out of memory.
+    'src/source/mod\.rs:\d+:\d+: replace <impl Iterator for Lines<.a>>::next -> Option<&.a\[u8\]> with Some\(.*\)$',
+    # The same goes for not stepping past the newline, which yields the same line again.
+    'src/source/mod\.rs:\d+:\d+: replace \+ with [-*] in <impl Iterator for Lines<.a>>::next$',
+    # Without class rules every class passes, so reading the first line for its class
+    # only costs time; skipping it is a shortcut.
+    'src/filter/mod\.rs:\d+:\d+: replace Classes::is_empty -> bool with false$',
+    # Waiting for the engine once it has evaluated enough only waits for one more update
+    # or the deadline, which costs at most the deadline and changes no result.
+    'src/filter/mod\.rs:\d+:\d+: replace < with <= in Engine::poll_until$',
+    # With no entries found, having the engine evaluate from the end of the index on
+    # restarts it where it is, which only costs time.
+    'src/app/mod\.rs:\d+:\d+: replace > with >= in App::poll_index$',
+    # Entries pushed through a filter's catch-up are toggled to the index's fold state
+    # one by one, so starting it in the index's mode only saves memory.
+    'src/fold/mod\.rs:\d+:\d+: replace Folds::empty_like -> Folds with Default::default\(\)$',
+    # The known last dated entry is only kept or looked for again when nothing from
+    # `from` on has a timestamp, which only happens while no entry has one (an index
+    # cleared, a headless entry alone, a time-only log not dated yet): every range then
+    # hides them all. Looking again for an entry before `from` finds the same one.
+    'src/app/mod\.rs:\d+:\d+: replace match guard entry < from with true in last_dated$',
+    'src/app/mod\.rs:\d+:\d+: replace < with (==|>) in last_dated$',
+    # No date in year 0 is beyond the earliest or latest timestamp, so whichever end it
+    # would be put at is never needed.
+    'src/filter/time/mod\.rs:\d+:\d+: replace < with <= in timestamp$',
+    # An unchanged range then takes the path of a later start, where no match lies before
+    # it, so the same entries are evaluated again with the same filters.
+    'src/app/mod\.rs:\d+:\d+: replace match guard old == range with false in App::slide_time_filter$',
+    # Zero digits leave the empty string, which `parse` rejects anyway.
+    'src/filter/time/mod\.rs:\d+:\d+: replace > with >= in number$',
+    # Past the last match the jump goes to the last row, and `Viewport::goto` clamps a
+    # row past the end to the last one, so one or two rows further is the same row.
+    'src/app/mod\.rs:\d+:\d+: replace - with [/+] in App::time_row$',
+    # Skipping the scan of hidden lines for entries the count doesn't include only
+    # matters before they are counted; once counted, the marker is highlighted alike.
+    'src/app/mod\.rs:\d+:\d+: replace \|\| with && in App::hides_match$',
+    'src/app/mod\.rs:\d+:\d+: replace App::is_match -> bool with true$',
+    # The rows of the matches come in with them, so a match is never one past the
+    # last entry the rows show.
+    'src/app/mod\.rs:\d+:\d+: replace < with <= in App::entry_row$',
+    # A match ending where the message starts, or starting where it ends, is cut to an
+    # empty range, which highlights no cell.
+    'src/ui/table\.rs:\d+:\d+: replace < with <= in highlights$',
+    # Counting again from the first entry when none was dropped gives the same counts.
+    'src/app/mod\.rs:\d+:\d+: replace < with <= in HistogramState::invalidate_from$',
+    # Without taking out the re-read tail, `invalidate_from` counts again from the first
+    # entry, which gives the same counts; taking it out only spares that work.
+    'src/app/mod\.rs:\d+:\d+: replace HistogramState::uncount with \(\)$',
+    # The entries taken out are fed again right after, which bumps the version anyway.
+    'src/app/mod\.rs:\d+:\d+: replace \+= with \*= in HistogramState::uncount$',
+    # Looping on an empty chunk, at the very deadline or past it only changes how much of
+    # the frame's budget is spent; what is counted stays the same, and timing it would
+    # make a test flaky.
+    'src/app/mod\.rs:\d+:\d+: replace < with <= in App::feed_histogram$',
+    'src/app/mod\.rs:\d+:\d+: replace && with \|\| in App::feed_histogram$',
+    # Bumping the version without new entries only works the same buckets out again.
+    'src/app/mod\.rs:\d+:\d+: replace > with >= in App::feed_histogram$',
+    # Only where the search for the number of days starts: a lower start finds the same
+    # smallest number.
+    'src/histogram/mod\.rs:\d+:22: replace - with / in bucket_size$',
+    # The flags are distinct bits, so XOR gives the same value as OR.
+    'src/source/guard\.rs:\d+:\d+: replace \| with \^ in (install|on_sigbus)$',
+    # Survives only on macOS, which fills in the siginfo even without SA_SIGINFO; Linux
+    # doesn't, and the fault isn't recognised. Only a fault with the thread's stack
+    # nearly used up needs SA_ONSTACK's alternate one.
+    'src/source/guard\.rs:\d+:\d+: replace \| with & in install$',
+    # A handler that does nothing returns to an access that faults again, forever; the
+    # test hangs until the timeout.
+    'src/source/guard\.rs:\d+:\d+: replace on_sigbus with \(\)$',
+]

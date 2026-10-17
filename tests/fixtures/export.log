@@ -1,0 +1,8 @@
+2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started
+2026-10-07 12:00:01.500 [main] [31mERROR[0m com.example.OrderService - Order 42 failed
+java.lang.IllegalStateException: boom
+	at com.example.OrderService.place(OrderService.java:42)
+	at com.example.App.main(App.java:10)
+2026-10-07 12:00:02.000 [main] INFO  com.example.App - Retrying
+2026-10-07 12:00:03.000 [main] [33mWARN [0m com.example.OrderService - Order 42 slow
+2026-10-07 12:00:04.000 [main] INFO  com.example.App - Stopped

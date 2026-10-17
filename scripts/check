@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Runs every local quality gate. Run it before pushing.
+#   scripts/check                 mutation-test the changes since HEAD
+#   scripts/check origin/develop  mutation-test everything the branch changes
+#
+# Mutation testing covers edits to tracked files and staged new files, so new
+# Rust files must be staged first. CI runs no mutants, so this is the only place they run;
+# for all of them: cargo mutants --jobs 4
+set -euxo pipefail
+
+cd "$(dirname "$0")/.."
+base="${1:-HEAD}"
+
+untracked="$(git ls-files --others --exclude-standard -- '*.rs')"
+if [ -n "$untracked" ]; then
+    echo "untracked Rust files, git add them first:" >&2
+    echo "$untracked" >&2
+    exit 1
+fi
+
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo cov
+cargo test --locked --doc
+# the merge base keeps commits that landed on the base later out of the diff
+base="$(git merge-base "$base" HEAD)"
+# target/ is shared between concurrent runs, so each run gets its own diff
+mkdir -p target
+diff="$(mktemp target/mutants.XXXXXX.diff)"
+trap 'rm -f "$diff"' EXIT
+git diff "$base" > "$diff"
+cargo mutants --in-diff "$diff" --jobs 4

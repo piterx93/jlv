@@ -1,18 +1,52 @@
 [package]
 name = "jlv"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Terminal log viewer for Java application logs"
 authors = ["Piotr Owczarek <piter19993@gmail.com>"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/piterx93/jlv"
+homepage = "https://github.com/piterx93/jlv"
+readme = "README.md"
+keywords = ["log", "viewer", "tui", "java", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
 publish = false
+exclude = ["docs/demos/", "demo-wildfly.log", "mutants.out*", "scripts/", ".github/"]
 
 [dependencies]
+arboard = { version = "3.6.1", default-features = false }
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+flate2 = "1.1"
+# The bundled tz database is a fallback for systems without one, e.g. a minimal
+# container running the static binary.
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+libc = "0.2"
+memchr = "2.8"
+memmap2 = "0.9"
+notify = "8.2"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+regex = "1.11"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+toml = "1.1"
+unicode-width = "0.2"
+
+[dev-dependencies]
+# Plots and the parallel analysis would only add build time to a manual run.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+insta = "1.49"
+proptest = "1"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+# Mutants build four copies of target/ at once; without debug info each is a fraction
+# of the size.
+[profile.mutants]
+inherits = "test"
+debug = false
 
 [package.metadata.deb]
 section = "utils"
@@ -22,3 +56,11 @@ auto-req = "no"
 assets = [
     { source = "target/release/jlv", dest = "/usr/bin/jlv", mode = "755" },
 ]
+
+[[bench]]
+name = "engine"
+harness = false
+
+[[bench]]
+name = "nfr"
+harness = false

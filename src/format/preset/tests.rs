@@ -1,0 +1,1029 @@
+use std::collections::HashSet;
+use std::ops::Range;
+
+use proptest::prelude::*;
+
+use super::*;
+use crate::format::strip_ansi;
+use crate::test_support::EXAMPLES;
+
+/// Every preset but `Raw`, which comes last in [`Preset::ALL`].
+const STRUCTURED: [Preset; 6] = {
+    let [structured @ .., _raw] = Preset::ALL;
+    structured
+};
+
+/// Spring Boot's default correlation group with a trace and a span: `traceId(32)`,
+/// `spanId(16)`.
+const TRACE_AND_SPAN: &str = "6bfb3c0e8f1d4a2b9c7e5d3f1a2b4c6d-1a2b4c6d8e0f2a4b";
+
+/// The same group outside a span: blank, as wide as the ids and the space between.
+fn blank_correlation() -> String {
+    " ".repeat(32 + 1 + 16)
+}
+
+fn parser(preset: Preset) -> EntryParser {
+    preset
+        .entry_parser()
+        .unwrap_or_else(|| panic!("{preset:?} has no entry parser"))
+}
+
+fn parse(preset: Preset, line: &[u8]) -> Option<EntryHead> {
+    parser(preset).parse(line)
+}
+
+/// The columns `preset` finds in `line` as text: timestamp, level, thread, class,
+/// message.
+fn columns(preset: Preset, line: &str) -> [String; 5] {
+    let head = parse(preset, line.as_bytes())
+        .unwrap_or_else(|| panic!("{preset:?} doesn't parse {line:?}"));
+    [
+        head.timestamp,
+        head.level,
+        head.thread,
+        head.class,
+        head.message,
+    ]
+    .map(|span| String::from_utf8_lossy(&line.as_bytes()[span]).into_owned())
+}
+
+/// What goes into an entry's first line, to write it the way each preset does.
+#[derive(Debug, Clone)]
+struct Parts {
+    date: String,
+    time: String,
+    separator: char,
+    fraction: String,
+    /// Spring 3 only.
+    offset: String,
+    level: String,
+    /// Spring only.
+    pid: String,
+    /// Spring 3 only.
+    app: Option<String>,
+    /// Spring 3 only: the correlation group Micrometer Tracing adds after the thread,
+    /// without its brackets.
+    correlation: Option<String>,
+    thread: String,
+    class: String,
+    /// Logback only: `%-40logger` instead of `%logger`. Spring always pads to 40.
+    pad_class: bool,
+    /// Logback only: `-` or `--`.
+    dashes: &'static str,
+    message: String,
+}
+
+impl Default for Parts {
+    fn default() -> Self {
+        Self {
+            date: "2026-10-07".into(),
+            time: "12:00:00".into(),
+            separator: '.',
+            fraction: "123".into(),
+            offset: "+02:00".into(),
+            level: "INFO".into(),
+            pid: "12345".into(),
+            app: Some("myapp".into()),
+            correlation: None,
+            thread: "main".into(),
+            class: "com.example.App".into(),
+            pad_class: false,
+            dashes: "-",
+            message: "Started".into(),
+        }
+    }
+}
+
+/// A line being written, piece by piece.
+#[derive(Default)]
+struct Line(String);
+
+impl Line {
+    /// Appends `text` and returns where it landed.
+    fn push(&mut self, text: &str) -> Range<usize> {
+        let start = self.0.len();
+        self.0.push_str(text);
+        start..self.0.len()
+    }
+}
+
+/// Spaces that pad `text` to `width` characters.
+fn padding(text: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(text.chars().count()))
+}
+
+/// `parts` written as `preset`'s pattern writes an entry's first line, with the
+/// columns `parse` should find in it.
+fn entry_line(preset: Preset, parts: &Parts) -> (String, EntryHead) {
+    let p = parts;
+    let time = format!("{}{}{}", p.time, p.separator, p.fraction);
+    let mut line = Line::default();
+    let head = match preset {
+        // %d [%thread] %-5level %logger - %msg
+        Preset::Logback | Preset::LogbackBasic => {
+            let timestamp = match preset {
+                Preset::Logback => line.push(&format!("{} {time}", p.date)),
+                _ => line.push(&time),
+            };
+            line.push(" [");
+            let thread = line.push(&p.thread);
+            line.push("] ");
+            let level = line.push(&p.level);
+            line.push(&padding(&p.level, 5));
+            line.push(" ");
+            let class = line.push(&p.class);
+            if p.pad_class {
+                line.push(&padding(&p.class, 40));
+            }
+            line.push(&format!(" {} ", p.dashes));
+            let message = line.push(&p.message);
+            EntryHead {
+                timestamp,
+                level,
+                thread,
+                class,
+                message,
+            }
+        }
+        // %d %5p PID --- [app] [%15.15t] [correlation] %-40.40logger : %m
+        Preset::Spring3 | Preset::Spring2 => {
+            let timestamp = match preset {
+                Preset::Spring3 => line.push(&format!("{}T{time}{}", p.date, p.offset)),
+                _ => line.push(&format!("{} {time}", p.date)),
+            };
+            line.push(" ");
+            line.push(&padding(&p.level, 5));
+            let level = line.push(&p.level);
+            line.push(&format!(" {} --- ", p.pid));
+            if let (Preset::Spring3, Some(app)) = (preset, &p.app) {
+                line.push(&format!("[{app}] "));
+            }
+            line.push("[");
+            line.push(&padding(&p.thread, 15));
+            let thread = line.push(&p.thread);
+            line.push("] ");
+            if let (Preset::Spring3, Some(correlation)) = (preset, &p.correlation) {
+                line.push(&format!("[{correlation}] "));
+            }
+            let class = line.push(&p.class);
+            line.push(&padding(&p.class, 40));
+            line.push(" : ");
+            let message = line.push(&p.message);
+            EntryHead {
+                timestamp,
+                level,
+                thread,
+                class,
+                message,
+            }
+        }
+        // %d %-5p [%c] (%t) %s%e
+        Preset::Wildfly | Preset::WildflyConsole => {
+            let timestamp = match preset {
+                Preset::Wildfly => line.push(&format!("{} {time}", p.date)),
+                _ => line.push(&time),
+            };
+            line.push(" ");
+            let level = line.push(&p.level);
+            line.push(&padding(&p.level, 5));
+            line.push(" [");
+            let class = line.push(&p.class);
+            line.push("] (");
+            let thread = line.push(&p.thread);
+            line.push(") ");
+            let message = line.push(&p.message);
+            EntryHead {
+                timestamp,
+                level,
+                thread,
+                class,
+                message,
+            }
+        }
+        Preset::Raw => panic!("Raw has no entry lines"),
+    };
+    (line.0, head)
+}
+
+#[track_caller]
+fn assert_parses(preset: Preset, parts: &Parts) {
+    let (line, head) = entry_line(preset, parts);
+    assert_eq!(
+        parse(preset, line.as_bytes()),
+        Some(head),
+        "{preset:?}: {line:?}"
+    );
+}
+
+#[track_caller]
+fn assert_every_preset_parses(parts: &Parts) {
+    for preset in STRUCTURED {
+        assert_parses(preset, parts);
+    }
+}
+
+// --- presets ---
+
+#[test]
+fn every_preset_has_a_name_for_the_header() {
+    let names: Vec<String> = Preset::ALL.iter().map(Preset::to_string).collect();
+    assert_eq!(
+        names,
+        [
+            "Logback",
+            "Logback basic",
+            "Spring Boot 3",
+            "Spring Boot 2",
+            "WildFly",
+            "WildFly console",
+            "Raw",
+        ]
+    );
+}
+
+#[test]
+fn raw_comes_last() {
+    assert_eq!(Preset::ALL.last(), Some(&Preset::Raw));
+}
+
+#[test]
+fn all_has_every_preset_once() {
+    let unique: HashSet<Preset> = Preset::ALL.into_iter().collect();
+    assert_eq!(unique, Preset::value_variants().iter().copied().collect());
+}
+
+#[test]
+fn raw_has_no_entry_parser() {
+    assert!(Preset::Raw.entry_parser().is_none());
+}
+
+#[test]
+fn only_logback_basic_and_wildfly_console_have_no_date() {
+    let dated = STRUCTURED.map(|preset| (preset, parser(preset).has_date()));
+    assert_eq!(
+        dated,
+        [
+            (Preset::Logback, true),
+            (Preset::LogbackBasic, false),
+            (Preset::Spring3, true),
+            (Preset::Spring2, true),
+            (Preset::Wildfly, true),
+            (Preset::WildflyConsole, false),
+        ]
+    );
+}
+
+// --- the PRD examples ---
+
+#[test]
+fn parses_the_logback_example() {
+    assert_eq!(
+        columns(Preset::Logback, EXAMPLES[0].1),
+        [
+            "2026-10-07 12:00:00.123",
+            "INFO",
+            "http-nio-8080-exec-3",
+            "com.example.OrderService",
+            "Order 42 created",
+        ]
+    );
+}
+
+#[test]
+fn parses_the_logback_basic_example() {
+    assert_eq!(
+        columns(Preset::LogbackBasic, EXAMPLES[1].1),
+        ["12:00:00.123", "INFO", "main", "com.example.App", "Started"]
+    );
+}
+
+#[test]
+fn parses_the_spring3_example() {
+    assert_eq!(
+        columns(Preset::Spring3, EXAMPLES[2].1),
+        [
+            "2026-10-07T12:00:00.123+02:00",
+            "INFO",
+            "main",
+            "o.s.b.SpringApplication",
+            "Started App in 2.1s",
+        ]
+    );
+}
+
+#[test]
+fn parses_the_spring2_example() {
+    assert_eq!(
+        columns(Preset::Spring2, EXAMPLES[3].1),
+        [
+            "2026-10-07 12:00:00.123",
+            "INFO",
+            "main",
+            "o.s.b.SpringApplication",
+            "Started App",
+        ]
+    );
+}
+
+#[test]
+fn parses_the_wildfly_example() {
+    assert_eq!(
+        columns(Preset::Wildfly, EXAMPLES[4].1),
+        [
+            "2026-10-07 12:00:00,123",
+            "INFO",
+            "Controller Boot Thread",
+            "org.jboss.as.server",
+            "WFLYSRV0025: WildFly Full 33.0.0.Final started",
+        ]
+    );
+}
+
+#[test]
+fn parses_the_wildfly_console_example() {
+    assert_eq!(
+        columns(Preset::WildflyConsole, EXAMPLES[5].1),
+        [
+            "12:00:00,123",
+            "INFO",
+            "MSC service thread 1-2",
+            "org.jboss.as",
+            "WFLYSRV0049: ...",
+        ]
+    );
+}
+
+#[test]
+fn coloured_wildfly_console_line_parses_once_stripped() {
+    let coloured = b"\x1b[0m\x1b[33m12:00:00,123 WARN  [org.jboss.as.txn] (ServerService Thread Pool -- 76) WFLYTX0013: node-identifier\x1b[0m";
+    let line = strip_ansi(coloured);
+    let text = String::from_utf8(line.into_owned()).unwrap();
+    assert_eq!(
+        columns(Preset::WildflyConsole, &text),
+        [
+            "12:00:00,123",
+            "WARN",
+            "ServerService Thread Pool -- 76",
+            "org.jboss.as.txn",
+            "WFLYTX0013: node-identifier",
+        ]
+    );
+}
+
+#[test]
+fn examples_start_entries_only_under_their_own_preset() {
+    for (own, line) in EXAMPLES {
+        for preset in STRUCTURED.into_iter().filter(|&p| p != own) {
+            assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line}");
+        }
+    }
+}
+
+// --- timestamps ---
+
+#[test]
+fn millisecond_separator_may_be_a_dot_or_a_comma() {
+    for separator in ['.', ','] {
+        assert_every_preset_parses(&Parts {
+            separator,
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn fraction_may_have_one_to_nine_digits() {
+    for fraction in ["1", "12", "123456", "123456789"] {
+        assert_every_preset_parses(&Parts {
+            fraction: fraction.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn spring3_offset_may_be_z_or_negative() {
+    for offset in ["Z", "-05:00", "+00:00", "+05:30"] {
+        assert_parses(
+            Preset::Spring3,
+            &Parts {
+                offset: offset.into(),
+                ..Parts::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn impossible_date_still_starts_an_entry() {
+    assert_every_preset_parses(&Parts {
+        date: "2026-13-45".into(),
+        ..Parts::default()
+    });
+}
+
+#[test]
+fn impossible_time_still_starts_an_entry() {
+    assert_every_preset_parses(&Parts {
+        time: "25:61:99".into(),
+        ..Parts::default()
+    });
+}
+
+// --- levels ---
+
+#[test]
+fn every_level_name_parses() {
+    for level in [
+        "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "WARNING",
+    ] {
+        assert_every_preset_parses(&Parts {
+            level: level.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+/// The level column shows these as unknown (PRD §6.4); the line still starts an entry.
+#[test]
+fn unknown_level_word_still_starts_an_entry() {
+    for level in ["SEVERE", "NOTICE", "FINE"] {
+        assert_every_preset_parses(&Parts {
+            level: level.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+// --- threads ---
+
+#[test]
+fn spring3_app_name_is_optional() {
+    for app in [Some("myapp"), Some("order-service"), None] {
+        assert_parses(
+            Preset::Spring3,
+            &Parts {
+                app: app.map(Into::into),
+                ..Parts::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn spring3_without_app_name_takes_the_only_bracket_as_the_thread() {
+    let line = "2026-10-07T12:00:00.123Z  INFO 1 --- [nio-8080-exec-1] com.example.App                          : x";
+    assert_eq!(columns(Preset::Spring3, line)[2], "nio-8080-exec-1");
+}
+
+/// Spring Boot 3.2+ with Micrometer Tracing (`logging.pattern.correlation`).
+#[test]
+fn spring3_trace_and_span_ids_are_not_part_of_the_thread() {
+    for app in [Some("myapp"), None] {
+        assert_parses(
+            Preset::Spring3,
+            &Parts {
+                app: app.map(Into::into),
+                thread: "nio-8080-exec-1".into(),
+                correlation: Some(TRACE_AND_SPAN.into()),
+                ..Parts::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn spring3_blank_correlation_group_is_not_part_of_the_thread() {
+    for app in [Some("myapp"), None] {
+        assert_parses(
+            Preset::Spring3,
+            &Parts {
+                app: app.map(Into::into),
+                correlation: Some(blank_correlation()),
+                ..Parts::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn spring3_line_with_trace_ids_reads_like_the_boot_docs() {
+    let line = "2026-10-07T09:31:02.415+02:00  INFO 51877 --- [shop] [nio-8080-exec-2] \
+                [6bfb3c0e8f1d4a2b9c7e5d3f1a2b4c6d-1a2b4c6d8e0f2a4b] \
+                o.s.web.servlet.DispatcherServlet        : Completed initialization in 2 ms";
+    assert_eq!(
+        columns(Preset::Spring3, line),
+        [
+            "2026-10-07T09:31:02.415+02:00",
+            "INFO",
+            "nio-8080-exec-2",
+            "o.s.web.servlet.DispatcherServlet",
+            "Completed initialization in 2 ms",
+        ]
+    );
+}
+
+#[test]
+fn thread_may_contain_spaces() {
+    for thread in ["default task-12", "ServerService Thread Pool -- 76"] {
+        assert_every_preset_parses(&Parts {
+            thread: thread.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn thread_may_contain_dashes_and_digits() {
+    for thread in ["http-nio-8080-exec-3", "pool-1-thread-2"] {
+        assert_every_preset_parses(&Parts {
+            thread: thread.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn thread_may_contain_parentheses() {
+    assert_every_preset_parses(&Parts {
+        thread: "RMI TCP Connection(2)-127.0.0.1".into(),
+        ..Parts::default()
+    });
+}
+
+#[test]
+fn thread_may_contain_brackets() {
+    assert_every_preset_parses(&Parts {
+        thread: "worker [batch 7]".into(),
+        ..Parts::default()
+    });
+}
+
+#[test]
+fn thread_may_contain_non_ascii_letters() {
+    assert_every_preset_parses(&Parts {
+        thread: "wątek-główny".into(),
+        ..Parts::default()
+    });
+}
+
+// --- classes ---
+
+#[test]
+fn class_may_name_an_inner_class() {
+    assert_every_preset_parses(&Parts {
+        class: "com.example.OrderService$Validator".into(),
+        ..Parts::default()
+    });
+}
+
+#[test]
+fn class_may_name_a_lambda() {
+    assert_every_preset_parses(&Parts {
+        class: "com.example.OrderService$$Lambda$123/0x0000000800c4b040".into(),
+        ..Parts::default()
+    });
+}
+
+#[test]
+fn class_may_contain_brackets() {
+    // Tomcat names its loggers after the container path.
+    assert_every_preset_parses(&Parts {
+        class: "o.a.c.c.C.[Tomcat].[localhost].[/]".into(),
+        ..Parts::default()
+    });
+}
+
+#[test]
+fn logback_class_may_be_padded_before_the_dash() {
+    for preset in [Preset::Logback, Preset::LogbackBasic] {
+        assert_parses(
+            preset,
+            &Parts {
+                pad_class: true,
+                ..Parts::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn spring_class_longer_than_its_column_still_parses() {
+    for preset in [Preset::Spring3, Preset::Spring2] {
+        assert_parses(
+            preset,
+            &Parts {
+                class: "org.springframework.boot.web.embedded.tomcat.TomcatWebServer".into(),
+                ..Parts::default()
+            },
+        );
+    }
+}
+
+// --- messages ---
+
+#[test]
+fn logback_message_may_follow_one_or_two_dashes() {
+    for preset in [Preset::Logback, Preset::LogbackBasic] {
+        for dashes in ["-", "--"] {
+            assert_parses(
+                preset,
+                &Parts {
+                    dashes,
+                    ..Parts::default()
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn message_may_contain_the_column_separators() {
+    let messages = [
+        "Retry 1/3 - gateway answered 503",
+        "ok: 2 -- failed: 1",
+        "key : value",
+        "[POST /api/orders] done",
+        "(user=anna) logged in",
+        "a] b) c : d - e -- f",
+        "--- [main] com.example.Other : nested",
+        "12:00:00.123 [main] INFO  x - y",
+    ];
+    for message in messages {
+        assert_every_preset_parses(&Parts {
+            message: message.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn message_may_start_with_a_dash_or_colon() {
+    for message in ["- leading dash", "-- two", ": colon", ") paren"] {
+        assert_every_preset_parses(&Parts {
+            message: message.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn message_keeps_its_own_spaces() {
+    for message in ["  indented", "trailing  ", " "] {
+        assert_every_preset_parses(&Parts {
+            message: message.into(),
+            ..Parts::default()
+        });
+    }
+}
+
+#[test]
+fn message_may_be_empty() {
+    assert_every_preset_parses(&Parts {
+        message: String::new(),
+        ..Parts::default()
+    });
+}
+
+/// Editors and some log shippers trim trailing spaces, which leaves an empty message
+/// without the space after its separator.
+#[test]
+fn empty_message_may_lack_the_space_after_its_separator() {
+    for preset in STRUCTURED {
+        let (line, head) = entry_line(
+            preset,
+            &Parts {
+                message: String::new(),
+                ..Parts::default()
+            },
+        );
+        let trimmed = line.strip_suffix(' ').unwrap();
+        let expected = EntryHead {
+            message: trimmed.len()..trimmed.len(),
+            ..head
+        };
+        assert_eq!(
+            parse(preset, trimmed.as_bytes()),
+            Some(expected),
+            "{preset:?}: {trimmed:?}"
+        );
+    }
+}
+
+#[test]
+fn message_may_contain_bytes_that_are_not_utf8() {
+    for preset in STRUCTURED {
+        let (line, head) = entry_line(
+            preset,
+            &Parts {
+                message: String::new(),
+                ..Parts::default()
+            },
+        );
+        // Latin-2 and a stray byte.
+        let mut bytes = line.into_bytes();
+        bytes.extend_from_slice(b"Zam\xf3wienie \xff");
+        let expected = EntryHead {
+            message: head.message.start..bytes.len(),
+            ..head
+        };
+        assert_eq!(parse(preset, &bytes), Some(expected), "{preset:?}");
+    }
+}
+
+#[test]
+fn message_may_contain_non_ascii_text() {
+    assert_every_preset_parses(&Parts {
+        message: "Zamówienie 42 utworzone — 日本".into(),
+        ..Parts::default()
+    });
+}
+
+// --- lines that don't start an entry ---
+
+#[test]
+fn continuation_lines_do_not_start_an_entry() {
+    let lines = [
+        "",
+        "   ",
+        "\tat com.example.OrderService.create(OrderService.java:42)",
+        "    at com.example.OrderService.create(OrderService.java:42)",
+        "\tat deployment.shop.war//com.example.Foo.bar(Foo.java:1) ~[classes/:na]",
+        "Caused by: java.lang.IllegalStateException: boom",
+        "\t... 12 more",
+        "\t... 4 common frames omitted",
+        "java.lang.IllegalStateException: boom",
+        "com.example.payment.PaymentException: 2026-10-07 12:00:00.123 [main] INFO",
+        "  Detail: Key (id)=(44) already exists.",
+        "=========================================================================",
+        "  JBoss Bootstrap Environment",
+        " :: Spring Boot ::                (v3.3.4)",
+        "{\"level\":\"INFO\",\"message\":\"json\"}",
+        "INFO  com.example.App - no timestamp",
+    ];
+    for preset in STRUCTURED {
+        for line in lines {
+            assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line:?}");
+        }
+    }
+}
+
+#[test]
+fn entry_line_indented_by_whitespace_does_not_start_an_entry() {
+    for preset in STRUCTURED {
+        let (line, _) = entry_line(preset, &Parts::default());
+        for indent in [" ", "\t"] {
+            let indented = format!("{indent}{line}");
+            assert_eq!(
+                parse(preset, indented.as_bytes()),
+                None,
+                "{preset:?}: {indented:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_line_cut_before_the_message_separator_does_not_start_an_entry() {
+    for preset in STRUCTURED {
+        let (line, head) = entry_line(preset, &Parts::default());
+        // `- `, ` : ` or `) ` before the message: cut before its first character.
+        let cut = head.message.start - 2;
+        for end in 0..cut {
+            let prefix = &line.as_bytes()[..end];
+            assert_eq!(
+                parse(preset, prefix),
+                None,
+                "{preset:?}: {:?}",
+                String::from_utf8_lossy(prefix)
+            );
+        }
+    }
+}
+
+#[test]
+fn level_that_is_not_a_word_does_not_start_an_entry() {
+    let lines = [
+        (
+            Preset::Logback,
+            "2026-10-07 12:00:00.123 [main] 42 com.example.App - x",
+        ),
+        (
+            Preset::Spring2,
+            "2026-10-07 12:00:00.123  --- 1 --- [main] com.example.App : x",
+        ),
+        (
+            Preset::Wildfly,
+            "2026-10-07 12:00:00,123 [INFO] [org.jboss.as] (main) x",
+        ),
+    ];
+    for (preset, line) in lines {
+        assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line}");
+    }
+}
+
+/// Deliberate trade-off: a bracketed thread ends at the first `] `, so the line can't be
+/// read by letting the thread swallow columns, and a thread name that itself contains
+/// `] ` is not supported.
+#[test]
+fn thread_never_runs_past_a_closing_bracket_and_space() {
+    let lines = [
+        (
+            Preset::Logback,
+            "2026-10-07 12:00:00.123 [main] 42 x - [y] INFO c - z",
+        ),
+        (
+            Preset::Logback,
+            "2026-10-07 12:00:00.123 [pool [a] 1] INFO c - z",
+        ),
+        (
+            Preset::Spring2,
+            "2026-10-07 12:00:00.123  INFO 12345 --- [pool [a] 1] c.e.App                                  : x",
+        ),
+    ];
+    for (preset, line) in lines {
+        assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line}");
+    }
+}
+
+// --- properties ---
+
+fn level() -> impl Strategy<Value = String> {
+    prop::sample::select(vec![
+        "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "WARNING", "SEVERE",
+    ])
+    .prop_map(String::from)
+}
+
+fn thread() -> impl Strategy<Value = String> {
+    prop_oneof![
+        prop::sample::select(vec![
+            "main",
+            "http-nio-8080-exec-3",
+            "pool-1-thread-2",
+            "default task-12",
+            "ServerService Thread Pool -- 76",
+            "RMI TCP Connection(2)-127.0.0.1",
+            "worker [batch 7]",
+            "wątek-główny",
+        ])
+        .prop_map(String::from),
+        "[A-Za-z0-9._-]{1,12}( [A-Za-z0-9._-]{1,12})?",
+    ]
+}
+
+fn class() -> impl Strategy<Value = String> {
+    prop_oneof![
+        prop::sample::select(vec![
+            "com.example.App",
+            "o.s.b.SpringApplication",
+            "com.example.OrderService$Validator",
+            "com.example.OrderService$$Lambda$123/0x0000000800c4b040",
+            "o.a.c.c.C.[Tomcat].[localhost].[/]",
+            "stdout",
+        ])
+        .prop_map(String::from),
+        "[a-z]{1,8}(\\.[a-z]{1,8}){0,3}\\.[A-Z][A-Za-z0-9]{0,15}(\\$[A-Za-z0-9]{1,8})?",
+    ]
+}
+
+prop_compose! {
+    fn timestamp_parts()(
+        date in "[0-9]{4}-[0-9]{2}-[0-9]{2}",
+        time in "[0-9]{2}:[0-9]{2}:[0-9]{2}",
+        separator in prop::sample::select(vec!['.', ',']),
+        fraction in "[0-9]{1,9}",
+        offset in prop_oneof![Just("Z".to_string()), "[+-][0-9]{2}:[0-9]{2}"],
+    ) -> Parts {
+        Parts { date, time, separator, fraction, offset, ..Parts::default() }
+    }
+}
+
+prop_compose! {
+    fn parts()(
+        timestamp in timestamp_parts(),
+        level in level(),
+        pid in "[0-9]{1,7}",
+        app in prop::option::of("[a-z][a-z0-9-]{0,15}"),
+        thread in thread(),
+        class in class(),
+        pad_class in any::<bool>(),
+        dashes in prop::sample::select(vec!["-", "--"]),
+        message in "[^\n]{0,40}",
+    ) -> Parts {
+        Parts { level, pid, app, thread, class, pad_class, dashes, message, ..timestamp }
+    }
+}
+
+fn correlation() -> impl Strategy<Value = String> {
+    prop_oneof!["[0-9a-f]{32}-[0-9a-f]{16}", Just(blank_correlation()),]
+}
+
+fn structured() -> impl Strategy<Value = Preset> {
+    prop::sample::select(STRUCTURED.to_vec())
+}
+
+/// Bytes that log lines are made of, so random input gets far into a pattern.
+fn log_soup() -> impl Strategy<Value = Vec<u8>> {
+    let tokens: Vec<&[u8]> = vec![
+        b"2026-10-07",
+        b"12:00:00",
+        b".123",
+        b",123",
+        b"T",
+        b"+02:00",
+        b" ",
+        b"  ",
+        b"INFO",
+        b"[",
+        b"]",
+        b"(",
+        b")",
+        b"-",
+        b"--- ",
+        b":",
+        b"main",
+        b"com.example.App",
+        b"12345",
+    ];
+    let token = prop_oneof![
+        4 => prop::sample::select(tokens).prop_map(<[u8]>::to_vec),
+        1 => prop::collection::vec(any::<u8>(), 1..4),
+    ];
+    prop::collection::vec(token, 0..24).prop_map(|tokens| tokens.concat())
+}
+
+proptest! {
+    #[test]
+    fn parse_never_panics_on_arbitrary_bytes(
+        preset in structured(),
+        bytes in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        parser(preset).parse(&bytes);
+    }
+
+    #[test]
+    fn parse_never_panics_on_log_like_bytes(preset in structured(), bytes in log_soup()) {
+        parser(preset).parse(&bytes);
+    }
+
+    #[test]
+    fn entry_lines_parse_with_exact_spans(preset in structured(), parts in parts()) {
+        let (line, head) = entry_line(preset, &parts);
+        prop_assert_eq!(parse(preset, line.as_bytes()), Some(head), "{:?}", line);
+    }
+
+    /// Detection (#9) relies on this: a file in one preset scores nothing in another.
+    #[test]
+    fn entry_lines_start_entries_only_under_their_own_preset(
+        own in structured(),
+        parts in parts(),
+    ) {
+        let (line, _) = entry_line(own, &parts);
+        for other in STRUCTURED.into_iter().filter(|&other| other != own) {
+            prop_assert_eq!(parse(other, line.as_bytes()), None, "{:?}: {:?}", other, line);
+        }
+    }
+
+    #[test]
+    fn spring3_lines_with_a_correlation_group_parse_with_exact_spans(
+        parts in parts(),
+        correlation in correlation(),
+    ) {
+        let parts = Parts { correlation: Some(correlation), ..parts };
+        let (line, head) = entry_line(Preset::Spring3, &parts);
+        prop_assert_eq!(parse(Preset::Spring3, line.as_bytes()), Some(head), "{:?}", line);
+    }
+
+    #[test]
+    fn spring3_lines_with_a_correlation_group_start_entries_only_as_spring3(
+        parts in parts(),
+        correlation in correlation(),
+    ) {
+        let parts = Parts { correlation: Some(correlation), ..parts };
+        let (line, _) = entry_line(Preset::Spring3, &parts);
+        for other in STRUCTURED.into_iter().filter(|&other| other != Preset::Spring3) {
+            prop_assert_eq!(parse(other, line.as_bytes()), None, "{:?}: {:?}", other, line);
+        }
+    }
+
+    #[test]
+    fn any_match_has_disjoint_columns_and_the_message_last(
+        preset in structured(),
+        parts in parts(),
+        at in any::<prop::sample::Index>(),
+        byte in prop_oneof![Just(b' '), Just(b']'), Just(b')'), Just(b'-'), Just(b':'), any::<u8>()],
+    ) {
+        let (line, _) = entry_line(preset, &parts);
+        let mut bytes = line.into_bytes();
+        let i = at.index(bytes.len());
+        bytes[i] = byte;
+        if let Some(head) = parse(preset, &bytes) {
+            let mut spans = [head.timestamp, head.level, head.thread, head.class, head.message.clone()];
+            spans.sort_by_key(|span| span.start);
+            prop_assert!(spans.windows(2).all(|pair| pair[0].end <= pair[1].start), "{:?}", spans);
+            prop_assert_eq!(spans.last(), Some(&head.message));
+            prop_assert_eq!(head.message.end, bytes.len());
+        }
+    }
+}
