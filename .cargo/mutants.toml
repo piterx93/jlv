@@ -105,4 +105,13 @@ exclude_re = [
     # Only where the search for the number of days starts: a lower start finds the same
     # smallest number.
     'src/histogram/mod\.rs:\d+:22: replace - with / in bucket_size$',
+    # The flags are distinct bits, so XOR gives the same value as OR.
+    'src/source/guard\.rs:\d+:\d+: replace \| with \^ in (install|on_sigbus)$',
+    # Survives only on macOS, which fills in the siginfo even without SA_SIGINFO; Linux
+    # doesn't, and the fault isn't recognised. Only a fault with the thread's stack
+    # nearly used up needs SA_ONSTACK's alternate one.
+    'src/source/guard\.rs:\d+:\d+: replace \| with & in install$',
+    # A handler that does nothing returns to an access that faults again, forever; the
+    # test hangs until the timeout.
+    'src/source/guard\.rs:\d+:\d+: replace on_sigbus with \(\)$',
 ]

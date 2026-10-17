@@ -803,6 +803,7 @@ dependencies = [
  "flate2",
  "insta",
  "jiff",
+ "libc",
  "memchr",
  "memmap2",
  "notify",

@@ -13,6 +13,9 @@ use jiff::Timestamp;
 use memchr::memchr;
 use memmap2::Mmap;
 
+use guard::Guarded;
+
+mod guard;
 mod gzip;
 #[cfg(test)]
 mod tests;
@@ -115,7 +118,7 @@ pub enum Origin {
 #[derive(Debug)]
 pub struct Source {
     // `None` for an empty file: a mapping of zero bytes is an error on Linux.
-    map: Option<Mmap>,
+    map: Option<Guarded>,
     modified: Option<Timestamp>,
     origin: Origin,
 }
@@ -137,10 +140,10 @@ impl Source {
         // mapped length are never read. Rewrites in place change bytes under a shared
         // slice; every reader treats them as arbitrary bytes, so the worst outcome is
         // garbled text. Truncation is the real hazard: touching a page past the new
-        // end raises SIGBUS, which is not handled yet.
+        // end raises SIGBUS, which the guard turns into reading zeros.
         let map = unsafe { Mmap::map(&file)? };
         Ok(Self {
-            map: Some(map),
+            map: Some(Guarded::new(map)),
             modified,
             origin: Origin::Plain,
         })
@@ -157,7 +160,7 @@ impl Source {
 
     /// The file's content as it was when it was mapped.
     pub fn bytes(&self) -> &[u8] {
-        self.map.as_deref().unwrap_or_default()
+        self.map.as_ref().map_or(&[], Guarded::bytes)
     }
 
     /// When the file was last modified, as it was when it was mapped. `None` if the
