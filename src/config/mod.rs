@@ -1,5 +1,6 @@
-//! The configuration file (PRD §11): `$XDG_CONFIG_HOME/jlv/config.toml`, or the
-//! file `--config` names.
+//! The configuration file (PRD §11): `$XDG_CONFIG_HOME/vilog/config.toml`, or the
+//! file `--config` names. Without the first, `$XDG_CONFIG_HOME/jlv/config.toml` is
+//! read, where the file was before vilog had its name.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -215,16 +216,25 @@ impl Ui {
 }
 
 /// Where the configuration file is when `--config` doesn't say:
-/// `$XDG_CONFIG_HOME/jlv/config.toml`, or `$HOME/.config/jlv/config.toml` when
+/// `$XDG_CONFIG_HOME/vilog/config.toml`, or `$HOME/.config/vilog/config.toml` when
 /// `XDG_CONFIG_HOME` isn't set or is empty. `None` without either variable. `var`
 /// gives the environment variables, `None` for one that isn't set.
 pub fn default_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    Some(config_home(var)?.join("vilog/config.toml"))
+}
+
+/// Where the configuration file was before vilog had its name: [`default_path`]
+/// with `jlv` for `vilog`.
+pub(crate) fn old_default_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    Some(config_home(var)?.join("jlv/config.toml"))
+}
+
+fn config_home(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let set = |name| var(name).filter(|value| !value.is_empty());
-    let dir = match set("XDG_CONFIG_HOME") {
-        Some(home) => PathBuf::from(home),
-        None => PathBuf::from(set("HOME")?).join(".config"),
-    };
-    Some(dir.join("jlv/config.toml"))
+    match set("XDG_CONFIG_HOME") {
+        Some(home) => Some(PathBuf::from(home)),
+        None => Some(PathBuf::from(set("HOME")?).join(".config")),
+    }
 }
 
 fn timestamp_format<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {

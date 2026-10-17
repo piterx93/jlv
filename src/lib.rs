@@ -62,16 +62,21 @@ pub struct Launch {
     pub args: Args,
     pub source: Source,
     pub config: Config,
+    /// What the header says when the viewer opens: where an old configuration file
+    /// was read from and where to move it. `None` without one.
+    pub notice: Option<String>,
 }
 
 /// Parses the command line (program name first), reads the configuration file and
 /// opens the log file. The configuration file is the one `--config` names, which
 /// has to exist, or else the one at [`config::default_path`], read only if it
-/// exists; without either vilog runs on the defaults. `var` gives the environment
-/// variables. A gzip file is decompressed here, with the progress on stderr.
-/// Whatever ends vilog before the viewer starts is printed here and returned as `Err(exit code)`:
-/// 0 after `--help` or `--version`, 1 for runtime errors such as an unusable file,
-/// 2 for usage errors. A configuration file that can't be read or is invalid is a
+/// exists. Without it the file in the old `jlv` directory next to it is read if
+/// there is one, and the [notice](Launch::notice) says where to move it; without
+/// either, vilog runs on the defaults. `var` gives the environment variables. A
+/// gzip file is decompressed here, with the progress on stderr. Whatever ends vilog
+/// before the viewer starts is printed here and returned as `Err(exit code)`: 0
+/// after `--help` or `--version`, 1 for runtime errors such as an unusable file, 2
+/// for usage errors. A configuration file that can't be read or is invalid is a
 /// runtime error that names the file. `version` is what `--version` prints after
 /// `vilog`.
 pub fn start<I, T>(
@@ -93,7 +98,7 @@ where
         let _ = writeln!(stderr, "vilog: -: reading from stdin is not supported yet");
         return Err(USAGE);
     }
-    let config = load_config(args.config.as_deref(), var).map_err(|(path, err)| {
+    let (config, notice) = load_config(args.config.as_deref(), var).map_err(|(path, err)| {
         let _ = writeln!(stderr, "vilog: {}: {}", path.display(), err.trim_end());
         FAILURE
     })?;
@@ -102,6 +107,7 @@ where
             args,
             source,
             config,
+            notice,
         }),
         Err(err) => {
             let _ = writeln!(stderr, "vilog: {}: {err}", args.file.display());
@@ -111,22 +117,60 @@ where
 }
 
 /// The configuration `given` names, which has to exist, or else the one at the
-/// default path if there is a file; the path comes back with the error.
+/// default path if there is a file, or else the one at the old path, with the notice
+/// to move it; the path comes back with the error.
 fn load_config(
     given: Option<&Path>,
     var: impl Fn(&str) -> Option<OsString>,
-) -> Result<Config, (PathBuf, String)> {
-    let (path, required) = match given {
-        Some(path) => (path.to_owned(), true),
-        None => match config::default_path(var) {
-            Some(path) => (path, false),
-            None => return Ok(Config::default()),
-        },
+) -> Result<(Config, Option<String>), (PathBuf, String)> {
+    if let Some(path) = given {
+        let text = fs::read_to_string(path).map_err(|err| (path.to_owned(), err.to_string()))?;
+        return Ok((parse_config(path, &text)?, None));
+    }
+    let (Some(path), Some(old)) = (config::default_path(&var), config::old_default_path(&var))
+    else {
+        return Ok((Config::default(), None));
     };
-    match fs::read_to_string(&path) {
-        Ok(text) => Config::parse(&text).map_err(|err| (path, err)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound && !required => Ok(Config::default()),
-        Err(err) => Err((path, err.to_string())),
+    if let Some(config) = read_config_if_any(&path)? {
+        return Ok((config, None));
+    }
+    Ok(match read_config_if_any(&old)? {
+        Some(config) => (config, Some(move_notice(&old, &path, &var))),
+        None => (Config::default(), None),
+    })
+}
+
+/// The configuration in the file at `path`, `None` if there is no such file.
+fn read_config_if_any(path: &Path) -> Result<Option<Config>, (PathBuf, String)> {
+    match fs::read_to_string(path) {
+        Ok(text) => parse_config(path, &text).map(Some),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err((path.to_owned(), err.to_string())),
+    }
+}
+
+fn parse_config(path: &Path, text: &str) -> Result<Config, (PathBuf, String)> {
+    Config::parse(text).map_err(|err| (path.to_owned(), err))
+}
+
+/// `config read from <old>, move it to <dir of new>/`.
+fn move_notice(old: &Path, new: &Path, var: impl Fn(&str) -> Option<OsString>) -> String {
+    let home = var("HOME").filter(|home| !home.is_empty());
+    let home = home.as_deref().map(Path::new);
+    // The default path always ends in the file name.
+    let new_dir = new.parent().unwrap_or(new);
+    format!(
+        "config read from {}, move it to {}/",
+        from_home(old, home),
+        from_home(new_dir, home)
+    )
+}
+
+/// `path` with `~` for `home` when it is under it.
+fn from_home(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 
@@ -172,6 +216,7 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         args,
         source,
         config,
+        notice,
     } = launch;
     // Without an mtime a time-only log is dated from now, the latest its entries can be.
     let mtime = source.modified().unwrap_or_else(Timestamp::now);
@@ -187,6 +232,9 @@ pub fn run(launch: Launch, theme: Theme) -> io::Result<()> {
         follow,
     );
     app.configure(&config);
+    if let Some(notice) = notice {
+        app.set_notice(notice);
+    }
     if let Some(filters) = initial_filters(&args, &config) {
         app.set_filters(filters);
     }

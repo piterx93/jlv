@@ -444,24 +444,39 @@ fn every_option_is_handed_over() {
 
 // --- the configuration file ---
 
-/// `start` in an environment where only `XDG_CONFIG_HOME` is set, to `config_home`.
-fn vilog_with_config_home<S: AsRef<OsStr>>(config_home: &Path, args: &[S]) -> Outcome {
-    let config_home = config_home.as_os_str().to_owned();
-    vilog_in(
-        "0.3.0",
-        move |name| (name == "XDG_CONFIG_HOME").then(|| config_home.clone()),
-        args,
-    )
+/// `start` in an environment where only the variable `name` is set, to `dir`.
+fn vilog_with_var<S: AsRef<OsStr>>(name: &'static str, dir: &Path, args: &[S]) -> Outcome {
+    let dir = dir.as_os_str().to_owned();
+    vilog_in("0.3.0", move |var| (var == name).then(|| dir.clone()), args)
 }
 
-/// Writes `text` to `jlv/config.toml` under `config_home`, where vilog looks for its
-/// configuration file with `XDG_CONFIG_HOME` set to it, and returns the file's path.
-fn default_config_file(config_home: &TempDir, text: &str) -> PathBuf {
-    let path = config_home.path().join("jlv/config.toml");
+/// `start` in an environment where only `XDG_CONFIG_HOME` is set, to `config_home`.
+fn vilog_with_config_home<S: AsRef<OsStr>>(config_home: &Path, args: &[S]) -> Outcome {
+    vilog_with_var("XDG_CONFIG_HOME", config_home, args)
+}
+
+/// Writes `text` to `<dir>/config.toml` under `config_home` and returns the file's path.
+fn config_file_in(config_home: &Path, dir: &str, text: &str) -> PathBuf {
+    let path = config_home.join(dir).join("config.toml");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, text).unwrap();
     path
 }
+
+/// Writes `text` to `vilog/config.toml` under `config_home`, where vilog looks for
+/// its configuration file with `XDG_CONFIG_HOME` set to it, and returns the file's path.
+fn default_config_file(config_home: &TempDir, text: &str) -> PathBuf {
+    config_file_in(config_home.path(), "vilog", text)
+}
+
+/// Writes `text` to `jlv/config.toml` under `config_home`, where the configuration
+/// file was before vilog had its name, and returns the file's path.
+fn old_config_file(config_home: &TempDir, text: &str) -> PathBuf {
+    config_file_in(config_home.path(), "jlv", text)
+}
+
+const WRAP: &str = "[ui]\nwrap = true\n";
+const SHOW_THREAD: &str = "[ui]\nshow_thread = true\n";
 
 #[test]
 fn without_a_config_file_vilog_runs_on_the_defaults() {
@@ -469,27 +484,96 @@ fn without_a_config_file_vilog_runs_on_the_defaults() {
     let file = log_file(&dir, "app.log");
     let launch = vilog_with_config_home(config_home.path(), &[&file]).launch();
     assert_eq!(launch.config, Config::default());
+    assert_eq!(launch.notice, None);
 }
 
 #[test]
 fn config_file_is_read_from_the_default_path() {
     let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
     let file = log_file(&dir, "app.log");
-    default_config_file(&config_home, "[ui]\nwrap = true\n");
+    default_config_file(&config_home, WRAP);
     let launch = vilog_with_config_home(config_home.path(), &[&file]).launch();
-    assert_eq!(launch.config, config("[ui]\nwrap = true\n"));
+    assert_eq!(launch.config, config(WRAP));
+    assert_eq!(launch.notice, None);
+}
+
+#[test]
+fn old_config_file_is_read_when_there_is_no_new_one() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    old_config_file(&config_home, WRAP);
+    let launch = vilog_with_config_home(config_home.path(), &[&file]).launch();
+    assert_eq!(launch.config, config(WRAP));
+}
+
+#[test]
+fn reading_the_old_config_file_says_where_to_move_it() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    let old = old_config_file(&config_home, WRAP);
+    let new_dir = config_home.path().join("vilog");
+    let launch = vilog_with_config_home(config_home.path(), &[&file]).launch();
+    assert_eq!(
+        launch.notice,
+        Some(format!(
+            "config read from {}, move it to {}/",
+            old.display(),
+            new_dir.display()
+        ))
+    );
+}
+
+/// Without `XDG_CONFIG_HOME` both files are under `$HOME/.config`, and the notice
+/// shows them from `~`.
+#[test]
+fn old_config_file_under_home_is_named_from_a_tilde() {
+    let (dir, home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    config_file_in(&home.path().join(".config"), "jlv", WRAP);
+    let launch = vilog_with_var("HOME", home.path(), &[&file]).launch();
+    assert_eq!(launch.config, config(WRAP));
+    assert_eq!(
+        launch.notice.as_deref(),
+        Some("config read from ~/.config/jlv/config.toml, move it to ~/.config/vilog/")
+    );
+}
+
+#[test]
+fn new_config_file_wins_over_the_old_one_without_a_notice() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    default_config_file(&config_home, WRAP);
+    old_config_file(&config_home, SHOW_THREAD);
+    let launch = vilog_with_config_home(config_home.path(), &[&file]).launch();
+    assert_eq!(launch.config, config(WRAP));
+    assert_eq!(launch.notice, None);
+}
+
+/// `start` with `--config` naming a file that holds `WRAP`.
+fn vilog_with_config_flag(dir: &TempDir, config_home: &TempDir) -> Launch {
+    let file = log_file(dir, "app.log");
+    let given = dir.path().join("vilog.toml");
+    fs::write(&given, WRAP).unwrap();
+    let args = [OsStr::new("--config"), given.as_os_str(), file.as_os_str()];
+    vilog_with_config_home(config_home.path(), &args).launch()
 }
 
 #[test]
 fn config_flag_names_the_file_read_instead_of_the_default_one() {
     let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let file = log_file(&dir, "app.log");
-    default_config_file(&config_home, "[ui]\nshow_thread = true\n");
-    let given = dir.path().join("vilog.toml");
-    fs::write(&given, "[ui]\nwrap = true\n").unwrap();
-    let args = [OsStr::new("--config"), given.as_os_str(), file.as_os_str()];
-    let launch = vilog_with_config_home(config_home.path(), &args).launch();
-    assert_eq!(launch.config, config("[ui]\nwrap = true\n"));
+    default_config_file(&config_home, SHOW_THREAD);
+    let launch = vilog_with_config_flag(&dir, &config_home);
+    assert_eq!(launch.config, config(WRAP));
+    assert_eq!(launch.notice, None);
+}
+
+#[test]
+fn config_flag_names_the_file_read_instead_of_the_old_one_without_a_notice() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    old_config_file(&config_home, SHOW_THREAD);
+    let launch = vilog_with_config_flag(&dir, &config_home);
+    assert_eq!(launch.config, config(WRAP));
+    assert_eq!(launch.notice, None);
 }
 
 #[test]
@@ -507,12 +591,9 @@ fn missing_config_flag_file_exits_with_1_naming_it() {
     assert!(out.stderr.starts_with(&prefix), "{:?}", out.stderr);
 }
 
-#[test]
-fn invalid_config_file_exits_with_1_naming_the_file_the_key_and_the_line() {
-    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let file = log_file(&dir, "app.log");
-    let path = default_config_file(&config_home, "[ui]\nwarp = true\n");
-    let out = vilog_with_config_home(config_home.path(), &[&file]);
+/// Asserts that `out` is exit code 1 with an error naming `path`, the unknown key
+/// `warp` and line 2.
+fn assert_invalid_config_error(out: &Outcome, path: &Path) {
     assert_eq!(out.exit_code(), Some(1));
     let prefix = format!("vilog: {}: ", path.display());
     assert!(out.stderr.starts_with(&prefix), "{:?}", out.stderr);
@@ -523,6 +604,40 @@ fn invalid_config_file_exits_with_1_naming_the_file_the_key_and_the_line() {
             out.stderr
         );
     }
+}
+
+const INVALID: &str = "[ui]\nwarp = true\n";
+
+#[test]
+fn invalid_config_file_exits_with_1_naming_the_file_the_key_and_the_line() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    let path = default_config_file(&config_home, INVALID);
+    let out = vilog_with_config_home(config_home.path(), &[&file]);
+    assert_invalid_config_error(&out, &path);
+}
+
+/// Only a missing file sends vilog to the old one; a new one it can't read is an error.
+#[test]
+fn unreadable_config_file_exits_with_1_naming_it_instead_of_reading_the_old_one() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    let path = config_home.path().join("vilog/config.toml");
+    fs::create_dir_all(&path).unwrap();
+    old_config_file(&config_home, WRAP);
+    let out = vilog_with_config_home(config_home.path(), &[&file]);
+    assert_eq!(out.exit_code(), Some(1));
+    let prefix = format!("vilog: {}: ", path.display());
+    assert!(out.stderr.starts_with(&prefix), "{:?}", out.stderr);
+}
+
+#[test]
+fn invalid_old_config_file_exits_with_1_naming_the_old_file() {
+    let (dir, config_home) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let file = log_file(&dir, "app.log");
+    let path = old_config_file(&config_home, INVALID);
+    let out = vilog_with_config_home(config_home.path(), &[&file]);
+    assert_invalid_config_error(&out, &path);
 }
 
 #[test]

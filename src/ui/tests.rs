@@ -631,6 +631,25 @@ fn header_ends_with_the_notice_about_the_last_key() {
     );
 }
 
+#[test]
+fn notice_the_viewer_opens_with_is_in_the_header_until_the_first_key() {
+    let mut app = hundred_lines();
+    app.set_notice(
+        "config read from ~/.config/jlv/config.toml, move it to ~/.config/vilog/".to_string(),
+    );
+    let mut terminal = drawn(&mut app, 120, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 0),
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ config read from ~/.config/jlv/config.toml, move it to ~/.config/vilog/"
+    );
+    app.key(char_key('j'));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 0),
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●"
+    );
+}
+
 /// A headless entry, selected, then an entry of each level from TRACE to ERROR.
 const HEADLESS_FIRST_LOG: &str = concat!(
     "starting up\n",
