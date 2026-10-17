@@ -470,11 +470,11 @@ Config formats come first in detection (§6.4), appear under `P` and are accepte
 | **M4** UX | Details panel, exception jumping, bookmarks, export, clipboard (OSC 52), histogram, mouse, help overlay | 1.0 |
 | **M5** Release 1.0 | Config file, key remapping, docs/README with GIFs, LICENSE files, branch protection, public repo, Homebrew tap | 1.0 |
 | **M6** Rename to vilog | Crate, binary and texts; config path with the jlv fallback; release assets and packages replacing jlv; tap formula rename; README and demos | 2.0 |
-| **M7** Format core | Formats as data, optional columns and the logger naming, one timestamp reader with epoch, level aliases, exception lines of every ecosystem | 2.0 |
-| **M8** JSON lines | Scanner, key mapping and detection, values and index, decoded display/search/filter | 2.0 |
-| **M9** logfmt | Tokenizer on the JSON mapping, detection | 2.1 |
-| **M10** Text presets | Python, .NET and Go presets with their stack traces, message on the next line, detection order | 2.2 |
-| **M11** Custom formats | `[formats]` in the config: regex, `timestamp_format`, JSON/logfmt key overrides | 2.3 |
+| **M7** Format core | Formats as data, optional columns and the logger naming, one timestamp reader with epoch, level aliases, exception lines of every ecosystem | 2.1 |
+| **M8** JSON lines | Scanner, key mapping and detection, values and index, decoded display/search/filter | 2.1 |
+| **M9** logfmt | Tokenizer on the JSON mapping, detection | 2.2 |
+| **M10** Text presets | Python, .NET and Go presets with their stack traces, message on the next line, detection order | 2.3 |
+| **M11** Custom formats | `[formats]` in the config: regex, `timestamp_format`, JSON/logfmt key overrides | 2.4 |
 
 2.0 is a major release because the command, the packages and the config path change name; everything after it only adds formats.
 
