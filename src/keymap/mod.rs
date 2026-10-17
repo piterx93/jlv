@@ -255,7 +255,7 @@ pub fn name(action: Action) -> &'static str {
     }
 }
 
-/// The action whose [`name`] is `text`, `None` for a name jlv doesn't know.
+/// The action whose [`name`] is `text`, `None` for a name vilog doesn't know.
 pub fn named(text: &str) -> Option<Action> {
     DEFAULTS
         .iter()

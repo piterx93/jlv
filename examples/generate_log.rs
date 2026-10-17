@@ -1,4 +1,4 @@
-//! Writes a synthetic Java application log, to try jlv on a big file:
+//! Writes a synthetic Java application log, to try vilog on a big file:
 //!
 //! ```sh
 //! cargo run --release --example generate_log -- /tmp/app.log 2G
@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::Parser;
-use jlv::format::Preset;
+use vilog::format::Preset;
 
 #[path = "../benches/support/generator.rs"]
 #[expect(dead_code, reason = "the probe line is for the benchmarks")]

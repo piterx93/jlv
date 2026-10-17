@@ -9,7 +9,7 @@ Type 'gzip server.log.2026-10-14; clear'
 Enter
 Show
 
-Type "jlv server.log.2026-10-14.gz"
+Type "vilog server.log.2026-10-14.gz"
 Sleep 400ms
 Enter
 Sleep 2s

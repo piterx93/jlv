@@ -1,5 +1,5 @@
 # S1: watch live traffic during a deploy. A background writer appends to the log
-# while jlv follows it.
+# while vilog follows it.
 Output docs/demos/s1-follow.gif
 Source docs/demos/setup.tape
 
@@ -11,7 +11,7 @@ Type 'clear'
 Enter
 Show
 
-Type "jlv server.log"
+Type "vilog server.log"
 Sleep 400ms
 Enter
 Sleep 5s

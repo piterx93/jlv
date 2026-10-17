@@ -76,7 +76,7 @@ fn hundred_lines() -> App {
 #[test]
 fn first_screen_shows_the_top_of_the_file() {
     assert_snapshot!(screen_after(&mut hundred_lines(), &[]), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
     " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
     " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
@@ -107,7 +107,7 @@ fn first_screen_shows_the_top_of_the_file() {
 fn capital_g_shows_the_last_screen() {
     let out = screen_after(&mut hundred_lines(), &[char_key('G')]);
     assert_snapshot!(out, @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ FOLLOW ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ FOLLOW ●                                       "
     " 12:00:00.079 [main] INFO  com.example.App - step 79                            "
     " 12:00:00.080 [main] INFO  com.example.App - step 80                            "
     " 12:00:00.081 [main] INFO  com.example.App - step 81                            "
@@ -138,7 +138,7 @@ fn capital_g_shows_the_last_screen() {
 fn page_down_shows_the_next_screen() {
     let out = screen_after(&mut hundred_lines(), &[key(KeyCode::PageDown)]);
     assert_snapshot!(out, @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.023 [main] INFO  com.example.App - step 23                            "
     " 12:00:00.024 [main] INFO  com.example.App - step 24                            "
     " 12:00:00.025 [main] INFO  com.example.App - step 25                            "
@@ -169,7 +169,7 @@ fn page_down_shows_the_next_screen() {
 fn empty_file_shows_an_empty_body() {
     let mut app = named_app("/var/log/empty.log", b"");
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
-    "jlv ─ empty.log ─ 0 B ─ Raw ─ PAUSED ●                                          "
+    "vilog ─ empty.log ─ 0 B ─ Raw ─ PAUSED ●                                        "
     "                                                                                "
     "                                                                                "
     "                                                                                "
@@ -205,7 +205,7 @@ fn no_matching_entries_shows_a_notice_in_place_of_the_rows() {
     });
     wait_for_filter(&mut app);
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
-    "jlv ─ app.log ─ 153 B ─ Raw ─ PAUSED ●                                          "
+    "vilog ─ app.log ─ 153 B ─ Raw ─ PAUSED ●                                        "
     "Filters: text[nothing]                                                          "
     "no entries match the current filters                                            "
     "                                                                                "
@@ -241,7 +241,7 @@ fn level_panel_shows_a_checkbox_per_level_over_the_rows() {
         char_key('4'),
     ];
     assert_snapshot!(screen_after(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
     " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
     " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
@@ -300,7 +300,7 @@ fn class_panel_keys(lines: &[&str]) -> Vec<KeyEvent> {
 fn class_panel_shows_one_rule_per_line_over_the_rows() {
     let keys = class_panel_keys(&["com.myco.*", "!org.hibernate"]);
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
     " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
     " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
@@ -356,7 +356,7 @@ fn time_panel_shows_the_spec_and_the_filter_it_makes_over_the_rows() {
     let mut keys = time_panel_keys("10m");
     keys.push(key(KeyCode::Tab));
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
     " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
     " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
@@ -404,7 +404,7 @@ fn regex_prompt_keys(pattern: &str) -> Vec<KeyEvent> {
 fn text_prompt_shows_the_pattern_and_its_options_over_the_rows() {
     let keys = regex_prompt_keys("time.*out");
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
     " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
     " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
@@ -461,7 +461,7 @@ const FILTER_LOG: &str = concat!(
 fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_bar() {
     let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
-    "jlv ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                       E:2 W:3 I:1 D:1"
+    "vilog ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                     E:2 W:3 I:1 D:1"
     "▶12:04:00.000 WARN  com.myco.pay.PayClient   Retry 1/3 after timeout            "
     " 12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
     " 12:06:00.000 INFO  com.myco.pay.PayClient   Payment retried after timeout      "
@@ -505,7 +505,7 @@ fn filter_bar_shows_every_active_filter_under_the_header() {
     }));
     wait_for_filter(&mut app);
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
-    "jlv ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                           E:1 W:1 I:1"
+    "vilog ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                         E:1 W:1 I:1"
     "Filters: level[W E F]  class[com.myco.* !Sql]  time[last 5m (file)]  text[time] "
     "▶12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
     " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
@@ -627,7 +627,26 @@ fn header_ends_with_the_notice_about_the_last_key() {
     draw(&mut terminal, &mut app, Theme::Styled);
     assert_eq!(
         row(&terminal, 0),
-        "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ the selected entry has no class"
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ the selected entry has no class"
+    );
+}
+
+#[test]
+fn notice_the_viewer_opens_with_is_in_the_header_until_the_first_key() {
+    let mut app = hundred_lines();
+    app.set_notice(
+        "config read from ~/.config/jlv/config.toml, move it to ~/.config/vilog/".to_string(),
+    );
+    let mut terminal = drawn(&mut app, 120, 24, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 0),
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ config read from ~/.config/jlv/config.toml, move it to ~/.config/vilog/"
+    );
+    app.key(char_key('j'));
+    draw(&mut terminal, &mut app, Theme::Styled);
+    assert_eq!(
+        row(&terminal, 0),
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●"
     );
 }
 
@@ -653,16 +672,16 @@ fn header_with_a_notice(width: u16) -> String {
 #[test]
 fn level_counters_take_the_columns_the_title_leaves_after_a_space() {
     assert_eq!(
-        header_with_a_notice(96),
-        "jlv ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class E:1 W:1 I:1 D:1 T:1"
+        header_with_a_notice(98),
+        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class E:1 W:1 I:1 D:1 T:1"
     );
 }
 
 #[test]
 fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
     assert_eq!(
-        header_with_a_notice(95),
-        "jlv ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class"
+        header_with_a_notice(97),
+        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class"
     );
 }
 
@@ -670,7 +689,7 @@ fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
 fn header_shows_the_indexing_progress_until_the_index_is_complete() {
     let mut app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ indexing 0%                           "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ indexing 0%                         "
     "                                                                                "
     "                                                                                "
     "                                                                                "
@@ -706,7 +725,7 @@ fn header_names_the_preset_the_file_is_read_in() {
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
     assert_eq!(
         row(&terminal, 0),
-        "jlv ─ app.log ─ 63 B ─ Logback ─ PAUSED ●                                    I:1"
+        "vilog ─ app.log ─ 63 B ─ Logback ─ PAUSED ●                                  I:1"
     );
 }
 
@@ -714,14 +733,14 @@ fn header_names_the_preset_the_file_is_read_in() {
 fn empty_file_shows_no_indexing_progress() {
     let mut app = unindexed_app(Preset::Raw, b"");
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
-    assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 0 B ─ Raw ─ PAUSED ●");
+    assert_eq!(row(&terminal, 0), "vilog ─ app.log ─ 0 B ─ Raw ─ PAUSED ●");
 }
 
 #[test]
 fn too_small_terminal_says_so_instead_of_showing_lines() {
     let terminal = drawn(&mut hundred_lines(), 60, 9, Theme::Styled);
     assert_snapshot!(terminal.backend().to_string(), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                     "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                   "
     "terminal too small (80×24 needed)                           "
     "                                                            "
     "                                                            "
@@ -754,7 +773,7 @@ fn styled_theme_marks_header_selection_and_footer() {
     Buffer {
         area: Rect { x: 0, y: 0, width: 80, height: 24 },
         content: [
-            "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         ",
+            "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       ",
             "▶12:00:00.001 [main] INFO  com.example.App - step 1                             ",
             " 12:00:00.002 [main] INFO  com.example.App - step 2                             ",
             " 12:00:00.003 [main] INFO  com.example.App - step 3                             ",
@@ -781,8 +800,8 @@ fn styled_theme_marks_header_selection_and_footer() {
         ],
         styles: [
             x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD | REVERSED,
-            x: 38, y: 0, fg: Reset, bg: Green, underline: Reset, modifier: BOLD | REVERSED,
-            x: 39, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD | REVERSED,
+            x: 40, y: 0, fg: Reset, bg: Green, underline: Reset, modifier: BOLD | REVERSED,
+            x: 41, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD | REVERSED,
             x: 0, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: REVERSED,
             x: 0, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
             x: 0, y: 23, fg: Reset, bg: Reset, underline: Reset, modifier: REVERSED,
@@ -800,7 +819,7 @@ fn plain_theme_draws_the_screen_without_any_style() {
     Buffer {
         area: Rect { x: 0, y: 0, width: 80, height: 24 },
         content: [
-            "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         ",
+            "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       ",
             "▶12:00:00.001 [main] INFO  com.example.App - step 1                             ",
             " 12:00:00.002 [main] INFO  com.example.App - step 2                             ",
             " 12:00:00.003 [main] INFO  com.example.App - step 3                             ",
@@ -860,7 +879,7 @@ fn plain_theme_draws_the_table_without_any_style() {
     Buffer {
         area: Rect { x: 0, y: 0, width: 80, height: 24 },
         content: [
-            "jlv ─ app.log ─ 500 B ─ Logback ─ PAUSED ●               F:1 E:1 W:1 I:1 D:1 T:1",
+            "vilog ─ app.log ─ 500 B ─ Logback ─ PAUSED ●             F:1 E:1 W:1 I:1 D:1 T:1",
             "▶12:00:00.100 TRACE com.example.App          Tick                               ",
             " 12:00:00.200 DEBUG com.example.App          Config loaded                      ",
             " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   ",
@@ -1213,7 +1232,7 @@ fn wrapped_messages_continue_under_the_message_column_next_to_the_thread() {
 #[test]
 fn unrecognized_format_is_shown_raw_with_a_notice_in_the_header() {
     assert_snapshot!(screen_after(&mut detected_app(b"hello\nworld\n"), &[]), @r#"
-    "jlv ─ app.log ─ 12 B ─ Raw ─ PAUSED ● ─ format not recognized, showing raw      "
+    "vilog ─ app.log ─ 12 B ─ Raw ─ PAUSED ● ─ format not recognized, showing raw    "
     "▶hello                                                                          "
     " world                                                                          "
     "                                                                                "
@@ -1246,7 +1265,7 @@ fn cycled_preset_replaces_the_notice_in_the_header() {
     let terminal = terminal_after(&mut app, &[char_key('P')]);
     assert_eq!(
         row(&terminal, 0),
-        "jlv ─ app.log ─ 12 B ─ Logback ─ PAUSED ● ─ indexing 0%"
+        "vilog ─ app.log ─ 12 B ─ Logback ─ PAUSED ● ─ indexing 0%"
     );
 }
 
@@ -1534,7 +1553,7 @@ fn control_characters_in_the_file_name_are_replaced() {
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
     assert_eq!(
         row(&terminal, 0),
-        "jlv ─ a\u{FFFD}b.log ─ 2 B ─ Raw ─ PAUSED ●"
+        "vilog ─ a\u{FFFD}b.log ─ 2 B ─ Raw ─ PAUSED ●"
     );
 }
 
@@ -1560,7 +1579,7 @@ fn changed(mut app: App, change: FileChange) -> App {
 fn following_shows_follow_in_the_header() {
     let out = lines_after(&mut three_lines_followed(), &[], 0..=3);
     assert_snapshot!(out, @r"
-    jlv ─ app.log ─ 153 B ─ Raw ─ FOLLOW ●
+    vilog ─ app.log ─ 153 B ─ Raw ─ FOLLOW ●
      12:00:00.001 [main] INFO  com.example.App - step 1
      12:00:00.002 [main] INFO  com.example.App - step 2
     ▶12:00:00.003 [main] INFO  com.example.App - step 3
@@ -1579,7 +1598,7 @@ fn paused_shows_the_new_entries_and_the_dot_in_the_header() {
     app.tick(start + Duration::from_secs(10));
     let out = lines_after(&mut app, &[], 0..=5);
     assert_snapshot!(out, @r"
-    jlv ─ app.log ─ 255 B ─ Raw ─ PAUSED +2 new ◐
+    vilog ─ app.log ─ 255 B ─ Raw ─ PAUSED +2 new ◐
      12:00:00.001 [main] INFO  com.example.App - step 1
     ▶12:00:00.002 [main] INFO  com.example.App - step 2
      12:00:00.003 [main] INFO  com.example.App - step 3
@@ -1593,7 +1612,7 @@ fn truncation_row_starts_the_new_content() {
     let truncated = FileChange::Truncated(test_support::source(numbered_log(2).as_bytes()));
     let out = lines_after(&mut changed(three_lines_followed(), truncated), &[], 0..=3);
     assert_snapshot!(out, @r"
-    jlv ─ app.log ─ 102 B ─ Raw ─ FOLLOW ●
+    vilog ─ app.log ─ 102 B ─ Raw ─ FOLLOW ●
      ── file truncated ──
      12:00:00.001 [main] INFO  com.example.App - step 1
     ▶12:00:00.002 [main] INFO  com.example.App - step 2
@@ -1604,7 +1623,7 @@ fn truncation_row_starts_the_new_content() {
 fn missing_file_shows_an_empty_table_and_waiting_for_file_in_the_header() {
     let mut app = changed(three_lines_followed(), FileChange::Gone);
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
-    "jlv ─ app.log ─ 0 B ─ Raw ─ WAITING FOR FILE ○                                  "
+    "vilog ─ app.log ─ 0 B ─ Raw ─ WAITING FOR FILE ○                                "
     "                                                                                "
     "                                                                                "
     "                                                                                "
@@ -1663,7 +1682,10 @@ fn plain_theme_shows_the_dot_by_its_shape_alone() {
     app.tick(start);
     app.tick(start + Duration::from_secs(10));
     let terminal = drawn(&mut app, 80, 24, Theme::Plain);
-    assert_eq!(row(&terminal, 0), "jlv ─ app.log ─ 153 B ─ Raw ─ FOLLOW ◐");
+    assert_eq!(
+        row(&terminal, 0),
+        "vilog ─ app.log ─ 153 B ─ Raw ─ FOLLOW ◐"
+    );
     assert_eq!(dot(&terminal).style(), Cell::EMPTY.style());
 }
 
@@ -1684,7 +1706,7 @@ fn gzip_file_is_read_only_in_the_header_also_at_the_bottom() {
     let mut app = gzipped(&test_support::gzip(numbered_log(3).as_bytes()));
     let out = lines_after(&mut app, &[char_key('G')], 0..=3);
     assert_snapshot!(out, @r"
-    jlv ─ app.log.gz ─ 153 B ─ Raw ─ READ-ONLY ○
+    vilog ─ app.log.gz ─ 153 B ─ Raw ─ READ-ONLY ○
      12:00:00.001 [main] INFO  com.example.App - step 1
      12:00:00.002 [main] INFO  com.example.App - step 2
     ▶12:00:00.003 [main] INFO  com.example.App - step 3
@@ -1697,7 +1719,7 @@ fn truncated_gzip_file_has_a_notice_in_the_header() {
     // without the trailer: the CRC-32 and the length, 4 bytes each
     let mut app = gzipped(&gzip[..gzip.len() - 8]);
     let out = lines_after(&mut app, &[], 0..=0);
-    assert_snapshot!(out, @"jlv ─ app.log.gz ─ 153 B ─ Raw ─ READ-ONLY ○ ─ truncated .gz");
+    assert_snapshot!(out, @"vilog ─ app.log.gz ─ 153 B ─ Raw ─ READ-ONLY ○ ─ truncated .gz");
 }
 
 // --- terminal size ---
@@ -2362,7 +2384,7 @@ fn search_prompt_shows_an_invalid_regex_error_in_the_footer() {
     let mut keys = regex_search_keys('/', "(");
     keys.push(key(KeyCode::Enter));
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [main] INFO  com.example.App - step 1                             "
     " 12:00:00.002 [main] INFO  com.example.App - step 2                             "
     " 12:00:00.003 [main] INFO  com.example.App - step 3                             "
@@ -2454,7 +2476,7 @@ fn header_shows_the_match_count_before_the_notice() {
     let terminal = searched_terminal(&mut app(ORDERS.as_bytes()), "order", &keys);
     assert_eq!(
         row(&terminal, 0),
-        "jlv ─ app.log ─ 85 B ─ Raw ─ PAUSED ● ─ match 1/3 ─ search wrapped"
+        "vilog ─ app.log ─ 85 B ─ Raw ─ PAUSED ● ─ match 1/3 ─ search wrapped"
     );
 }
 
@@ -2544,7 +2566,7 @@ fn details_pane_shows_the_selected_entry_with_its_stack_trace() {
         key(KeyCode::Enter),
     ];
     assert_snapshot!(screen_after(&mut table(), &keys), @r#"
-    "jlv ─ app.log ─ 500 B ─ Logback ─ PAUSED ●               F:1 E:1 W:1 I:1 D:1 T:1"
+    "vilog ─ app.log ─ 500 B ─ Logback ─ PAUSED ●             F:1 E:1 W:1 I:1 D:1 T:1"
     " 12:00:00.100 TRACE com.example.App          Tick                               "
     " 12:00:00.200 DEBUG com.example.App          Config loaded                      "
     " 12:00:00.300 INFO  c.e.order.OrderService   Order 42 created                   "
@@ -2816,7 +2838,7 @@ fn focused_histogram_shows_the_selected_bucket_in_reverse_video() {
 #[test]
 fn histogram_without_timestamps_is_hidden_with_a_notice() {
     assert_snapshot!(lines_after(&mut hundred_lines(), &[char_key('H')], 0..=1), @r"
-    jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ no entry has a timestamp
+    vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ no entry has a timestamp
     ▶12:00:00.001 [main] INFO  com.example.App - step 1
     ");
 }
@@ -3043,7 +3065,7 @@ fn hit_map_of_a_too_small_terminal_has_no_rows() {
 fn help_overlay_lists_the_keymap_over_the_rows() {
     let keys = [key(KeyCode::F(1))];
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
     " 12:00:00.002 [ma│ k ↑           Move up                      │                 "
     " 12:00:00.003 [ma│ j ↓           Move down                    │                 "
@@ -3074,7 +3096,7 @@ fn help_overlay_lists_the_keymap_over_the_rows() {
 fn help_overlay_scrolls_a_page_with_page_down() {
     let keys = [key(KeyCode::F(1)), key(KeyCode::PageDown)];
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
     " 12:00:00.002 [ma│ t             Jump to time                 │                 "
     " 12:00:00.003 [ma│ 1 2 3 4 5 6   Toggle level (TRACE to FATAL)│                 "
@@ -3110,7 +3132,7 @@ fn help_overlay_scrolled_to_its_end_shows_its_last_lines() {
         key(KeyCode::PageDown),
     ];
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
     " 12:00:00.002 [ma│ F6            Class filter                 │                 "
     " 12:00:00.003 [ma│ c             Only this class              │                 "
@@ -3161,7 +3183,7 @@ fn help_overlay_lists_remapped_keys() {
     let config = "[keys]\nup = \"i\"\ndown = [\"o\", \"Down\"]\nhelp = \"h\"\n";
     app.configure(&Config::parse(config).unwrap());
     assert_snapshot!(screen_after_pressing(&mut app, &[char_key('h')]), @r#"
-    "jlv ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                         "
+    "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
     " 12:00:00.002 [ma│ i             Move up                      │                 "
     " 12:00:00.003 [ma│ o ↓           Move down                    │                 "

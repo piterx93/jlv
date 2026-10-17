@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TARGET: x86_64-unknown-linux-musl
-      JLV_VERSION: ${{ needs.version.outputs.version }}
+      VILOG_VERSION: ${{ needs.version.outputs.version }}
       PKG_VERSION: ${{ needs.version.outputs.pkg-version }}
     steps:
       - uses: actions/checkout@v5
@@ -91,13 +91,13 @@ jobs:
 
       - name: Build
         run: |
-          JLV_COMMIT="${GITHUB_SHA:0:7}" cargo build --locked --release --target "$TARGET"
-          "target/$TARGET/release/jlv" --version
+          VILOG_COMMIT="${GITHUB_SHA:0:7}" cargo build --locked --release --target "$TARGET"
+          "target/$TARGET/release/vilog" --version
 
       - name: Package
         run: |
           mkdir dist
-          tar -czf "dist/jlv-$JLV_VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" jlv
+          tar -czf "dist/vilog-$VILOG_VERSION-$TARGET.tar.gz" -C "target/$TARGET/release" vilog
           cargo deb --no-build --no-strip --target "$TARGET" --deb-version "$PKG_VERSION" --output dist/
           cargo generate-rpm --target "$TARGET" --set-metadata "version = \"$PKG_VERSION\"" --output dist/
 

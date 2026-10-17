@@ -10,7 +10,7 @@ use crate::filter::{Classes, Levels, TimeSpec};
 use crate::format::{Level, Preset};
 
 fn parse(args: &[&str]) -> Result<Args, clap::Error> {
-    Args::try_parse_from(std::iter::once("jlv").chain(args.iter().copied()))
+    Args::try_parse_from(std::iter::once("vilog").chain(args.iter().copied()))
 }
 
 fn defaults(file: &str) -> Args {
@@ -97,8 +97,8 @@ fn no_mouse_flag_is_parsed() {
 
 #[test]
 fn config_takes_a_path() {
-    let args = parse(&["--config", "/etc/jlv.toml", "app.log"]).unwrap();
-    assert_eq!(args.config, Some(PathBuf::from("/etc/jlv.toml")));
+    let args = parse(&["--config", "/etc/vilog.toml", "app.log"]).unwrap();
+    assert_eq!(args.config, Some(PathBuf::from("/etc/vilog.toml")));
 }
 
 #[test]
@@ -299,6 +299,6 @@ fn path_with_spaces_is_kept_whole() {
 #[test]
 fn non_utf8_path_is_kept_byte_for_byte() {
     let raw = OsString::from_vec(b"/var/log/caf\xe9.log".to_vec());
-    let args = Args::try_parse_from([OsString::from("jlv"), raw.clone()]).unwrap();
+    let args = Args::try_parse_from([OsString::from("vilog"), raw.clone()]).unwrap();
     assert_eq!(args.file, PathBuf::from(raw));
 }

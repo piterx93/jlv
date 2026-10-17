@@ -1,9 +1,9 @@
 //! What the benchmarks share: the log they run on and ways to index it.
 //!
-//! The log is `JLV_BENCH_LOG` if that is set, written there first if no file is
+//! The log is `VILOG_BENCH_LOG` if that is set, written there first if no file is
 //! there yet and kept afterwards, so that several runs share one big log. Otherwise
 //! it is written to the temp dir and removed when the benchmark ends. Either way it
-//! is a Logback log of about `JLV_BENCH_SIZE` bytes (`2G`, `64M`, …; 32M if unset).
+//! is a Logback log of about `VILOG_BENCH_SIZE` bytes (`2G`, `64M`, …; 32M if unset).
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use jlv::app::App;
-use jlv::format::{Anchor, Preset, detect};
-use jlv::index::{Indexer, Record, Settings};
-use jlv::source::{self, Source};
 use tempfile::TempPath;
+use vilog::app::App;
+use vilog::format::{Anchor, Preset, detect};
+use vilog::index::{Indexer, Record, Settings};
+use vilog::source::{self, Source};
 
 pub mod generator;
 
@@ -35,13 +35,13 @@ impl BenchLog {
     /// Finds or writes the log as the module docs say. Panics on a bad size or a log
     /// that can't be written: a benchmark can't run without one.
     pub fn get() -> BenchLog {
-        let size = env::var("JLV_BENCH_SIZE").unwrap_or_else(|_| DEFAULT_SIZE.to_owned());
-        let size = parse_size(&size).unwrap_or_else(|err| panic!("JLV_BENCH_SIZE: {err}"));
-        let (path, temp) = match env::var_os("JLV_BENCH_LOG") {
+        let size = env::var("VILOG_BENCH_SIZE").unwrap_or_else(|_| DEFAULT_SIZE.to_owned());
+        let size = parse_size(&size).unwrap_or_else(|err| panic!("VILOG_BENCH_SIZE: {err}"));
+        let (path, temp) = match env::var_os("VILOG_BENCH_LOG") {
             Some(path) => (PathBuf::from(path), None),
             None => {
                 let temp = tempfile::Builder::new()
-                    .prefix("jlv-bench-")
+                    .prefix("vilog-bench-")
                     .suffix(".log")
                     .tempfile()
                     .expect("a temp file for the log")

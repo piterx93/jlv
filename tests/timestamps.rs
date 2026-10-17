@@ -6,7 +6,7 @@ use std::path::Path;
 use jiff::Timestamp;
 use jiff::civil::{DateTime, Time};
 use jiff::tz::TimeZone;
-use jlv::format::{Anchor, LogTime, Preset, resolve_timestamps, strip_ansi};
+use vilog::format::{Anchor, LogTime, Preset, resolve_timestamps, strip_ansi};
 
 mod common;
 

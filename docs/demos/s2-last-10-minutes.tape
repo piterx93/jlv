@@ -7,7 +7,7 @@ Type 'python3 "$DEMOS/demo-log.py" history server.log "2026-10-15 14:12" 40; cle
 Enter
 Show
 
-Type "jlv server.log"
+Type "vilog server.log"
 Sleep 400ms
 Enter
 Sleep 2s

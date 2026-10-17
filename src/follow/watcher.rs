@@ -104,7 +104,7 @@ impl Watcher {
         };
         let notifier = options.notify.then(|| wake.clone());
         let thread = thread::Builder::new()
-            .name("jlv-follow".into())
+            .name("vilog-follow".into())
             .spawn(move || follow.run(&wakes, notifier, options.poll))?;
         Ok(Watcher {
             events,

@@ -1,56 +1,68 @@
-# jlv
+# vilog
 
-jlv is a terminal log viewer for Java application logs. It recognises the usual
-Logback, Log4j2, Spring Boot and WildFly layouts, splits each entry into timestamp,
-level, class and message columns, folds stack traces, and follows the file as it
-grows, through rotation and truncation. You can filter by level, class, time and
-text, search, bookmark, copy an entry and export what is left, all in the terminal
-and over SSH. It opens multi-gigabyte files without reading them into memory.
+vilog is a terminal log viewer for application logs. It recognises the usual
+Logback, Log4j2, Spring Boot and WildFly layouts of Java services, splits each
+entry into timestamp, level, class and message columns, folds stack traces, and
+follows the file as it grows, through rotation and truncation. You can filter by
+level, class, time and text, search, bookmark, copy an entry and export what is
+left, all in the terminal and over SSH. It opens multi-gigabyte files without
+reading them into memory.
+
+vilog was called jlv before 2.0.
 
 ![Following a WildFly server.log during a deploy](docs/demos/s1-follow.gif)
 
 ## Install
 
 Prebuilt binaries for Linux x86_64 (static, musl), plus `.deb` and `.rpm`
-packages, are on the [releases page](https://github.com/piterx93/jlv/releases).
+packages, are on the [releases page](https://github.com/piterx93/vilog/releases).
 
 With Homebrew:
 
 ```sh
-brew install piterx93/tap/jlv
+brew install piterx93/tap/vilog
 ```
 
 With Rust 1.88 or newer:
 
 ```sh
-cargo install --locked --git https://github.com/piterx93/jlv
+cargo install --locked --git https://github.com/piterx93/vilog
 ```
 
-Linux x86_64 is the only target CI builds and tests. jlv is developed on macOS
+Linux x86_64 is the only target CI builds and tests. vilog is developed on macOS
 and builds there too.
 
 ## Usage
 
 ```
-jlv [OPTIONS] <FILE>
+Terminal log viewer for application logs
 
-  -f, --format <PRESET>  Force a format instead of detecting it
+Usage: vilog [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>  Log file to open
+
+Options:
+  -f, --format <PRESET>  Force a format instead of detecting it [possible values: logback,
+                         logback-basic, spring3, spring2, wildfly, wildfly-console, raw]
       --no-follow        Open at the top, don't follow
   -l, --level <LEVELS>   Initial level filter, e.g. WARN,ERROR
   -c, --class <RULES>    Initial class filter, e.g. 'com.myco.*,!org.hibernate'
   -s, --since <SPEC>     Initial time filter, e.g. 10m or 12:00-12:30
       --no-mouse         Disable mouse
       --config <PATH>    Config file path
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
 ```sh
-jlv /opt/wildfly/standalone/log/server.log
-jlv --level WARN,ERROR --since 10m server.log
-jlv --class 'com.mycompany.*' --no-follow app.log
-jlv server.log.2026-10-14.gz
+vilog /opt/wildfly/standalone/log/server.log
+vilog --level WARN,ERROR --since 10m server.log
+vilog --class 'com.mycompany.*' --no-follow app.log
+vilog server.log.2026-10-14.gz
 ```
 
-jlv opens at the end of the file and follows it like `less +F`: moving up pauses,
+vilog opens at the end of the file and follows it like `less +F`: moving up pauses,
 and the header counts the entries that arrive meanwhile (`PAUSED +12 new`). `G` or
 `End` goes back to the bottom and follows again, `F` toggles following. The dot
 after the status is green while the file changed in the last 10 seconds, yellow up
@@ -63,7 +75,7 @@ until a file appears at the path again.
 
 Gzip files are recognised by their content, decompressed to a temporary file and
 shown read-only. Lines that aren't valid UTF-8 are shown with replacement
-characters. jlv needs a terminal of at least 80×24 and turns colours off when
+characters. vilog needs a terminal of at least 80×24 and turns colours off when
 `NO_COLOR` is set.
 
 ### Filters
@@ -107,7 +119,7 @@ export waits for them; `Esc` drops it.
 
 **Last 10 minutes, warnings and errors only.** `F5`, `↓` three times to `10m`,
 `Enter`, then `1` `2` `3` to hide TRACE, DEBUG and INFO. From the command line:
-`jlv -s 10m -l WARN,ERROR server.log`.
+`vilog -s 10m -l WARN,ERROR server.log`.
 
 ![Narrowing to the last 10 minutes and to WARN and up](docs/demos/s2-last-10-minutes.gif)
 
@@ -119,7 +131,7 @@ exception, `Enter` for the details.
 
 **Too much noise.** In the class panel, `!org.hibernate` and `!org.jboss` hide
 those packages; `com.mycompany.*` then keeps only your own code. Or
-`jlv -c '!org.hibernate,!org.jboss' server.log`.
+`vilog -c '!org.hibernate,!org.jboss' server.log`.
 
 ![Hiding org.hibernate and org.jboss, then keeping com.mycompany.*](docs/demos/s4-class-filter.gif)
 
@@ -129,13 +141,13 @@ the details, `y` to copy it, `e` to export the filtered entries.
 ![Opening an error's details, copying it and exporting the filtered entries](docs/demos/s5-details-export.gif)
 
 The demos are recorded with [vhs](https://github.com/charmbracelet/vhs), which
-can't press function keys, so they run with a [config](docs/demos/jlv/config.toml)
+can't press function keys, so they run with a [config](docs/demos/vilog/config.toml)
 that adds `s` for `F5` and `o` for `F6`.
 
 ## Formats
 
 The format is detected from the first 200 lines. If no preset matches at least
-60% of them, jlv shows the file as raw lines and says so in the status bar. `P`
+60% of them, vilog shows the file as raw lines and says so in the header. `P`
 cycles through the presets, `--format` picks one.
 
 | `--format` | Example |
@@ -206,8 +218,10 @@ and sets the time filter to a histogram bucket on click.
 
 ## Configuration
 
-jlv reads `$XDG_CONFIG_HOME/jlv/config.toml`, or `~/.config/jlv/config.toml` when
-`XDG_CONFIG_HOME` isn't set, if the file exists; `--config` names another file.
+vilog reads `$XDG_CONFIG_HOME/vilog/config.toml`, or `~/.config/vilog/config.toml`
+when `XDG_CONFIG_HOME` isn't set, if the file exists. If it doesn't but a
+`jlv/config.toml` from before the rename does, vilog reads that one and the header
+says where to move it. `--config` names another file.
 Every key is optional. This is the full file with the defaults:
 
 ```toml
@@ -247,7 +261,7 @@ an index into the 256-colour palette (`"208"`). The table form takes any of `fg`
 
 `--class` replaces `default_class_excludes` rather than adding to them.
 
-An unknown key, a wrong type or a value jlv can't use stops jlv with a message
+An unknown key, a wrong type or a value vilog can't use stops vilog with a message
 that names the file and points at the line.
 
 ### Remapping keys
@@ -292,5 +306,5 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in jlv by you, as defined in the Apache-2.0 license, shall be dual
+for inclusion in vilog by you, as defined in the Apache-2.0 license, shall be dual
 licensed as above, without any additional terms or conditions.

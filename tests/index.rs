@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use jlv::format::{Anchor, Entry, EntryGrouper, Level, Preset, resolve_timestamps, strip_ansi};
-use jlv::index::{Chunk, Indexer, Record, Settings, tail};
 use proptest::prelude::*;
+use vilog::format::{Anchor, Entry, EntryGrouper, Level, Preset, resolve_timestamps, strip_ansi};
+use vilog::index::{Chunk, Indexer, Record, Settings, tail};
 
 mod common;
 

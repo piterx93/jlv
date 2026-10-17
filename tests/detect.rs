@@ -1,6 +1,6 @@
 //! Format detection on the fixture logs in `tests/fixtures`, one per preset.
 
-use jlv::format::{Preset, detect};
+use vilog::format::{Preset, detect};
 
 mod common;
 

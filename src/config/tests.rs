@@ -69,7 +69,7 @@ fn a_key_left_out_keeps_its_default() {
 }
 
 #[test]
-fn a_level_jlv_does_not_know_has_the_terminal_default_style() {
+fn a_level_vilog_does_not_know_has_the_terminal_default_style() {
     assert_eq!(Config::default().colors.level(None), Style::new());
 }
 
@@ -339,7 +339,7 @@ fn default_path_is_under_xdg_config_home() {
     let var = env(&[("XDG_CONFIG_HOME", "/cfg"), ("HOME", "/home/me")]);
     assert_eq!(
         default_path(var),
-        Some(PathBuf::from("/cfg/jlv/config.toml"))
+        Some(PathBuf::from("/cfg/vilog/config.toml"))
     );
 }
 
@@ -351,7 +351,7 @@ fn default_path_is_under_home_without_xdg_config_home() {
     ] {
         assert_eq!(
             default_path(env(vars)),
-            Some(PathBuf::from("/home/me/.config/jlv/config.toml")),
+            Some(PathBuf::from("/home/me/.config/vilog/config.toml")),
             "{vars:?}"
         );
     }

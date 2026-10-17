@@ -250,7 +250,7 @@ fn an_empty_mapping_takes_no_place_from_another() {
 #[test]
 #[ignore = "dies of SIGBUS on purpose"]
 fn fault_outside_every_mapping() {
-    if env::var_os("JLV_FAULT_OUTSIDE").is_none() {
+    if env::var_os("VILOG_FAULT_OUTSIDE").is_none() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -268,7 +268,7 @@ fn a_fault_outside_every_mapping_still_kills_the_process() {
     let mut child = Command::new(env::current_exe().unwrap())
         .args(["--exact", "source::tests::fault_outside_every_mapping"])
         .args(["--ignored", "--quiet"])
-        .env("JLV_FAULT_OUTSIDE", "1")
+        .env("VILOG_FAULT_OUTSIDE", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
