@@ -10,9 +10,9 @@ mod tests;
 
 #[derive(Debug, PartialEq, Eq, Parser)]
 #[command(
-    name = "jlv",
+    name = "vilog",
     version,
-    about = "Terminal log viewer for Java application logs"
+    about = "Terminal log viewer for application logs"
 )]
 pub struct Args {
     /// Log file to open

@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use insta::assert_snapshot;
-use jlv::format::{Entry, EntryGrouper, Preset, strip_ansi};
+use vilog::format::{Entry, EntryGrouper, Preset, strip_ansi};
 
 mod common;
 

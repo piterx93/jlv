@@ -1,4 +1,4 @@
-//! The log layouts jlv knows and how to recognise the first line of an entry in each.
+//! The log layouts vilog knows and how to recognise the first line of an entry in each.
 
 use std::fmt;
 use std::ops::Range;

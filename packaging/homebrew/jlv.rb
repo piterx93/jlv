@@ -3,8 +3,7 @@ class Jlv < Formula
   desc "Terminal log viewer for Java application logs"
   homepage "https://github.com/piterx93/jlv"
   url "https://github.com/piterx93/jlv/archive/refs/tags/v1.0.0.tar.gz"
-  # TODO: replace after the tag exists: curl -sL <url> | shasum -a 256
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "b87683f3926c97c189f14106cc03ea6c7a303dbcb3afae4771a609c6d61c720b"
   license any_of: ["MIT", "Apache-2.0"]
   head "https://github.com/piterx93/jlv.git", branch: "develop"
 

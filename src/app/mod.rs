@@ -2295,6 +2295,11 @@ impl App {
         self.notice.as_deref()
     }
 
+    /// Makes `notice` the [notice](Self::notice), until the next key.
+    pub fn set_notice(&mut self, notice: String) {
+        self.notice = Some(Cow::Owned(notice));
+    }
+
     /// Whether [`Action::Quit`] has been applied.
     pub fn should_quit(&self) -> bool {
         self.quit

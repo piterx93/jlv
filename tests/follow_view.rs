@@ -8,18 +8,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
-use jlv::app::App;
-use jlv::event_loop;
-use jlv::filter::Filters;
-use jlv::follow::Options;
-use jlv::format::Preset;
-use jlv::matcher::{self, Matcher};
-use jlv::source;
-use jlv::ui::Theme;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
+use vilog::app::App;
+use vilog::event_loop;
+use vilog::filter::Filters;
+use vilog::follow::Options;
+use vilog::format::Preset;
+use vilog::matcher::{self, Matcher};
+use vilog::source;
+use vilog::ui::Theme;
 
 /// How long a test waits for the viewer to catch up: far longer than it takes, so
 /// that a slow machine doesn't fail a test.

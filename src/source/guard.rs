@@ -54,7 +54,7 @@ struct Slot {
     len: AtomicUsize,
 }
 
-/// jlv maps one file at a time, two while one replaces the other; the tests map many
+/// vilog maps one file at a time, two while one replaces the other; the tests map many
 /// at once. A mapping that finds no free slot is not guarded.
 static SLOTS: [Slot; 256] = [const {
     Slot {

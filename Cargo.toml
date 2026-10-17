@@ -1,15 +1,15 @@
 [package]
-name = "jlv"
-version = "1.0.0"
+name = "vilog"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Terminal log viewer for Java application logs"
+description = "Terminal log viewer for application logs"
 authors = ["Piotr Owczarek <piter19993@gmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/piterx93/jlv"
-homepage = "https://github.com/piterx93/jlv"
+repository = "https://github.com/piterx93/vilog"
+homepage = "https://github.com/piterx93/vilog"
 readme = "README.md"
-keywords = ["log", "viewer", "tui", "java", "terminal"]
+keywords = ["log", "viewer", "tui", "terminal", "logging"]
 categories = ["command-line-utilities", "development-tools"]
 publish = false
 exclude = ["docs/demos/", "demo-wildfly.log", "mutants.out*", "scripts/", ".github/"]
@@ -50,12 +50,17 @@ debug = false
 
 [package.metadata.deb]
 section = "utils"
+# The package was called jlv up to 1.0; Conflicts plus Replaces lets dpkg remove it.
+conflicts = "jlv"
+replaces = "jlv"
 
 [package.metadata.generate-rpm]
 auto-req = "no"
 assets = [
-    { source = "target/release/jlv", dest = "/usr/bin/jlv", mode = "755" },
+    { source = "target/release/vilog", dest = "/usr/bin/vilog", mode = "755" },
 ]
+# The package was called jlv up to 1.0.
+obsoletes = { jlv = "*" }
 
 [[bench]]
 name = "engine"

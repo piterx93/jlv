@@ -11,7 +11,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use jiff::civil::{Date, date};
-use jlv::format::{Level, Preset};
+use vilog::format::{Level, Preset};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Spec {

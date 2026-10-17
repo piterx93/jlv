@@ -13,12 +13,12 @@ cargo bench --bench nfr      # heap per entry, first screen, idle CPU, follow la
 For the PRD's 2 GB, write the log once, outside the repository, and share it:
 
 ```sh
-export JLV_BENCH_LOG=/tmp/jlv-bench.log JLV_BENCH_SIZE=2G
+export VILOG_BENCH_LOG=/tmp/vilog-bench.log VILOG_BENCH_SIZE=2G
 cargo bench --bench engine && cargo bench --bench nfr
-rm "$JLV_BENCH_LOG"
+rm "$VILOG_BENCH_LOG"
 ```
 
-`JLV_BENCH_LOG` is written only if nothing is there yet. The same log, or one in
+`VILOG_BENCH_LOG` is written only if nothing is there yet. The same log, or one in
 another preset's layout, comes from
 `cargo run --release --example generate_log -- <path> 2G [--format spring3]`.
 
@@ -33,6 +33,6 @@ another preset's layout, comes from
 | Bytes per entry | `nfr`: the 32-byte record, the index `Vec` with its spare capacity, and everything the viewer allocates for a complete index, counted by a global allocator. |
 | First screen | `nfr`: from starting the release binary under `script(1)` on a 200x50 pseudo-terminal until the last entry's text is in its output; median of five launches after one unmeasured one. |
 | Idle CPU | `nfr`: CPU time of the same binary, from `ps`, over 20 s once indexing is done and nothing writes the file. Linux's `ps` counts whole seconds only. |
-| Follow latency | `nfr`: jlv's own event loop and watcher in process, drawing on a `TestBackend`, from appending a line to the frame that shows it; twenty appends at times spread over the loop's 100 ms wait. A pseudo-terminal won't do here: ratatui writes only the cells that change. |
+| Follow latency | `nfr`: vilog's own event loop and watcher in process, drawing on a `TestBackend`, from appending a line to the frame that shows it; twenty appends at times spread over the loop's 100 ms wait. A pseudo-terminal won't do here: ratatui writes only the cells that change. |
 
 The log is read from the page cache: the run that writes it leaves it there.

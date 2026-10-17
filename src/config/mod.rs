@@ -1,5 +1,6 @@
-//! The configuration file (PRD §11): `$XDG_CONFIG_HOME/jlv/config.toml`, or the
-//! file `--config` names.
+//! The configuration file (PRD §11): `$XDG_CONFIG_HOME/vilog/config.toml`, or the
+//! file `--config` names. Without the first, `$XDG_CONFIG_HOME/jlv/config.toml` is
+//! read, where the file was before vilog had its name.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -20,7 +21,7 @@ use crate::keymap::{self, Key, Keymap};
 mod tests;
 
 /// Everything the configuration file sets. The default is what PRD §11 lists, and
-/// what jlv uses without a file.
+/// what vilog uses without a file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub ui: Ui,
@@ -100,7 +101,7 @@ pub struct Follow {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Filters {
-    /// `default_class_excludes`, one exclude rule per item: the class filter jlv
+    /// `default_class_excludes`, one exclude rule per item: the class filter vilog
     /// starts with unless `--class` is given.
     #[serde(deserialize_with = "class_excludes")]
     pub default_class_excludes: Classes,
@@ -161,10 +162,10 @@ impl Default for Follow {
 impl Config {
     /// The configuration `text` holds, in TOML. A key it leaves out keeps its
     /// default, so an empty text is the default configuration. Invalid TOML, a key
-    /// or section jlv doesn't know, a value of the wrong type, an unknown colour, a
+    /// or section vilog doesn't know, a value of the wrong type, an unknown colour, a
     /// timestamp format strftime can't use, a class rule that doesn't parse and a
     /// `poll_interval_ms` of 0 are errors that say which line they are on and name
-    /// the key. So are, in `[keys]`, an action name jlv doesn't know, an empty list
+    /// the key. So are, in `[keys]`, an action name vilog doesn't know, an empty list
     /// of keys and a key outside the [key syntax](crate::keymap::Key); a key bound
     /// to two actions is an error that names both.
     pub fn parse(text: &str) -> Result<Config, String> {
@@ -187,7 +188,7 @@ impl Config {
 
 impl Colors {
     /// The style of `level` in the level column; the terminal's default style for a
-    /// level jlv doesn't know.
+    /// level vilog doesn't know.
     pub fn level(&self, level: Option<Level>) -> Style {
         match level {
             Some(Level::Trace) => self.trace,
@@ -215,16 +216,25 @@ impl Ui {
 }
 
 /// Where the configuration file is when `--config` doesn't say:
-/// `$XDG_CONFIG_HOME/jlv/config.toml`, or `$HOME/.config/jlv/config.toml` when
+/// `$XDG_CONFIG_HOME/vilog/config.toml`, or `$HOME/.config/vilog/config.toml` when
 /// `XDG_CONFIG_HOME` isn't set or is empty. `None` without either variable. `var`
 /// gives the environment variables, `None` for one that isn't set.
 pub fn default_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    Some(config_home(var)?.join("vilog/config.toml"))
+}
+
+/// Where the configuration file was before vilog had its name: [`default_path`]
+/// with `jlv` for `vilog`.
+pub(crate) fn old_default_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    Some(config_home(var)?.join("jlv/config.toml"))
+}
+
+fn config_home(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let set = |name| var(name).filter(|value| !value.is_empty());
-    let dir = match set("XDG_CONFIG_HOME") {
-        Some(home) => PathBuf::from(home),
-        None => PathBuf::from(set("HOME")?).join(".config"),
-    };
-    Some(dir.join("jlv/config.toml"))
+    match set("XDG_CONFIG_HOME") {
+        Some(home) => Some(PathBuf::from(home)),
+        None => Some(PathBuf::from(set("HOME")?).join(".config")),
+    }
 }
 
 fn timestamp_format<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {

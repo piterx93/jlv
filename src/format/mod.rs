@@ -44,7 +44,7 @@ impl Level {
         Level::Fatal,
     ];
 
-    /// The level's name in capitals, as jlv shows it.
+    /// The level's name in capitals, as vilog shows it.
     pub fn name(self) -> &'static str {
         match self {
             Level::Trace => "TRACE",

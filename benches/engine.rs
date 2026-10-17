@@ -1,14 +1,14 @@
 //! Indexing, filtering and exception and bookmark jumps over a generated log (PRD §13). See
-//! `docs/benchmarks.md`; `JLV_BENCH_SIZE=2G` makes it the PRD's 2 GB.
+//! `docs/benchmarks.md`; `VILOG_BENCH_SIZE=2G` makes it the PRD's 2 GB.
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput};
-use jlv::app::Action;
-use jlv::filter::{Engine, Filters, Indexed, Levels, Options};
-use jlv::format::Level;
-use jlv::matcher::{self, Matcher};
+use vilog::app::Action;
+use vilog::filter::{Engine, Filters, Indexed, Levels, Options};
+use vilog::format::Level;
+use vilog::matcher::{self, Matcher};
 
 #[expect(dead_code, reason = "the probe lines appended to the log are for nfr")]
 mod support;

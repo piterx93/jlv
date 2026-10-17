@@ -1,5 +1,0 @@
-# The configuration the demo tapes run jlv with. vhs can't press function keys, so
-# the panels the demos open get a second key next to their F-key.
-[keys]
-time_panel = ["F5", "s"]
-class_panel = ["F6", "o"]

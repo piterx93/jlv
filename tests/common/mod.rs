@@ -3,8 +3,8 @@
 use std::fs;
 use std::path::Path;
 
-use jlv::format::Preset;
-use jlv::source;
+use vilog::format::Preset;
+use vilog::source;
 
 /// Every preset but `Raw`, with its fixture in `tests/fixtures`, in the order of
 /// [`Preset::ALL`].

@@ -150,7 +150,7 @@ fn only_shows_just_the_levels_it_names() {
     assert_eq!(shown(levels), [Level::Warn, Level::Error]);
 }
 
-/// A headless line, an INFO entry and an entry whose level jlv doesn't know.
+/// A headless line, an INFO entry and an entry whose level vilog doesn't know.
 const WITHOUT_LEVELS: &str = "\
 started
 2026-10-07 12:00:00.000 [main] INFO  com.myco.Order - created
@@ -343,7 +343,7 @@ struct Entry {
 #[derive(Debug, Clone)]
 struct Head {
     second: u8,
-    /// `None` is written as `SEVERE`, a level word jlv doesn't know.
+    /// `None` is written as `SEVERE`, a level word vilog doesn't know.
     level: Option<Level>,
     class: &'static str,
     message: &'static str,
