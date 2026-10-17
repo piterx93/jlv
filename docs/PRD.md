@@ -171,7 +171,7 @@ Columns come from the same candidate keys and the same per-file mapping as JSON 
 
 - Sample the first ~200 non-empty lines (for `.gz`: the first decompressed lines).
 - Score each format by the ratio of lines that start an entry in it. Continuation lines (indented lines, exception lines of §6.5) are left out of the sample.
-- Pick the highest score ≥ 60%; otherwise fall back to **raw** and show a status-bar notice.
+- Pick the highest score ≥ 60%; otherwise fall back to **raw** and say so in the header.
 - Ties go to the earlier format in this order: formats from the config (§11), text presets with a date, JSON lines, logfmt, then the presets without a date or level (`python-basic`, `uvicorn`, `dotnet-console`, `go-log`), which are the loosest.
 - For JSON and logfmt the same sample also chooses the key mapping.
 - User override: `--format <name>` and `P` to cycle formats at runtime.
@@ -334,7 +334,7 @@ An unknown `--format` name is an error that lists the valid ones. Every `--forma
 
 ## 11. Configuration
 
-`$XDG_CONFIG_HOME/vilog/config.toml` (default `~/.config/vilog/config.toml`), or `--config <PATH>`. When the vilog file doesn't exist but `jlv/config.toml` does, the old file is read and a notice in the status bar says to move it.
+`$XDG_CONFIG_HOME/vilog/config.toml` (default `~/.config/vilog/config.toml`), or `--config <PATH>`. When the vilog file doesn't exist but `jlv/config.toml` does, the old file is read and a notice in the header says where to move it, until the first key.
 
 ```toml
 [ui]
