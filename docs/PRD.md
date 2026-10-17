@@ -55,7 +55,7 @@ Target: Java developers, DevOps/SRE, support engineers. Open source project.
 - **Local development:** gates run natively (`scripts/check`), on macOS as well. Linux-specific behaviour (inotify, musl) is tested by CI, which builds and tests the x86_64 Linux target on every push.
 - **Terminals:** must work with 256 colors and a minimum 80×24 terminal; use truecolor when available; respect `NO_COLOR`.
 - **Distribution:** GitHub Releases (prebuilt binaries), `.deb` / `.rpm` packages; `cargo install` and a Homebrew tap once the repo is public.
-- **Visibility:** the repo stays private until 1.0 and is open-sourced after that.
+- **Visibility:** the repo was private until 1.0 and has been public since.
 - **License:** MIT OR Apache-2.0.
 
 ### 5.1 CI/CD (GitHub Actions) — set up first, in M0
@@ -86,7 +86,7 @@ Mutation testing doesn't run in CI: on a hosted runner the full suite takes hour
 - deb/rpm get `X.Y.Z~dev.<run>`, so that package managers sort dev builds before the release.
 - On `main`, the job fails if the tag `vX.Y.Z` already exists. This forces a version bump before each release.
 
-**Merge blocking** (GitHub repository ruleset on `develop` and `main`). **Disabled until the repo goes public at 1.0.** The `gh api` call in the script is commented out.
+**Merge blocking** (GitHub repository ruleset on `develop` and `main`). Disabled until the repo went public at 1.0, enabled since.
 - Changes must go through a pull request; direct pushes are not allowed.
 - The required status check **`ci-required`** must pass, and the branch must be up to date before merging.
 - Force-pushes and branch deletion are blocked.
