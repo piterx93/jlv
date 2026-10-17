@@ -21,6 +21,7 @@ flate2 = "1.1"
 # The bundled tz database is a fallback for systems without one, e.g. a minimal
 # container running the static binary.
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+libc = "0.2"
 memchr = "2.8"
 memmap2 = "0.9"
 notify = "8.2"

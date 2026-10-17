@@ -1,8 +1,11 @@
 use std::fs;
 use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -146,6 +149,143 @@ fn mapping_outlives_the_deleted_file() {
     let source = mapped(&path);
     fs::remove_file(&path).unwrap();
     assert_eq!(source.bytes(), b"first\nsecond\n");
+}
+
+/// Content over many pages, also of 16 KiB ones, with no zero byte in it.
+fn pages_of_text() -> Vec<u8> {
+    (0..300_000u32).map(|i| b'a' + (i % 26) as u8).collect()
+}
+
+fn truncate(path: &Path, len: u64) {
+    File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(len)
+        .unwrap();
+}
+
+#[test]
+fn bytes_past_a_truncation_read_as_zeros() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &pages_of_text());
+    let source = mapped(&path);
+    truncate(&path, 0);
+    // the last byte first, so the fault is in the middle of a page
+    assert_eq!(source.bytes()[299_999], 0);
+    assert!(source.bytes().iter().all(|&b| b == 0));
+    assert_eq!(source.bytes().len(), 300_000);
+}
+
+#[test]
+fn bytes_before_a_truncation_are_kept() {
+    let dir = TempDir::new().unwrap();
+    let content = pages_of_text();
+    let path = file_with(&dir, &content);
+    let source = mapped(&path);
+    truncate(&path, 100_000);
+    let (kept, cut) = source.bytes().split_at(100_000);
+    assert_eq!(kept, &content[..100_000]);
+    assert!(cut.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn truncation_under_a_reader_on_another_thread_reads_as_zeros() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &pages_of_text());
+    let source = mapped(&path);
+    truncate(&path, 0);
+    let zeros = thread::scope(|s| {
+        s.spawn(|| source.bytes().iter().filter(|&&b| b == 0).count())
+            .join()
+            .unwrap()
+    });
+    assert_eq!(zeros, 300_000);
+}
+
+#[test]
+fn every_live_mapping_survives_a_truncation() {
+    let dir = TempDir::new().unwrap();
+    let first = file_with(&dir, &pages_of_text());
+    let second = dir.path().join("second.log");
+    fs::write(&second, pages_of_text()).unwrap();
+    drop(mapped(&first));
+    let sources = [mapped(&first), mapped(&second)];
+    truncate(&first, 0);
+    truncate(&second, 0);
+    for source in &sources {
+        assert!(source.bytes().iter().all(|&b| b == 0));
+    }
+}
+
+#[test]
+fn a_dropped_mapping_gives_its_place_to_the_next() {
+    let dir = TempDir::new().unwrap();
+    let path = file_with(&dir, &pages_of_text());
+    for _ in 0..300 {
+        drop(mapped(&path));
+    }
+    let source = mapped(&path);
+    truncate(&path, 0);
+    assert!(source.bytes().iter().all(|&b| b == 0));
+}
+
+#[test]
+fn an_empty_mapping_takes_no_place_from_another() {
+    let dir = TempDir::new().unwrap();
+    let empty = dir.path().join("empty.log");
+    fs::write(&empty, b"").unwrap();
+    let path = file_with(&dir, &pages_of_text());
+    // What a file truncated between `Source::map`'s size check and the mapping gives.
+    // SAFETY: nothing changes the empty file.
+    let nothing = Guarded::new(unsafe { Mmap::map(&File::open(&empty).unwrap()).unwrap() });
+    let source = mapped(&path);
+    drop(nothing);
+    truncate(&path, 0);
+    assert!(source.bytes().iter().all(|&b| b == 0));
+}
+
+/// Faults past the end of a mapping the guard doesn't know. Run in a process of its own
+/// by [`a_fault_outside_every_mapping_still_kills_the_process`].
+#[test]
+#[ignore = "dies of SIGBUS on purpose"]
+fn fault_outside_every_mapping() {
+    if env::var_os("JLV_FAULT_OUTSIDE").is_none() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let _guarded = mapped(&file_with(&dir, b"installs the handler\n"));
+    let other = dir.path().join("other.log");
+    fs::write(&other, pages_of_text()).unwrap();
+    // SAFETY: none, the truncation below is the point.
+    let unguarded = unsafe { Mmap::map(&File::open(&other).unwrap()).unwrap() };
+    truncate(&other, 0);
+    std::hint::black_box(unguarded[299_999]);
+}
+
+#[test]
+fn a_fault_outside_every_mapping_still_kills_the_process() {
+    let mut child = Command::new(env::current_exe().unwrap())
+        .args(["--exact", "source::tests::fault_outside_every_mapping"])
+        .args(["--ignored", "--quiet"])
+        .env("JLV_FAULT_OUTSIDE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("the fault is handled over and over instead of killing the process");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.signal(), Some(libc::SIGBUS));
 }
 
 #[test]

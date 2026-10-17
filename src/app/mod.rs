@@ -1126,7 +1126,7 @@ impl App {
         for change in changes {
             self.file_changed(change);
         }
-        // Rows past the file's new end would raise SIGBUS at the next draw, and the
+        // Rows past the file's new end would read as zeros at the next draw, and the
         // watcher may only report the truncation at its next poll.
         let truncation = self.watch.as_ref().and_then(|w| w.truncation(self.size()));
         if let Some(change) = truncation {
