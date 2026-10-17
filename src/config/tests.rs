@@ -69,7 +69,7 @@ fn a_key_left_out_keeps_its_default() {
 }
 
 #[test]
-fn a_level_jlv_does_not_know_has_the_terminal_default_style() {
+fn a_level_vilog_does_not_know_has_the_terminal_default_style() {
     assert_eq!(Config::default().colors.level(None), Style::new());
 }
 

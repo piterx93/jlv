@@ -56,7 +56,7 @@ pub fn tmux_passthrough(sequence: &[u8]) -> Vec<u8> {
     wrapped
 }
 
-/// What the environment says about where jlv runs.
+/// What the environment says about where vilog runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Env {
     /// Logged in over SSH: `SSH_CONNECTION` or `SSH_TTY` is set.
@@ -136,7 +136,7 @@ pub fn copy<E>(
     Ok(Via::Osc52)
 }
 
-/// The clipboard of the system jlv runs on: [`copy`] with `arboard` as the native
+/// The clipboard of the system vilog runs on: [`copy`] with `arboard` as the native
 /// clipboard and stdout as the terminal.
 pub struct System {
     env: Env,

@@ -48,7 +48,7 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-/// The text after `jlv` in `jlv --version`, e.g. `0.3.0-dev.42 (a1b2c3d)`.
+/// The text after `vilog` in `vilog --version`, e.g. `0.3.0-dev.42 (a1b2c3d)`.
 pub fn version_string(version: &str, commit: Option<&str>) -> String {
     match commit {
         Some(commit) => format!("{version} ({commit})"),
@@ -56,7 +56,7 @@ pub fn version_string(version: &str, commit: Option<&str>) -> String {
     }
 }
 
-/// What `start` hands over when jlv goes on to show a file.
+/// What `start` hands over when vilog goes on to show a file.
 #[derive(Debug)]
 pub struct Launch {
     pub args: Args,
@@ -67,13 +67,13 @@ pub struct Launch {
 /// Parses the command line (program name first), reads the configuration file and
 /// opens the log file. The configuration file is the one `--config` names, which
 /// has to exist, or else the one at [`config::default_path`], read only if it
-/// exists; without either jlv runs on the defaults. `var` gives the environment
+/// exists; without either vilog runs on the defaults. `var` gives the environment
 /// variables. A gzip file is decompressed here, with the progress on stderr.
-/// Whatever ends jlv before the viewer starts is printed here and returned as `Err(exit code)`:
+/// Whatever ends vilog before the viewer starts is printed here and returned as `Err(exit code)`:
 /// 0 after `--help` or `--version`, 1 for runtime errors such as an unusable file,
 /// 2 for usage errors. A configuration file that can't be read or is invalid is a
 /// runtime error that names the file. `version` is what `--version` prints after
-/// `jlv`.
+/// `vilog`.
 pub fn start<I, T>(
     argv: I,
     version: &str,
@@ -90,11 +90,11 @@ where
     let args = Args::try_parse_from(argv)
         .map_err(|err| report_parse_exit(&err, version, stdout, stderr))?;
     if args.file == Path::new("-") {
-        let _ = writeln!(stderr, "jlv: -: reading from stdin is not supported yet");
+        let _ = writeln!(stderr, "vilog: -: reading from stdin is not supported yet");
         return Err(USAGE);
     }
     let config = load_config(args.config.as_deref(), var).map_err(|(path, err)| {
-        let _ = writeln!(stderr, "jlv: {}: {}", path.display(), err.trim_end());
+        let _ = writeln!(stderr, "vilog: {}: {}", path.display(), err.trim_end());
         FAILURE
     })?;
     match open_showing_progress(&args.file, stderr) {
@@ -104,7 +104,7 @@ where
             config,
         }),
         Err(err) => {
-            let _ = writeln!(stderr, "jlv: {}: {err}", args.file.display());
+            let _ = writeln!(stderr, "vilog: {}: {err}", args.file.display());
             Err(FAILURE)
         }
     }
@@ -131,7 +131,7 @@ fn load_config(
 }
 
 /// Opens `path` like [`source::open`]. While a gzip file is decompressed, a line
-/// `jlv: <path>: decompressing N%` is drawn over itself on `stderr`, once for each
+/// `vilog: <path>: decompressing N%` is drawn over itself on `stderr`, once for each
 /// percentage, and cleared at the end so the terminal is as before.
 fn open_showing_progress(path: &Path, stderr: &mut dyn Write) -> Result<Source, OpenError> {
     // Only a gzip file reports progress, but asking for the size costs next to nothing.
@@ -144,7 +144,7 @@ fn open_showing_progress(path: &Path, stderr: &mut dyn Write) -> Result<Source, 
             shown = Some(percent);
             let _ = write!(
                 stderr,
-                "\rjlv: {}: decompressing {percent}%",
+                "\rvilog: {}: decompressing {percent}%",
                 path.display()
             );
         }
@@ -317,7 +317,7 @@ where
 /// watched, before it takes in what changed and redraws.
 const REDRAW: Duration = Duration::from_millis(100);
 
-/// `err` saying which file it is about, for the one line jlv prints.
+/// `err` saying which file it is about, for the one line vilog prints.
 fn in_file(path: &Path, err: io::Error) -> io::Error {
     io::Error::new(err.kind(), format!("{}: {err}", path.display()))
 }
@@ -336,7 +336,7 @@ fn report_parse_exit(
 ) -> u8 {
     // clap's own version text would show the Cargo version, not the injected one.
     if err.kind() == ErrorKind::DisplayVersion {
-        let _ = writeln!(stdout, "jlv {version}");
+        let _ = writeln!(stdout, "vilog {version}");
         SUCCESS
     } else if err.use_stderr() {
         let _ = write!(stderr, "{err}");

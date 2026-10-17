@@ -1,6 +1,6 @@
 //! The PRD §13 numbers criterion can't take, printed once each: the heap the
 //! viewer keeps per entry, the release binary's first screen and idle CPU on a
-//! pseudo-terminal made by `script(1)`, and the follow latency of jlv's event loop.
+//! pseudo-terminal made by `script(1)`, and the follow latency of vilog's event loop.
 //! See `docs/benchmarks.md`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -14,11 +14,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use jlv::config::Config;
-use jlv::filter::{Filters, Levels};
-use jlv::format::Level;
-use jlv::index::Record;
-use jlv::ui::Theme;
 use memchr::memmem;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
@@ -26,6 +21,11 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Position, Size};
 use tempfile::TempDir;
+use vilog::config::Config;
+use vilog::filter::{Filters, Levels};
+use vilog::format::Level;
+use vilog::index::Record;
+use vilog::ui::Theme;
 
 mod support;
 
@@ -75,9 +75,9 @@ fn main() {
     let log = BenchLog::get();
     println!("log: {} ({})", log.path().display(), log.size_label());
     heap_per_entry(&log);
-    let jlv = env!("CARGO_BIN_EXE_jlv");
-    first_screen(jlv, &log);
-    idle_cpu(jlv, &log);
+    let vilog = env!("CARGO_BIN_EXE_vilog");
+    first_screen(vilog, &log);
+    idle_cpu(vilog, &log);
     follow_latency(&log);
 }
 
@@ -111,13 +111,13 @@ fn heap_per_entry(log: &BenchLog) {
 }
 
 /// From starting `script` to the log's last entry on the screen, over a few launches.
-fn first_screen(jlv: &str, log: &BenchLog) {
+fn first_screen(vilog: &str, log: &BenchLog) {
     let last = last_entry_token(log.path());
     let mut times = Vec::new();
     // The first launch isn't counted: macOS checks a freshly built binary then.
     for launch in 0..=LAUNCHES {
         let started = Instant::now();
-        let session = Session::start(jlv, log.path());
+        let session = Session::start(vilog, log.path());
         let shown = session.wait_for(&last, Duration::from_secs(30));
         if launch > 0 {
             times.push(shown.duration_since(started));
@@ -132,11 +132,11 @@ fn first_screen(jlv: &str, log: &BenchLog) {
     );
 }
 
-/// The CPU jlv takes once it has indexed the file and nothing changes.
-fn idle_cpu(jlv: &str, log: &BenchLog) {
-    let session = Session::start(jlv, log.path());
+/// The CPU vilog takes once it has indexed the file and nothing changes.
+fn idle_cpu(vilog: &str, log: &BenchLog) {
+    let session = Session::start(vilog, log.path());
     session.wait_for(&last_entry_token(log.path()), Duration::from_secs(30));
-    let pid = session.jlv_pid();
+    let pid = session.vilog_pid();
     wait_until_idle(pid);
     let cpu = cpu_time(pid);
     thread::sleep(IDLE);
@@ -150,13 +150,13 @@ fn idle_cpu(jlv: &str, log: &BenchLog) {
 }
 
 /// How long lines appended to the file take to show, written at times spread over
-/// the 100 ms the event loop waits between looks. This runs jlv's own event loop and
+/// the 100 ms the event loop waits between looks. This runs vilog's own event loop and
 /// watcher in process, drawing on a [`TestBackend`]: on a real terminal, ratatui only
 /// writes the cells that changed, which leaves no text to look for in the output.
 fn follow_latency(log: &BenchLog) {
     let mut app = log.viewer(true);
     let file = File::open(log.path()).expect("the log");
-    app.watch(log.path(), file, jlv::watch_options(&Config::default()))
+    app.watch(log.path(), file, vilog::watch_options(&Config::default()))
         .expect("a watch on the log");
     // Latency while indexing goes on isn't what §13 asks about.
     support::poll_until(&mut app, |app| app.progress().is_complete());
@@ -185,7 +185,7 @@ fn follow_latency(log: &BenchLog) {
             .collect::<Vec<_>>()
     });
     let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-    jlv::event_loop(
+    vilog::event_loop(
         &mut terminal,
         &mut app,
         Theme::Styled,
@@ -314,7 +314,7 @@ fn screen_text(buffer: &Buffer) -> String {
     buffer.content().iter().map(Cell::symbol).collect()
 }
 
-/// Waits until jlv takes less than 100 ms of CPU in a second, a fraction of what
+/// Waits until vilog takes less than 100 ms of CPU in a second, a fraction of what
 /// indexing takes: the index is complete.
 fn wait_until_idle(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -322,7 +322,7 @@ fn wait_until_idle(pid: u32) {
     loop {
         assert!(
             Instant::now() < deadline,
-            "jlv was still busy after two minutes"
+            "vilog was still busy after two minutes"
         );
         thread::sleep(Duration::from_secs(1));
         let now = cpu_time(pid);
@@ -359,20 +359,20 @@ fn append(path: &Path, line: &[u8]) {
     file.write_all(line).expect("an append");
 }
 
-/// jlv running on a pseudo-terminal of `ROWS` x `COLUMNS`, with everything it draws
+/// vilog running on a pseudo-terminal of `ROWS` x `COLUMNS`, with everything it draws
 /// collected as it comes.
 struct Session {
     script: Child,
     keys: ChildStdin,
     screen: Arc<Mutex<Vec<u8>>>,
-    /// An empty config dir, so that jlv runs on the defaults rather than the user's
+    /// An empty config dir, so that vilog runs on the defaults rather than the user's
     /// configuration.
     _config: TempDir,
 }
 
 impl Session {
-    fn start(jlv: &str, log: &Path) -> Session {
-        let shell = format!("stty rows {ROWS} cols {COLUMNS}; exec \"$JLV\" \"$LOG\"");
+    fn start(vilog: &str, log: &Path) -> Session {
+        let shell = format!("stty rows {ROWS} cols {COLUMNS}; exec \"$VILOG\" \"$LOG\"");
         let mut command = Command::new("script");
         // BSD and util-linux `script` take the command differently.
         if cfg!(target_os = "linux") {
@@ -383,7 +383,7 @@ impl Session {
         let config = TempDir::new().expect("a temp config dir");
         let mut script = command
             .env("XDG_CONFIG_HOME", config.path())
-            .env("JLV", jlv)
+            .env("VILOG", vilog)
             .env("LOG", log)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -408,7 +408,7 @@ impl Session {
         }
     }
 
-    /// When `text` showed up in what jlv drew.
+    /// When `text` showed up in what vilog drew.
     fn wait_for(&self, text: &[u8], timeout: Duration) -> Instant {
         let deadline = Instant::now() + timeout;
         let shown = String::from_utf8_lossy(text);
@@ -424,8 +424,8 @@ impl Session {
         }
     }
 
-    /// jlv's process, which `script` started and the shell replaced itself with.
-    fn jlv_pid(&self) -> u32 {
+    /// vilog's process, which `script` started and the shell replaced itself with.
+    fn vilog_pid(&self) -> u32 {
         let children = Command::new("pgrep")
             .args(["-P", &self.script.id().to_string()])
             .output()
@@ -437,7 +437,7 @@ impl Session {
     }
 
     fn quit(mut self) {
-        self.keys.write_all(b"q").expect("jlv to read keys");
+        self.keys.write_all(b"q").expect("vilog to read keys");
         drop(self.keys);
         self.script.wait().expect("script to end");
     }

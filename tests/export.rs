@@ -7,11 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
-use jlv::app::App;
-use jlv::filter::{Filters, Levels};
-use jlv::format::{Level, Preset};
-use jlv::source;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use vilog::app::App;
+use vilog::filter::{Filters, Levels};
+use vilog::format::{Level, Preset};
+use vilog::source;
 
 fn fixture(name: &str) -> Vec<u8> {
     fs::read(

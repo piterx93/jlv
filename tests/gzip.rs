@@ -5,9 +5,9 @@ use std::io::Write;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use jlv::format::detect;
-use jlv::source::{self, Origin};
 use tempfile::TempDir;
+use vilog::format::detect;
+use vilog::source::{self, Origin};
 
 mod common;
 

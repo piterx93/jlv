@@ -10,8 +10,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use jlv::follow::{Event, Options, Watcher};
 use tempfile::TempDir;
+use vilog::follow::{Event, Options, Watcher};
 
 /// How long a test waits for the watcher to catch up: far longer than it takes, so
 /// that a slow machine doesn't fail a test.

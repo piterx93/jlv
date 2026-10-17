@@ -68,7 +68,7 @@ pub fn gzip(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// A viewer in `Raw` over the gzip file `/var/log/app.log.gz` holding `gzip`, opened
-/// as jlv opens a file by default, at the end. It hasn't taken in any entries yet.
+/// as vilog opens a file by default, at the end. It hasn't taken in any entries yet.
 pub fn gzip_app(gzip: &[u8]) -> App {
     App::new(
         Path::new("/var/log/app.log.gz"),

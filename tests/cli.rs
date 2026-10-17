@@ -18,9 +18,9 @@ const NOBODY: u32 = 65534;
 
 /// The binary, with its configuration directory pointed at one that doesn't exist,
 /// so that whatever configuration the machine has stays out of the tests.
-fn jlv() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_jlv"));
-    command.env("XDG_CONFIG_HOME", "/nonexistent/jlv-tests");
+fn vilog() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vilog"));
+    command.env("XDG_CONFIG_HOME", "/nonexistent/vilog-tests");
     command
 }
 
@@ -33,10 +33,10 @@ fn stderr(out: &Output) -> String {
 }
 
 fn expected_version() -> String {
-    let version = option_env!("JLV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-    match option_env!("JLV_COMMIT") {
-        Some(commit) => format!("jlv {version} ({commit})\n"),
-        None => format!("jlv {version}\n"),
+    let version = option_env!("VILOG_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    match option_env!("VILOG_COMMIT") {
+        Some(commit) => format!("vilog {version} ({commit})\n"),
+        None => format!("vilog {version}\n"),
     }
 }
 
@@ -55,8 +55,8 @@ fn mkfifo(path: &Path) {
     assert!(status.success(), "mkfifo {}", path.display());
 }
 
-/// The output of jlv, failing instead of hanging when it runs longer than `limit`:
-/// opening a FIFO for reading blocks until a writer shows up, so a jlv that opens
+/// The output of vilog, failing instead of hanging when it runs longer than `limit`:
+/// opening a FIFO for reading blocks until a writer shows up, so a vilog that opens
 /// before checking the file type would hang.
 fn output_within(cmd: &mut Command, limit: Duration) -> Output {
     let mut child = cmd
@@ -70,7 +70,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Output {
         if start.elapsed() > limit {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("jlv still running after {limit:?}");
+            panic!("vilog still running after {limit:?}");
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -79,7 +79,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Output {
 
 #[test]
 fn long_version_prints_name_and_version() {
-    let out = jlv().arg("--version").output().unwrap();
+    let out = vilog().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(stdout(&out), expected_version());
     assert_eq!(stderr(&out), "");
@@ -87,7 +87,7 @@ fn long_version_prints_name_and_version() {
 
 #[test]
 fn short_v_prints_name_and_version() {
-    let out = jlv().arg("-V").output().unwrap();
+    let out = vilog().arg("-V").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(stdout(&out), expected_version());
 }
@@ -96,7 +96,7 @@ fn short_v_prints_name_and_version() {
 fn version_with_a_file_prints_the_version_and_exits_0() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, "app.log");
-    let out = jlv().arg(&file).arg("--version").output().unwrap();
+    let out = vilog().arg(&file).arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(stdout(&out), expected_version());
     assert_eq!(stderr(&out), "");
@@ -104,15 +104,15 @@ fn version_with_a_file_prints_the_version_and_exits_0() {
 
 #[test]
 fn missing_file_argument_exits_2_with_usage_on_stderr() {
-    let out = jlv().output().unwrap();
+    let out = vilog().output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(stdout(&out), "");
-    assert!(stderr(&out).contains("Usage: jlv"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("Usage: vilog"), "{}", stderr(&out));
 }
 
 #[test]
 fn unknown_format_exits_2() {
-    let out = jlv().args(["-f", "log4j", "app.log"]).output().unwrap();
+    let out = vilog().args(["-f", "log4j", "app.log"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(stdout(&out), "");
     assert!(
@@ -124,11 +124,11 @@ fn unknown_format_exits_2() {
 
 #[test]
 fn dash_exits_2_saying_stdin_is_not_supported() {
-    let out = jlv().arg("-").output().unwrap();
+    let out = vilog().arg("-").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         stderr(&out),
-        "jlv: -: reading from stdin is not supported yet\n"
+        "vilog: -: reading from stdin is not supported yet\n"
     );
 }
 
@@ -136,23 +136,23 @@ fn dash_exits_2_saying_stdin_is_not_supported() {
 fn missing_file_exits_1_with_path_and_reason() {
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join("gone.log");
-    let out = jlv().arg(&missing).output().unwrap();
+    let out = vilog().arg(&missing).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stdout(&out), "");
     assert_eq!(
         stderr(&out),
-        format!("jlv: {}: no such file or directory\n", missing.display())
+        format!("vilog: {}: no such file or directory\n", missing.display())
     );
 }
 
 #[test]
 fn directory_exits_1() {
     let dir = TempDir::new().unwrap();
-    let out = jlv().arg(dir.path()).output().unwrap();
+    let out = vilog().arg(dir.path()).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        format!("jlv: {}: is a directory\n", dir.path().display())
+        format!("vilog: {}: is a directory\n", dir.path().display())
     );
 }
 
@@ -161,11 +161,11 @@ fn fifo_is_rejected_without_blocking() {
     let dir = TempDir::new().unwrap();
     let fifo = dir.path().join("pipe.log");
     mkfifo(&fifo);
-    let out = output_within(jlv().arg(&fifo), Duration::from_secs(5));
+    let out = output_within(vilog().arg(&fifo), Duration::from_secs(5));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        format!("jlv: {}: not a regular file\n", fifo.display())
+        format!("vilog: {}: not a regular file\n", fifo.display())
     );
 }
 
@@ -176,17 +176,17 @@ fn symlink_to_a_fifo_is_rejected_without_blocking() {
     mkfifo(&fifo);
     let link = dir.path().join("app.log");
     std::os::unix::fs::symlink(&fifo, &link).unwrap();
-    let out = output_within(jlv().arg(&link), Duration::from_secs(5));
+    let out = output_within(vilog().arg(&link), Duration::from_secs(5));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        format!("jlv: {}: not a regular file\n", link.display())
+        format!("vilog: {}: not a regular file\n", link.display())
     );
 }
 
 /// Root reads files whatever their mode, so when the tests run as root (the dev
 /// container) the binary is started as `nobody`; elsewhere it keeps the test's own
-/// user. Either way the file is unreadable for the jlv process.
+/// user. Either way the file is unreadable for the vilog process.
 #[test]
 fn unreadable_file_exits_1_with_permission_denied() {
     let dir = TempDir::new().unwrap();
@@ -194,7 +194,7 @@ fn unreadable_file_exits_1_with_permission_denied() {
     let file = log_file(&dir, "secret.log");
     fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
 
-    let mut cmd = jlv();
+    let mut cmd = vilog();
     cmd.arg(&file);
     if fs::metadata(&file).unwrap().uid() == 0 {
         // Under `cargo cov` nobody can't write the profile into target/, and the
@@ -204,14 +204,14 @@ fn unreadable_file_exits_1_with_permission_denied() {
         fs::set_permissions(&profiles, fs::Permissions::from_mode(0o777)).unwrap();
         cmd.uid(NOBODY)
             .gid(NOBODY)
-            .env("LLVM_PROFILE_FILE", profiles.join("jlv-%p.profraw"));
+            .env("LLVM_PROFILE_FILE", profiles.join("vilog-%p.profraw"));
     }
     let out = cmd.output().unwrap();
 
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        format!("jlv: {}: permission denied\n", file.display())
+        format!("vilog: {}: permission denied\n", file.display())
     );
 }
 
@@ -225,9 +225,9 @@ fn gzip_log_file(dir: &TempDir) -> PathBuf {
     path
 }
 
-/// Starts jlv in a session of its own, without a controlling terminal, so that it
+/// Starts vilog in a session of its own, without a controlling terminal, so that it
 /// can't take over the terminal the tests run in. Setting up the screen fails, and
-/// jlv exits with 1 once the file is open.
+/// vilog exits with 1 once the file is open.
 fn without_terminal(cmd: &mut Command) -> &mut Command {
     unsafe extern "C" {
         safe fn setsid() -> i32;
@@ -250,14 +250,14 @@ fn gzip_file_with_an_unusable_temp_dir_exits_1_naming_the_temp_dir() {
     let file = gzip_log_file(&dir);
     let missing = dir.path().join("missing");
     let out = output_within(
-        without_terminal(jlv().arg(&file).env("TMPDIR", &missing)),
+        without_terminal(vilog().arg(&file).env("TMPDIR", &missing)),
         Duration::from_secs(5),
     );
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
         format!(
-            "jlv: {}: cannot decompress into {}: no such file or directory\n",
+            "vilog: {}: cannot decompress into {}: no such file or directory\n",
             file.display(),
             missing.display()
         )
@@ -265,12 +265,12 @@ fn gzip_file_with_an_unusable_temp_dir_exits_1_naming_the_temp_dir() {
 }
 
 #[test]
-fn temp_file_of_a_gzip_file_is_gone_after_jlv_exits() {
+fn temp_file_of_a_gzip_file_is_gone_after_vilog_exits() {
     let dir = TempDir::new().unwrap();
     let file = gzip_log_file(&dir);
     let temp = TempDir::new().unwrap();
     let out = output_within(
-        without_terminal(jlv().arg(&file).env("TMPDIR", temp.path())),
+        without_terminal(vilog().arg(&file).env("TMPDIR", temp.path())),
         Duration::from_secs(5),
     );
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));

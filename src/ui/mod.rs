@@ -69,7 +69,7 @@ const TEXT_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Apply  Esc
 const SEARCH_PROMPT_HINTS: &str = "Ctrl-r Regex  Tab Ignore case  Enter Search  Esc Cancel";
 const TAB_STOP: usize = 4;
 
-/// Draws the whole screen: the header (`jlv ─ <file name> ─ <size> ─ <preset>`, the
+/// Draws the whole screen: the header (`vilog ─ <file name> ─ <size> ─ <preset>`, the
 /// preset the index reads the file in, then the follow status, then
 /// ` ─ format not recognized, showing raw` while `Raw` is shown because detection
 /// found no preset, then ` ─ indexing <percent>%` until the index is complete), the
@@ -238,7 +238,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         });
     let (status, after_dot) = follow_status(app);
     let before_dot = format!(
-        "jlv ─ {} ─ {} ─ {}{status} ",
+        "vilog ─ {} ─ {} ─ {}{status} ",
         printable(app.file_name()),
         human_size(app.size()),
         app.settings().preset,
