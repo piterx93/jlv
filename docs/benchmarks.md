@@ -1,13 +1,14 @@
 # Benchmarks
 
-The targets of PRD §13 are checked by hand, not in CI. Both benchmarks run on a
-generated Logback log: a busy service's mix of levels, stack traces under errors,
-payload lines of a few kilobytes and, rarely, one over 64 KiB. By default it is 32 MiB
-and written to the temp dir for the run.
+The targets of PRD §13 are checked by hand, not in CI. The `engine` and `nfr`
+benchmarks run on a generated Logback log: a busy service's mix of levels, stack
+traces under errors, payload lines of a few kilobytes and, rarely, one over 64 KiB.
+By default it is 32 MiB and written to the temp dir for the run.
 
 ```sh
 cargo bench --bench engine   # criterion: indexing, re-filtering, exception and bookmark jumps
 cargo bench --bench nfr      # heap per entry, first screen, idle CPU, follow latency
+cargo bench --bench json     # criterion: the JSON key scanner over a pino line, at least 1 GB/s
 ```
 
 For the PRD's 2 GB, write the log once, outside the repository, and share it:
@@ -28,6 +29,7 @@ another preset's layout, comes from
 |--------|-----|
 | Indexing MB/s | `index`: `Indexer` over the whole mapped file until complete, as the viewer runs it. |
 | Full re-filter | `re-filter/*`: a new filter generation over the complete index until every entry is evaluated, at the viewer's chunk size. `level` reads the index only; `text` and `regex` read every entry. |
+| JSON scanning GB/s | `json`: every key and value span of one fixed 400-byte pino-http line. |
 | Exception jump | `exception jump/no hit`: `]` while a level filter hides every entry with an exception, so the whole shown list is looked at. |
 | Bookmark jump | `bookmark jump/no hit`: `'` with five bookmarks, all on entries the same level filter hides. |
 | Bytes per entry | `nfr`: the 32-byte record, the index `Vec` with its spare capacity, and everything the viewer allocates for a complete index, counted by a global allocator. |

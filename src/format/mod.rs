@@ -9,6 +9,7 @@ use memchr::{memchr, memchr2};
 mod dates;
 mod detect;
 mod entry;
+pub mod json;
 mod preset;
 mod time;
 
