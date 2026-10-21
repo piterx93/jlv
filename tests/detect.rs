@@ -1,14 +1,14 @@
 //! Format detection on the fixture logs in `tests/fixtures`, one per preset.
 
-use vilog::format::{Preset, detect};
+use vilog::format::{Format, detect};
 
 mod common;
 
-use common::{fixture, fixtures, lines};
+use common::{built_in, fixture, fixtures, lines};
 
 /// What detection makes of a file with these bytes, split into lines as the viewer
 /// splits them.
-fn detect_bytes(bytes: &[u8]) -> Option<Preset> {
+fn detect_bytes(bytes: &[u8]) -> Option<&'static Format> {
     detect(lines(bytes))
 }
 
@@ -51,4 +51,34 @@ fn no_fixture_is_recognized_after_200_lines_of_jvm_startup_noise() {
         let detection = detect_bytes(&bytes);
         assert_eq!(detection, None, "{name}");
     }
+}
+
+/// Traces of Python, Go, Node.js and .NET in a Java log, as when it records what a
+/// child process printed, are left out of the sample like Java's. Only the lines of a
+/// Go trace that name a function stay in, too few to tip the score.
+#[test]
+fn every_fixture_with_traces_of_every_ecosystem_mixed_in_is_detected_as_its_own_preset() {
+    let traces = fixture("traces.log");
+    let traces = continuation_lines(&traces);
+    for (preset, name) in fixtures() {
+        let bytes = fixture(name);
+        let mixed: Vec<&[u8]> = lines(&bytes)
+            .chunks(TRACE_EVERY)
+            .flat_map(|chunk| [chunk, &traces].concat())
+            .collect();
+        assert_eq!(detect(mixed), Some(preset), "{name}");
+    }
+}
+
+/// How many fixture lines come before each copy of the traces.
+const TRACE_EVERY: usize = 30;
+
+/// The lines of `bytes` that don't start a Logback entry.
+fn continuation_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    let parser = built_in("logback")
+        .entry_parser()
+        .expect("logback has entries");
+    let mut lines = lines(bytes);
+    lines.retain(|line| parser.parse(line).is_none());
+    lines
 }

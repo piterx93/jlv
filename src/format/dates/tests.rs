@@ -674,6 +674,55 @@ fn an_entry_without_a_timestamp_takes_the_instant_before_it() {
     );
 }
 
+/// The first instant jiff knows, `-009999-01-02T01:59:59Z`, falls on a different
+/// local day and time in every zone. A time of day dated to that day but less than
+/// a second before it has no instant, as one further out has none.
+#[test]
+fn a_time_of_day_just_before_the_first_instant_has_no_timestamp() {
+    for (time, anchor, zone) in [
+        (
+            "16:59:58.000000001",
+            "-009999-01-01T00:00:00",
+            TimeZone::fixed(tz::offset(-9)),
+        ),
+        // New York's local mean time, -04:56:02.
+        (
+            "21:03:56.000000001",
+            "-009999-01-01T00:00:00",
+            zone("America/New_York"),
+        ),
+        (
+            "02:59:58.5",
+            "-009999-01-03T03:00:00",
+            TimeZone::fixed(tz::offset(25)),
+        ),
+    ] {
+        assert_eq!(
+            resolve_timestamps(&[time_of_day(time)], modified(anchor), &zone),
+            [None],
+            "{time} from {anchor} in {zone:?}"
+        );
+    }
+}
+
+/// `-009999-01-03T03:59:58` is the first instant in the zone furthest east, and
+/// the earliest local time that is an instant in every zone.
+#[test]
+fn the_earliest_local_time_in_every_zone_is_the_first_instant_furthest_east() {
+    let furthest_east =
+        TimeZone::fixed(tz::Offset::from_seconds(25 * 3600 + 59 * 60 + 59).unwrap());
+    let times = [time_of_day("03:59:58")];
+    let resolved = resolve_timestamps(&times, modified("-009999-01-03T03:59:58"), &furthest_east);
+    assert_eq!(resolved, [Some(Timestamp::MIN)]);
+}
+
+#[test]
+fn dating_forward_to_just_before_the_first_instant_gives_no_timestamp() {
+    let zone = TimeZone::fixed(tz::offset(-9));
+    let mut dates = DatesForward::new(zone.to_datetime(Timestamp::MIN));
+    assert_eq!(dates.timestamp(time("16:59:58.5"), &zone), None);
+}
+
 // --- properties ---
 
 fn zones() -> impl Strategy<Value = TimeZone> {
@@ -738,6 +787,31 @@ fn any_log_time() -> impl Strategy<Value = Option<LogTime>> {
     ]
 }
 
+/// [`any_log_time`], and the times of day in `zone` less than a second outside
+/// jiff's range, where a log dated at either end of it lands.
+fn any_log_time_in(zone: &TimeZone) -> impl Strategy<Value = Option<LogTime>> + use<> {
+    let first = zone.to_datetime(Timestamp::MIN).time();
+    let last = zone.to_datetime(Timestamp::MAX).time();
+    let outside = (1i64..1_000_000_000, any::<bool>()).prop_map(move |(nanos, before)| {
+        let step = SignedDuration::from_nanos(nanos);
+        let time = if before {
+            first.wrapping_sub(step)
+        } else {
+            last.wrapping_add(step)
+        };
+        Some(LogTime::TimeOfDay(time))
+    });
+    prop_oneof![any_log_time(), outside]
+}
+
+/// An anchor on the local date of the first or last instant in `zone`, the days a
+/// log dated at either end of jiff's range is on.
+fn anchor_on_the_local_ends(zone: &TimeZone) -> impl Strategy<Value = Anchor> + use<> {
+    let first = zone.to_datetime(Timestamp::MIN).date();
+    let last = zone.to_datetime(Timestamp::MAX).date();
+    anchor_on(prop_oneof![Just(first), Just(last)])
+}
+
 fn times_of_day() -> impl Strategy<Value = Vec<Option<LogTime>>> {
     prop::collection::vec(
         prop::option::weighted(0.8, any_time().prop_map(LogTime::TimeOfDay)),
@@ -769,9 +843,11 @@ fn utc(date_time: DateTime) -> Timestamp {
 proptest! {
     #[test]
     fn resolving_never_panics_on_any_mix_of_timestamps(
-        times in prop::collection::vec(any_log_time(), 0..64),
-        anchor in any_anchor(),
-        zone in zones(),
+        (zone, times, anchor) in zones().prop_flat_map(|zone| {
+            let times = prop::collection::vec(any_log_time_in(&zone), 0..64);
+            let anchor = prop_oneof![any_anchor(), anchor_on_the_local_ends(&zone)];
+            (Just(zone), times, anchor)
+        }),
     ) {
         resolve_timestamps(&times, anchor, &zone);
     }

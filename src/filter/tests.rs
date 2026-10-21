@@ -7,9 +7,10 @@ use jiff::tz::TimeZone;
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::{Anchor, Level, Preset};
+use crate::format::{Anchor, Format, Level};
 use crate::index::{self, Chunk, Settings};
 use crate::matcher::{self, Matcher};
+use crate::test_support::built_in;
 
 /// How long evaluating a test log of a few entries may take before the test fails.
 /// It takes milliseconds; the deadline is only there so that an engine that never
@@ -25,18 +26,18 @@ const LEVELS: [Level; 6] = [
     Level::Fatal,
 ];
 
-fn settings(preset: Preset) -> Settings {
+fn settings(preset: &'static Format) -> Settings {
     let zone = TimeZone::UTC;
     let mtime: Timestamp = "2026-10-08T12:00:00Z".parse().unwrap();
     Settings {
-        preset,
+        format: preset,
         anchor: Anchor::Modified(zone.to_datetime(mtime)),
         zone,
     }
 }
 
 /// `log` and its index, shared as the viewer shares them with the engine.
-fn indexed(preset: Preset, log: &[u8]) -> Arc<RwLock<Indexed<Vec<u8>>>> {
+fn indexed(preset: &'static Format, log: &[u8]) -> Arc<RwLock<Indexed<Vec<u8>>>> {
     let settings = settings(preset);
     let records = Chunk::index(log, 0, 0..log.len(), &settings).finish(&settings);
     Arc::new(RwLock::new(Indexed {
@@ -64,7 +65,7 @@ fn finish(engine: &mut Engine, total: usize, mut check: impl FnMut(&Filtered)) -
 }
 
 /// What `filters` find in `log`, once all of it is evaluated.
-fn filter(preset: Preset, log: &str, filters: Filters) -> Filtered {
+fn filter(preset: &'static Format, log: &str, filters: Filters) -> Filtered {
     let indexed = indexed(preset, log.as_bytes());
     let total = indexed.read().unwrap().records.len();
     let mut engine = Engine::spawn(indexed, preset, filters, Options { chunk: 2 });
@@ -86,7 +87,7 @@ fn counts(pairs: &[(Level, u32)]) -> [u32; 6] {
 #[test]
 fn an_empty_index_matches_nothing() {
     assert_eq!(
-        filter(Preset::Logback, "", Filters::default()),
+        filter(built_in("logback"), "", Filters::default()),
         Filtered::default()
     );
 }
@@ -103,7 +104,7 @@ fn counters_ignore_the_level_filter() {
         filters.levels.set(level, false);
     }
     assert_eq!(
-        filter(Preset::Logback, log, filters),
+        filter(built_in("logback"), log, filters),
         Filtered {
             evaluated: 3,
             entries: vec![],
@@ -154,7 +155,7 @@ fn only_shows_just_the_levels_it_names() {
 const WITHOUT_LEVELS: &str = "\
 started
 2026-10-07 12:00:00.000 [main] INFO  com.myco.Order - created
-2026-10-07 12:00:01.000 [main] SEVERE com.myco.Order - failed
+2026-10-07 12:00:01.000 [main] AUDIT com.myco.Order - failed
 ";
 
 #[test]
@@ -163,7 +164,7 @@ fn with_every_level_off_no_entry_matches_not_even_one_without_a_level() {
         levels: Levels::only(&[]),
         ..Filters::default()
     };
-    let found = filter(Preset::Logback, WITHOUT_LEVELS, filters);
+    let found = filter(built_in("logback"), WITHOUT_LEVELS, filters);
     assert_eq!(found.entries, [] as [u32; 0]);
 }
 
@@ -171,7 +172,7 @@ fn with_every_level_off_no_entry_matches_not_even_one_without_a_level() {
 fn entries_without_a_level_are_hidden_while_any_level_is_off() {
     let mut filters = Filters::default();
     filters.levels.toggle(Level::Trace);
-    let found = filter(Preset::Logback, WITHOUT_LEVELS, filters);
+    let found = filter(built_in("logback"), WITHOUT_LEVELS, filters);
     assert_eq!(found.entries, [1]);
 }
 
@@ -181,7 +182,7 @@ fn raw_entries_are_matched_over_the_whole_line() {
         text: text("beta"),
         ..Filters::default()
     };
-    let found = filter(Preset::Raw, "alpha beta\ngamma\n", filters);
+    let found = filter(built_in("raw"), "alpha beta\ngamma\n", filters);
     assert_eq!(found.entries, [0]);
 }
 
@@ -208,7 +209,7 @@ fn escape_codes_are_stripped_before_matching() {
         ..Filters::default()
     };
     for filters in [class, message, continuation] {
-        let found = filter(Preset::Logback, log, filters.clone());
+        let found = filter(built_in("logback"), log, filters.clone());
         assert_eq!(found.entries, [0], "{filters:?}");
     }
 }
@@ -221,15 +222,19 @@ fn continuation_lines_appended_to_the_last_entry_are_matched() {
         text: text("Boom"),
         ..Filters::default()
     };
-    let indexed = indexed(Preset::Logback, log.as_bytes());
+    let indexed = indexed(built_in("logback"), log.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&indexed),
-        Preset::Logback,
+        built_in("logback"),
         filters,
         Options { chunk: 1 },
     );
     assert_eq!(finish(&mut engine, 1, |_| {}).entries, [] as [u32; 0]);
-    append(&indexed, Preset::Logback, format!("{log}{more}").as_bytes());
+    append(
+        &indexed,
+        built_in("logback"),
+        format!("{log}{more}").as_bytes(),
+    );
     engine.reread(0);
     assert_eq!(finish(&mut engine, 1, |_| {}).entries, [0]);
 }
@@ -241,10 +246,10 @@ fn results_of_entries_read_again_are_never_published_stale() {
     };
     let before = [line(0, "one"), line(1, "boom"), line(2, "boom")].concat();
     let after = [line(0, "one"), line(1, "two"), line(2, "boom")].concat();
-    let shared = indexed(Preset::Logback, before.as_bytes());
+    let shared = indexed(built_in("logback"), before.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&shared),
-        Preset::Logback,
+        built_in("logback"),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -254,7 +259,7 @@ fn results_of_entries_read_again_are_never_published_stale() {
     let found = finish(&mut engine, 3, |_| {});
     assert_eq!(found.entries, [1, 2]);
     assert_eq!(found.counts, counts(&[(Level::Info, 2)]));
-    let rewritten = Arc::into_inner(indexed(Preset::Logback, after.as_bytes())).unwrap();
+    let rewritten = Arc::into_inner(indexed(built_in("logback"), after.as_bytes())).unwrap();
     *shared.write().unwrap() = rewritten.into_inner().unwrap();
     engine.reread(1);
     // From here on, the second and third entries count only as they read now.
@@ -283,8 +288,8 @@ fn new_filters_from_an_entry_on_keep_the_results_before_it() {
     ]
     .concat();
     let mut engine = Engine::spawn(
-        indexed(Preset::Logback, log.as_bytes()),
-        Preset::Logback,
+        indexed(built_in("logback"), log.as_bytes()),
+        built_in("logback"),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -318,7 +323,7 @@ fn new_filters_from_an_entry_on_keep_the_results_before_it() {
 
 /// Brings `indexed` up to date with `log`, the whole file after more was appended,
 /// as the viewer does.
-fn append(indexed: &RwLock<Indexed<Vec<u8>>>, preset: Preset, log: &[u8]) -> usize {
+fn append(indexed: &RwLock<Indexed<Vec<u8>>>, preset: &'static Format, log: &[u8]) -> usize {
     let mut indexed = indexed.write().unwrap();
     let known = indexed.records.len();
     index::append(&mut indexed.records, log, &settings(preset));
@@ -343,7 +348,7 @@ struct Entry {
 #[derive(Debug, Clone)]
 struct Head {
     second: u8,
-    /// `None` is written as `SEVERE`, a level word vilog doesn't know.
+    /// `None` is written as `AUDIT`, a level word vilog doesn't know.
     level: Option<Level>,
     class: &'static str,
     message: &'static str,
@@ -436,7 +441,7 @@ fn render(entries: &[Entry]) -> String {
     let mut log = String::new();
     for entry in entries {
         if let Some(head) = &entry.head {
-            let level = head.level.map_or("SEVERE", |level| {
+            let level = head.level.map_or("AUDIT", |level| {
                 ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"][level as usize]
             });
             log.push_str(&format!(
@@ -522,10 +527,10 @@ proptest! {
         chunk in 1..5usize,
         polls in 0..4usize,
     ) {
-        let indexed = indexed(Preset::Logback, render(&entries).as_bytes());
+        let indexed = indexed(built_in("logback"), render(&entries).as_bytes());
         let mut engine = Engine::spawn(
             indexed,
-            Preset::Logback,
+            built_in("logback"),
             first.filters(),
             Options { chunk },
         );
@@ -550,17 +555,17 @@ proptest! {
     ) {
         let log = render(&entries);
         let cut = cut.index(log.len() + 1);
-        let indexed = indexed(Preset::Logback, &log.as_bytes()[..cut]);
+        let indexed = indexed(built_in("logback"), &log.as_bytes()[..cut]);
         let mut engine = Engine::spawn(
             Arc::clone(&indexed),
-            Preset::Logback,
+            built_in("logback"),
             model.filters(),
             Options { chunk },
         );
         for _ in 0..polls {
             engine.poll();
         }
-        let known = append(&indexed, Preset::Logback, log.as_bytes());
+        let known = append(&indexed, built_in("logback"), log.as_bytes());
         engine.reread(known.saturating_sub(1));
         let found = finish(&mut engine, entries.len(), |_| {});
         prop_assert_eq!(found, model.naive(&entries));
@@ -726,10 +731,10 @@ fn a_rule_given_twice_counts_once() {
 }
 
 #[test]
-fn a_rule_naming_no_class_is_an_error_naming_it() {
+fn a_rule_naming_no_logger_is_an_error_naming_it() {
     for rule in ["!", "*", ".*", "!*", "!.*"] {
         let error = Classes::parse(["Order", rule]).unwrap_err();
-        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+        assert_eq!(error, format!("logger rule '{rule}' names no logger"));
     }
 }
 
@@ -737,7 +742,10 @@ fn a_rule_naming_no_class_is_an_error_naming_it() {
 fn a_star_anywhere_but_in_a_trailing_dot_star_is_an_error_naming_the_rule() {
     for rule in ["Order*", "com.*.Order", "com.myco.**"] {
         let error = Classes::parse([rule]).unwrap_err();
-        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+        assert!(
+            error.starts_with(&format!("logger rule '{rule}' ")),
+            "{rule}: {error}"
+        );
     }
 }
 
@@ -760,7 +768,7 @@ fn class_rules_see_the_full_class_name_of_the_first_line() {
         classes: classes(&["com.myco.*"]),
         ..Filters::default()
     };
-    assert_eq!(filter(Preset::Logback, log, filters).entries, [0]);
+    assert_eq!(filter(built_in("logback"), log, filters).entries, [0]);
 }
 
 const SEGMENTS: [&str; 7] = [

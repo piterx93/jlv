@@ -1,3 +1,5 @@
+use std::iter;
+
 use proptest::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
@@ -117,6 +119,27 @@ fn abbreviates_every_package_of_a_wildfly_category_when_needed() {
     assert_eq!(abbreviated("org.jboss.as.server", 12), "o.j.a.server");
 }
 
+/// A Go caller as zap writes it: 29 columns.
+const GO_CALLER: &str = "internal/orders/service.go:42";
+
+#[test]
+fn drops_leading_path_segments_until_a_path_fits() {
+    assert_eq!(abbreviated(GO_CALLER, 20), "orders/service.go:42");
+}
+
+/// A name is a path when it has a `/`, no `.` before its first `/` and a `.` after
+/// it. Neither a lambda that Spring cut to 40 columns from the left nor Tomcat's
+/// dotted logger with a `[/]` further on is one.
+#[test]
+fn only_a_slash_between_dotless_segments_and_a_dot_makes_a_path() {
+    let lambda = "erService$$Lambda$1342/0x0000000801c2a38";
+    assert_eq!(abbreviated(lambda, 10), lambda);
+    assert_eq!(
+        abbreviated("o.a.catalina.core.C.[Tomcat].[/]", 30),
+        "o.a.c.core.C.[Tomcat].[/]"
+    );
+}
+
 /// 15 characters, but 24 bytes in UTF-8.
 const POLISH: &str = "łódź.zażółć.Gęś";
 
@@ -160,8 +183,55 @@ fn class_name() -> impl Strategy<Value = String> {
     prop::collection::vec(segment(), 1..=6).prop_map(|segments| segments.join("."))
 }
 
+/// A path segment of up to 8 characters drawn from `alphabet`.
+fn path_segment(alphabet: &str) -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop::sample::select(alphabet.chars().collect::<Vec<_>>()),
+        0..=8,
+    )
+    .prop_map(|chars| chars.into_iter().collect())
+}
+
+/// Go callers of two to six segments, any of which may be empty but the file: a
+/// first segment without dots, segments holding dots, colons and digits, and a Go
+/// file with its line, such as `service.go:42`, last.
+fn path_name() -> impl Strategy<Value = String> {
+    let first = path_segment("abxyzAB019_-:łó日志");
+    let middle = prop::collection::vec(path_segment("abxyzAB019_-.:łó日志"), 0..=4);
+    let file = (path_segment("abxyz_日"), any::<u16>())
+        .prop_map(|(name, line)| format!("{name}.go:{line}"));
+    (first, middle, file)
+        .prop_map(|(first, middle, file)| [vec![first], middle, vec![file]].concat().join("/"))
+}
+
+/// Whether `name` is a path: it has a `/`, no `.` before the first one and a `.`
+/// after it.
+fn is_path(name: &str) -> bool {
+    name.split_once('/')
+        .is_some_and(|(head, tail)| !head.contains('.') && tail.contains('.'))
+}
+
+/// The part of `name` that is never shortened: what follows the last `/` of a path,
+/// or else the last `.`.
 fn last_segment(name: &str) -> &str {
-    name.rsplit_once('.').map_or(name, |(_, last)| last)
+    let split = if is_path(name) {
+        name.rsplit_once('/')
+    } else {
+        name.rsplit_once('.')
+    };
+    split.map_or(name, |(_, last)| last)
+}
+
+/// The answer for a path worked out the slow way: the whole path, then the path
+/// without its first segment, without its first two and so on, and the first of
+/// those that fits, or the last segment alone if none does.
+fn dropping_one_segment_at_a_time(name: &str, width: usize) -> String {
+    let starts = iter::once(0).chain(name.match_indices('/').map(|(at, _)| at + 1));
+    let candidates: Vec<&str> = starts.map(|start| &name[start..]).collect();
+    let fitting = candidates
+        .iter()
+        .find(|candidate| candidate.width() <= width);
+    fitting.or(candidates.last()).unwrap().to_string()
 }
 
 /// The answer worked out the slow way: abbreviate no package, then the first, then
@@ -229,5 +299,10 @@ proptest! {
         width in 0usize..64,
     ) {
         prop_assert_eq!(abbreviate(&name, width), one_package_at_a_time(&name, width));
+    }
+
+    #[test]
+    fn drops_leading_path_segments_one_at_a_time(name in path_name(), width in 0usize..64) {
+        prop_assert_eq!(abbreviate(&name, width), dropping_one_segment_at_a_time(&name, width));
     }
 }

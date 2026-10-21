@@ -56,7 +56,7 @@ fn holds_last(tail: &Chunk, count: usize, settings: &Settings) -> bool {
         return false;
     }
     let first = tail.records.len() - count;
-    match settings.preset.entry_parser() {
+    match settings.format.entry_parser() {
         None => true,
         // Entries without a timestamp already carry the one before them in the chunk.
         Some(parser) if parser.has_date() => tail.records[first].timestamp != NO_TIMESTAMP,

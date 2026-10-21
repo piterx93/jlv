@@ -10,12 +10,14 @@ use std::time::{Duration, Instant};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use proptest::prelude::*;
-use vilog::format::{Anchor, Entry, EntryGrouper, Level, Preset, resolve_timestamps, strip_ansi};
+use vilog::format::{
+    Anchor, BUILT_IN, Entry, EntryGrouper, Format, Level, resolve_timestamps, strip_ansi,
+};
 use vilog::index::{Chunk, Indexer, Record, Settings, tail};
 
 mod common;
 
-use common::{fixture, fixtures, lines};
+use common::{built_in, fixture, fixtures, lines};
 
 /// What the index says about an entry but its line number, which the tail doesn't
 /// know.
@@ -64,14 +66,14 @@ fn lines_at(bytes: &[u8]) -> Vec<(usize, &[u8])> {
 /// gives them, to the microsecond.
 fn line_by_line(bytes: &[u8], settings: &Settings) -> Vec<Indexed> {
     let lines = lines_at(bytes);
-    let mut grouper = EntryGrouper::new(settings.preset);
+    let mut grouper = EntryGrouper::new(settings.format);
     let mut entries: Vec<Entry> = lines
         .iter()
         .filter_map(|(_, line)| grouper.push(line))
         .collect();
     entries.extend(grouper.open_entry().cloned());
 
-    let parser = settings.preset.entry_parser();
+    let parser = settings.format.entry_parser();
     let first_lines: Vec<Vec<u8>> = entries
         .iter()
         .map(|entry| strip_ansi(lines[entry.lines.start].1).into_owned())
@@ -81,7 +83,7 @@ fn line_by_line(bytes: &[u8], settings: &Settings) -> Vec<Indexed> {
         .zip(&first_lines)
         .map(|(entry, line)| {
             let head = entry.head.as_ref()?;
-            parser?.timestamp(&line[head.timestamp.clone()], &settings.zone)
+            parser?.timestamp(&line[head.timestamp.clone()?], &settings.zone)
         })
         .collect();
     let timestamps = resolve_timestamps(&times, settings.anchor, &settings.zone);
@@ -101,9 +103,11 @@ fn line_by_line(bytes: &[u8], settings: &Settings) -> Vec<Indexed> {
                 timestamp: timestamp.map(|timestamp| {
                     Timestamp::from_microsecond(timestamp.as_microsecond()).unwrap()
                 }),
-                level: head.and_then(|head| Level::parse(&line[head.level.clone()])),
+                level: head
+                    .and_then(|head| head.level.clone())
+                    .and_then(|level| Level::parse(&line[level])),
                 class: head
-                    .map(|head| head.class.clone())
+                    .and_then(|head| head.logger.clone())
                     .filter(|class| class.end <= 65_535),
                 has_exception: entry.has_exception,
             }
@@ -140,9 +144,9 @@ fn warsaw() -> TimeZone {
 }
 
 /// The fixtures were written in Warsaw; the time-only ones end on 2026-10-08.
-fn fixture_settings(preset: Preset) -> Settings {
+fn fixture_settings(preset: &'static Format) -> Settings {
     Settings {
-        preset,
+        format: preset,
         zone: warsaw(),
         anchor: Anchor::Named("2026-10-08".parse().unwrap()),
     }
@@ -171,7 +175,7 @@ fn index_of_every_fixture_matches_its_lines_grouped_one_by_one() {
 fn raw_index_of_every_fixture_has_an_entry_per_line() {
     for (_, name) in fixtures() {
         let bytes = fixture(name);
-        let settings = fixture_settings(Preset::Raw);
+        let settings = fixture_settings(built_in("raw"));
         let records = index(&bytes, &settings);
         assert_eq!(records.len(), lines(&bytes).len(), "{name}");
         assert_eq!(indexed(&records), line_by_line(&bytes, &settings), "{name}");
@@ -211,7 +215,7 @@ fn every_fixture_with_crlf_endings_in_one_byte_chunks_gives_the_same_index() {
 fn logback_basic_fixture_is_dated_across_midnight() {
     let records = index(
         &fixture("logback-basic.log"),
-        &fixture_settings(Preset::LogbackBasic),
+        &fixture_settings(built_in("logback-basic")),
     );
     // 23:58:41.007 and 00:00:05.001 in Warsaw.
     assert_eq!(
@@ -228,7 +232,7 @@ fn logback_basic_fixture_is_dated_across_midnight() {
 fn wildfly_console_fixture_is_dated_across_midnight() {
     let records = index(
         &fixture("wildfly-console.log"),
-        &fixture_settings(Preset::WildflyConsole),
+        &fixture_settings(built_in("wildfly-console")),
     );
     // The headless entry, then 23:59:56,102 to 00:02:00,145 in Warsaw.
     assert_eq!(records[0].timestamp(), None);
@@ -342,8 +346,8 @@ fn log_and_cuts() -> impl Strategy<Value = (Vec<u8>, Vec<usize>)> {
     })
 }
 
-fn any_preset() -> impl Strategy<Value = Preset> {
-    prop::sample::select(Preset::ALL.to_vec())
+fn any_preset() -> impl Strategy<Value = &'static Format> {
+    prop::sample::select(BUILT_IN.iter().collect::<Vec<_>>())
 }
 
 fn any_settings() -> impl Strategy<Value = Settings> {
@@ -353,7 +357,7 @@ fn any_settings() -> impl Strategy<Value = Settings> {
         Just(Anchor::Modified("2026-10-08T00:30:00".parse().unwrap())),
     ];
     (any_preset(), zone, anchor).prop_map(|(preset, zone, anchor)| Settings {
-        preset,
+        format: preset,
         zone: TimeZone::get(zone).unwrap(),
         anchor,
     })
@@ -435,7 +439,7 @@ fn tail_reads_back_to_the_timestamp_its_first_entry_takes() {
     let lines =
         [(12, 0), (25, 1), (12, 2)].map(|(hour, second)| entry_start(0, hour, 0, second) + "\n");
     let bytes = lines.concat().into_bytes();
-    let settings = fixture_settings(Preset::Logback);
+    let settings = fixture_settings(built_in("logback"));
     let window = lines[1].len() + lines[2].len();
     assert_eq!(
         indexed(&tail(&bytes, 2, window, bytes.len(), &settings).unwrap()),
@@ -447,7 +451,7 @@ fn tail_reads_back_to_the_timestamp_its_first_entry_takes() {
 #[test]
 fn tail_entries_have_no_line_numbers() {
     let bytes = b"first\nsecond\nthird\n";
-    let records = tail(bytes, 1, 6, bytes.len(), &fixture_settings(Preset::Raw)).unwrap();
+    let records = tail(bytes, 1, 6, bytes.len(), &fixture_settings(built_in("raw"))).unwrap();
     assert_eq!(records.iter().map(Record::line).collect::<Vec<_>>(), [None]);
 }
 
@@ -464,7 +468,7 @@ fn blank_lines() -> Vec<u8> {
 /// one.
 #[test]
 fn tail_reads_only_the_end_of_the_file() {
-    for (example, preset) in [(0, Preset::Logback), (1, Preset::LogbackBasic)] {
+    for (example, preset) in [(0, built_in("logback")), (1, built_in("logback-basic"))] {
         let entries: String = (0..3)
             .map(|second| entry_start(example, 12, 0, second) + "\n")
             .collect();
@@ -476,12 +480,16 @@ fn tail_reads_only_the_end_of_the_file() {
         let started = Instant::now();
         let records = tail(&bytes, 3, 4096, LIMIT, &fixture_settings(preset)).unwrap();
         let elapsed = started.elapsed();
-        assert!(elapsed < Duration::from_secs(1), "{preset}: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "{}: {elapsed:?}",
+            preset.id
+        );
         let ranges: Vec<_> = records.iter().map(Record::bytes).collect();
         let expected: Vec<_> = (0..3)
             .map(|i| blank + i * len..blank + (i + 1) * len)
             .collect();
-        assert_eq!(ranges, expected, "{preset}");
+        assert_eq!(ranges, expected, "{}", preset.id);
     }
 }
 
@@ -490,7 +498,13 @@ fn tail_reads_only_the_end_of_the_file() {
 fn tail_gives_up_at_the_limit() {
     let bytes = blank_lines();
     let started = Instant::now();
-    let records = tail(&bytes, 3, 4096, LIMIT, &fixture_settings(Preset::Logback));
+    let records = tail(
+        &bytes,
+        3,
+        4096,
+        LIMIT,
+        &fixture_settings(built_in("logback")),
+    );
     let elapsed = started.elapsed();
     assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     assert_eq!(records, None);

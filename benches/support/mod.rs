@@ -15,7 +15,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use tempfile::TempPath;
 use vilog::app::App;
-use vilog::format::{Anchor, Preset, detect};
+use vilog::format::{Anchor, Format, detect};
 use vilog::index::{Indexer, Record, Settings};
 use vilog::source::{self, Source};
 
@@ -51,7 +51,7 @@ impl BenchLog {
         };
         if temp.is_some() || !path.exists() {
             let spec = Spec {
-                preset: Preset::Logback,
+                preset: Format::by_id("logback").expect("logback is built in"),
                 size,
                 seed: 1,
             };
@@ -80,7 +80,7 @@ impl BenchLog {
         source::open(&self.path).unwrap_or_else(|err| panic!("{}: {err}", self.path.display()))
     }
 
-    /// A viewer over the log, set up as the binary sets it up, its preset detected
+    /// A viewer over the log, set up as the binary sets it up, its format detected
     /// and timestamps read in UTC.
     pub fn viewer(&self, follow: bool) -> App {
         App::new(
@@ -98,7 +98,8 @@ impl BenchLog {
 pub fn settings(path: &Path, source: &Source) -> Settings {
     let zone = TimeZone::UTC;
     Settings {
-        preset: detect(source::lines(source.bytes())).unwrap_or(Preset::Raw),
+        format: detect(source::lines(source.bytes()))
+            .unwrap_or_else(|| Format::by_id("raw").expect("raw is built in")),
         anchor: Anchor::for_file(path, Timestamp::now(), &zone),
         zone,
     }

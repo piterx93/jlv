@@ -57,7 +57,7 @@ fn filtering(c: &mut Criterion, log: &BenchLog) {
     let options = Options {
         chunk: FILTER_CHUNK,
     };
-    let mut engine = Engine::spawn(indexed, settings.preset, Filters::default(), options);
+    let mut engine = Engine::spawn(indexed, settings.format, Filters::default(), options);
     let text = |pattern, regex| {
         let options = matcher::Options {
             regex,

@@ -41,7 +41,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(super) const DETAILS_CAP: usize = 1 << 20;
 
 /// The lines of the selected entry made safe to show. Under a preset the first line
-/// becomes the full class and the thread, then the message.
+/// becomes the full logger and the thread, then the message.
 fn entry_lines(app: &App) -> Vec<String> {
     let Some(entry) = app.details_entry() else {
         return Vec::new();
@@ -55,7 +55,7 @@ fn entry_lines(app: &App) -> Vec<String> {
 
 fn entry_head(app: &App, entry: &[u8]) -> Vec<String> {
     let mut lines = source::lines(entry);
-    let Some(parser) = app.settings().preset.entry_parser() else {
+    let Some(parser) = app.settings().format.entry_parser() else {
         return lines.map(text).collect();
     };
     let mut shown = Vec::new();
@@ -63,8 +63,15 @@ fn entry_head(app: &App, entry: &[u8]) -> Vec<String> {
         let first = strip_ansi(first);
         match parser.parse(&first) {
             Some(head) => {
-                let thread = text(&first[head.thread]);
-                shown.push(format!("{} ({thread})", text(&first[head.class])));
+                let logger = head.logger.map(|logger| text(&first[logger]));
+                let thread = head.thread.map(|thread| text(&first[thread]));
+                let source = match (logger, thread) {
+                    (Some(logger), Some(thread)) => Some(format!("{logger} ({thread})")),
+                    (Some(only), None) => Some(only),
+                    (None, Some(thread)) => Some(format!("({thread})")),
+                    (None, None) => None,
+                };
+                shown.extend(source);
                 shown.push(text(&first[head.message]));
             }
             None => shown.push(text(&first)),

@@ -13,8 +13,9 @@ use super::*;
 use crate::cli::Args;
 use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
-use crate::format::{Level, Preset};
+use crate::format::Level;
 use crate::test_support;
+use crate::test_support::built_in;
 
 #[test]
 fn version_without_commit_is_printed_as_is() {
@@ -90,7 +91,7 @@ fn defaults(file: impl Into<PathBuf>) -> Args {
         format: None,
         no_follow: false,
         level: None,
-        class: None,
+        logger: None,
         since: None,
         no_mouse: false,
         config: None,
@@ -197,7 +198,7 @@ fn unknown_format_exits_with_2() {
 fn unknown_level_exits_with_2() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, "app.log");
-    let out = vilog(&[OsStr::new("-l"), OsStr::new("VERBOSE"), file.as_os_str()]);
+    let out = vilog(&[OsStr::new("-l"), OsStr::new("ERRORS"), file.as_os_str()]);
     assert_eq!(out.exit_code(), Some(2));
     assert_eq!(out.stdout, "");
     assert!(
@@ -284,7 +285,7 @@ fn initial_with(
 ) -> Option<Filters> {
     let args = Args {
         level: level.map(Levels::only),
-        class: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
+        logger: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
         ..defaults("app.log")
     };
     initial_filters(&args, config)
@@ -431,10 +432,10 @@ fn every_option_is_handed_over() {
         launch.args,
         Args {
             file,
-            format: Some(Preset::LogbackBasic),
+            format: Some(built_in("logback-basic")),
             no_follow: true,
             level: Some(Levels::only(&[Level::Warn, Level::Error])),
-            class: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
+            logger: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
             since: Some(TimeSpec::parse("10m").unwrap()),
             no_mouse: true,
             config: Some(config),
@@ -901,10 +902,9 @@ mod event_loop {
 
     use crate::app::{App, Panel};
     use crate::event_loop;
-    use crate::format::Preset;
     use crate::test_support::{
-        LARGE_INDEX_DEADLINE, app, char_key, following_app, gzip, gzip_app, hide_line_numbers,
-        numbered_log, row, unindexed_app, wait_for_index,
+        LARGE_INDEX_DEADLINE, app, built_in, char_key, following_app, gzip, gzip_app,
+        hide_line_numbers, numbered_log, row, unindexed_app, wait_for_index,
     };
     use crate::ui::Theme;
 
@@ -967,7 +967,7 @@ mod event_loop {
     fn first_screen_of_a_followed_file_shows_its_end() {
         let mut terminal = terminal();
         // Several chunks of the index, so it is far from complete at the first screen.
-        let mut app = following_app(Preset::Raw, numbered_log(10_000).as_bytes());
+        let mut app = following_app(built_in("raw"), numbered_log(10_000).as_bytes());
         hide_line_numbers(&mut app);
         event_loop(
             &mut terminal,
@@ -1151,7 +1151,7 @@ mod event_loop {
     #[test]
     fn waits_until_the_dot_changes_and_redraws_it() {
         let mut terminal = terminal();
-        let mut app = following_app(Preset::Raw, numbered_log(3).as_bytes());
+        let mut app = following_app(built_in("raw"), numbered_log(3).as_bytes());
         hide_line_numbers(&mut app);
         wait_for_index(&mut app);
         let time = Cell::new(Instant::now());
@@ -1204,7 +1204,7 @@ mod event_loop {
 
     /// A file indexed in several chunks: 2.2 MB of time-only lines.
     fn slow_to_index() -> App {
-        unindexed_app(Preset::LogbackBasic, numbered_log(40_000).as_bytes())
+        unindexed_app(built_in("logback-basic"), numbered_log(40_000).as_bytes())
     }
 
     /// A clock that stands still, so that the file stays live and its dot changes

@@ -1,31 +1,34 @@
 //! Helpers shared by the integration tests.
 
+// Each test crate uses only some of them.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 
-use vilog::format::Preset;
+use vilog::format::{BUILT_IN, Format, Kind};
 use vilog::source;
 
-/// Every preset but `Raw`, with its fixture in `tests/fixtures`, in the order of
-/// [`Preset::ALL`].
-pub fn fixtures() -> impl Iterator<Item = (Preset, &'static str)> {
-    Preset::ALL
-        .into_iter()
-        .filter_map(|preset| fixture_name(preset).map(|name| (preset, name)))
+/// The built-in format `id` names.
+pub fn built_in(id: &str) -> &'static Format {
+    Format::by_id(id).unwrap_or_else(|| panic!("no built-in format {id}"))
 }
 
-/// The fixture of `preset`. A new preset doesn't compile until it has one.
-fn fixture_name(preset: Preset) -> Option<&'static str> {
-    let name = match preset {
-        Preset::Logback => "logback.log",
-        Preset::LogbackBasic => "logback-basic.log",
-        Preset::Spring3 => "spring3.log",
-        Preset::Spring2 => "spring2.log",
-        Preset::Wildfly => "wildfly.log",
-        Preset::WildflyConsole => "wildfly-console.log",
-        Preset::Raw => return None,
-    };
-    Some(name)
+/// Every built-in format but `raw`, in table order, with the name of its fixture in
+/// `tests/fixtures`: `<id>.log`. A format without one fails the first test that reads
+/// it.
+pub fn fixtures() -> impl Iterator<Item = (&'static Format, &'static str)> {
+    static FIXTURES: LazyLock<Vec<(&Format, String)>> = LazyLock::new(|| {
+        BUILT_IN
+            .iter()
+            .filter(|format| !matches!(format.kind, Kind::Raw))
+            .map(|format| (format, format!("{}.log", format.id)))
+            .collect()
+    });
+    FIXTURES
+        .iter()
+        .map(|(format, name)| (*format, name.as_str()))
 }
 
 /// The bytes of the fixture `name`.

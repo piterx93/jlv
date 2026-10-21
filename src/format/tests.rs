@@ -2,13 +2,47 @@ use proptest::prelude::*;
 
 use super::*;
 
-const LEVELS: [(Level, &str); 6] = [
+/// Every name a level is read from: its own, then the aliases of PRD §6.6.
+const NAMES: [(Level, &str); 29] = [
     (Level::Trace, "TRACE"),
+    (Level::Trace, "TRCE"),
+    (Level::Trace, "VRB"),
+    (Level::Trace, "VERBOSE"),
+    (Level::Trace, "FINER"),
+    (Level::Trace, "FINEST"),
     (Level::Debug, "DEBUG"),
+    (Level::Debug, "DBG"),
+    (Level::Debug, "DBUG"),
+    (Level::Debug, "FINE"),
     (Level::Info, "INFO"),
+    (Level::Info, "INF"),
+    (Level::Info, "INFORMATION"),
+    (Level::Info, "NOTICE"),
+    (Level::Info, "CONFIG"),
     (Level::Warn, "WARN"),
+    (Level::Warn, "WARNING"),
+    (Level::Warn, "WRN"),
     (Level::Error, "ERROR"),
+    (Level::Error, "ERR"),
+    (Level::Error, "FAIL"),
+    (Level::Error, "SEVERE"),
     (Level::Fatal, "FATAL"),
+    (Level::Fatal, "FTL"),
+    (Level::Fatal, "CRITICAL"),
+    (Level::Fatal, "CRIT"),
+    (Level::Fatal, "PANIC"),
+    (Level::Fatal, "EMERG"),
+    (Level::Fatal, "ALERT"),
+];
+
+/// Every level with its number on the pino/bunyan scale.
+const PINO: [(u64, Level); 6] = [
+    (10, Level::Trace),
+    (20, Level::Debug),
+    (30, Level::Info),
+    (40, Level::Warn),
+    (50, Level::Error),
+    (60, Level::Fatal),
 ];
 
 /// `strip_ansi` as text, for readable failures.
@@ -19,15 +53,10 @@ fn stripped(line: &[u8]) -> String {
 // --- levels ---
 
 #[test]
-fn parses_every_level_name() {
-    for (level, name) in LEVELS {
+fn parses_every_level_name_and_alias() {
+    for (level, name) in NAMES {
         assert_eq!(Level::parse(name.as_bytes()), Some(level), "{name}");
     }
-}
-
-#[test]
-fn warning_is_an_alias_of_warn() {
-    assert_eq!(Level::parse(b"WARNING"), Some(Level::Warn));
 }
 
 #[test]
@@ -35,13 +64,13 @@ fn letter_case_does_not_matter() {
     assert_eq!(Level::parse(b"info"), Some(Level::Info));
     assert_eq!(Level::parse(b"Debug"), Some(Level::Debug));
     assert_eq!(Level::parse(b"eRrOr"), Some(Level::Error));
-    assert_eq!(Level::parse(b"Warning"), Some(Level::Warn));
+    assert_eq!(Level::parse(b"Information"), Some(Level::Info));
 }
 
 #[test]
 fn trailing_padding_is_ignored() {
     assert_eq!(Level::parse(b"INFO "), Some(Level::Info));
-    assert_eq!(Level::parse(b"WARN  "), Some(Level::Warn));
+    assert_eq!(Level::parse(b"WARNING "), Some(Level::Warn));
 }
 
 #[test]
@@ -63,9 +92,7 @@ fn tabs_count_as_padding() {
 
 #[test]
 fn other_words_are_not_levels() {
-    for word in [
-        "SEVERE", "FINE", "CRITICAL", "NOTICE", "ERR", "WARN.", "INFOS", "[INFO]",
-    ] {
+    for word in ["ERRORS", "FAILED", "WARN.", "INFOS", "[INFO]"] {
         assert_eq!(Level::parse(word.as_bytes()), None, "{word}");
     }
 }
@@ -113,8 +140,22 @@ fn level_wrapped_in_colour_codes_parses_after_stripping() {
 /// The level filter keys 1 to 6 follow this order.
 #[test]
 fn levels_are_ordered_from_trace_to_fatal() {
-    let levels = LEVELS.map(|(level, _)| level);
+    let levels = PINO.map(|(_, level)| level);
     assert!(levels.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn reads_every_pino_number() {
+    for (number, level) in PINO {
+        assert_eq!(Level::from_pino(number), Some(level), "{number}");
+    }
+}
+
+#[test]
+fn numbers_off_the_pino_scale_are_not_levels() {
+    for number in [0, 35, 70] {
+        assert_eq!(Level::from_pino(number), None, "{number}");
+    }
 }
 
 fn padding() -> impl Strategy<Value = String> {
@@ -124,10 +165,7 @@ fn padding() -> impl Strategy<Value = String> {
 
 /// A level name or alias with its expected level.
 fn level_name() -> impl Strategy<Value = (Level, &'static str)> {
-    prop_oneof![
-        prop::sample::select(LEVELS.to_vec()),
-        Just((Level::Warn, "WARNING")),
-    ]
+    prop::sample::select(NAMES.to_vec())
 }
 
 proptest! {
@@ -141,7 +179,7 @@ proptest! {
     #[test]
     fn any_casing_and_padding_of_a_name_parses(
         (level, name) in level_name(),
-        lower in prop::collection::vec(any::<bool>(), 7),
+        lower in prop::collection::vec(any::<bool>(), 11),
         before in padding(),
         after in padding(),
     ) {
@@ -155,10 +193,16 @@ proptest! {
     }
 
     #[test]
-    fn only_level_names_parse(token in "[ \tA-Za-z]{0,10}") {
+    fn only_level_names_parse(token in "[ \tA-Za-z]{0,12}") {
         let word = token.trim_matches([' ', '\t']).to_ascii_uppercase();
-        let is_name = word == "WARNING" || LEVELS.iter().any(|(_, name)| *name == word);
+        let is_name = NAMES.iter().any(|(_, name)| *name == word);
         prop_assert_eq!(Level::parse(token.as_bytes()).is_some(), is_name);
+    }
+
+    #[test]
+    fn only_the_six_pino_numbers_are_levels(number in prop_oneof![0u64..100, any::<u64>()]) {
+        let expected = PINO.iter().find(|(n, _)| *n == number).map(|&(_, level)| level);
+        prop_assert_eq!(Level::from_pino(number), expected);
     }
 }
 

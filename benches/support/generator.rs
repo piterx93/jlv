@@ -11,12 +11,12 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use jiff::civil::{Date, date};
-use vilog::format::{Level, Preset};
+use vilog::format::{Format, Level};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Spec {
-    /// Whose layout the entries have. `Raw` reads any lines, so it gets Logback's.
-    pub preset: Preset,
+    /// Whose layout the entries have. `raw` reads any lines, so it gets Logback's.
+    pub preset: &'static Format,
     /// The log ends with the first whole entry that reaches this many bytes.
     pub size: u64,
     pub seed: u64,
@@ -41,7 +41,7 @@ pub fn generate(path: &Path, spec: Spec) -> io::Result<u64> {
 
 /// One INFO entry in `preset`'s layout with `message`, dated after every entry
 /// [`generate`] writes, for appending to a generated log.
-pub fn line(preset: Preset, message: &str) -> Vec<u8> {
+pub fn line(preset: &'static Format, message: &str) -> Vec<u8> {
     let clock = Clock {
         date: date(2030, 1, 1),
         millis: 0,
@@ -131,7 +131,7 @@ const FRAMES: &[(&str, &str)] = &[
 ];
 
 struct Log {
-    preset: Preset,
+    preset: &'static Format,
     rng: Rng,
     clock: Clock,
     seq: u64,
@@ -253,41 +253,42 @@ impl Log {
 /// An entry's first line up to where the message starts.
 fn write_head(
     out: &mut Vec<u8>,
-    preset: Preset,
+    preset: &'static Format,
     clock: &Clock,
     level: Level,
     thread: &str,
     class: &str,
 ) {
     let level = level.name();
-    let _ = match preset {
-        Preset::Logback | Preset::Raw => {
+    let _ = match preset.id {
+        "logback" | "raw" => {
             clock.write_date_time(out, ' ', '.');
             write!(out, " [{thread}] {level:<5} {class} - ")
         }
-        Preset::LogbackBasic => {
+        "logback-basic" => {
             clock.write_time(out, '.');
             write!(out, " [{thread}] {level:<5} {class} -- ")
         }
-        Preset::Spring3 => {
+        "spring3" => {
             clock.write_date_time(out, 'T', '.');
             write!(
                 out,
                 "+02:00 {level:>5} {PID} --- [shop] [{thread:>15}] {class:<40} : "
             )
         }
-        Preset::Spring2 => {
+        "spring2" => {
             clock.write_date_time(out, ' ', '.');
             write!(out, " {level:>5} {PID} --- [{thread:>15}] {class:<40} : ")
         }
-        Preset::Wildfly => {
+        "wildfly" => {
             clock.write_date_time(out, ' ', ',');
             write!(out, " {level:<5} [{class}] ({thread}) ")
         }
-        Preset::WildflyConsole => {
+        "wildfly-console" => {
             clock.write_time(out, ',');
             write!(out, " {level:<5} [{class}] ({thread}) ")
         }
+        other => panic!("no layout written for {other}"),
     };
 }
 

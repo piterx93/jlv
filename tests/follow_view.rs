@@ -16,7 +16,7 @@ use vilog::app::App;
 use vilog::event_loop;
 use vilog::filter::Filters;
 use vilog::follow::Options;
-use vilog::format::Preset;
+use vilog::format::Format;
 use vilog::matcher::{self, Matcher};
 use vilog::source;
 use vilog::ui::Theme;
@@ -41,7 +41,7 @@ fn watching(dir: &Path, content: &str, options: Options) -> (PathBuf, App) {
     let mut app = App::new(
         &path,
         source::open(&path).unwrap(),
-        Some(Preset::Raw),
+        Format::by_id("raw"),
         TimeZone::UTC,
         "2026-10-08T12:00:00Z".parse().unwrap(),
         true,

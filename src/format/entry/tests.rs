@@ -1,10 +1,10 @@
 use std::ops::Range;
 
-use clap::ValueEnum;
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::strip_ansi;
+use crate::format::{BUILT_IN, strip_ansi};
+use crate::test_support::built_in;
 
 // Logback lines, used wherever the preset doesn't matter.
 const ONE: &str = "2026-10-07 12:00:00.001 [main] INFO  com.example.App - one";
@@ -14,7 +14,7 @@ const THREE: &str = "2026-10-07 12:00:00.003 [main] WARN  com.example.App - thre
 const FRAME: &str = "\tat com.example.App.run(App.java:12)";
 
 /// Feeds `lines` to a grouper for `preset` and returns every entry, the open one last.
-fn group<L: AsRef<[u8]>>(preset: Preset, lines: &[L]) -> Vec<Entry> {
+fn group<L: AsRef<[u8]>>(preset: &'static Format, lines: &[L]) -> Vec<Entry> {
     let mut grouper = EntryGrouper::new(preset);
     let mut entries: Vec<Entry> = lines
         .iter()
@@ -25,7 +25,7 @@ fn group<L: AsRef<[u8]>>(preset: Preset, lines: &[L]) -> Vec<Entry> {
 }
 
 fn logback(lines: &[&str]) -> Vec<Entry> {
-    group(Preset::Logback, lines)
+    group(built_in("logback"), lines)
 }
 
 fn spans(entries: &[Entry]) -> Vec<Range<usize>> {
@@ -48,7 +48,7 @@ fn headless(entries: &[Entry]) -> Vec<bool> {
     entries.iter().map(|entry| entry.head.is_none()).collect()
 }
 
-fn parse(preset: Preset, line: &[u8]) -> Option<EntryHead> {
+fn parse(preset: &'static Format, line: &[u8]) -> Option<EntryHead> {
     preset
         .entry_parser()
         .unwrap_or_else(|| panic!("{preset:?} has no entry parser"))
@@ -63,7 +63,7 @@ fn is(line: &str) -> bool {
 
 #[test]
 fn nothing_is_open_before_the_first_line() {
-    assert_eq!(EntryGrouper::new(Preset::Logback).open_entry(), None);
+    assert_eq!(EntryGrouper::new(built_in("logback")).open_entry(), None);
 }
 
 #[test]
@@ -79,20 +79,20 @@ fn lines_that_do_not_start_an_entry_belong_to_the_previous_one() {
 
 #[test]
 fn entry_start_returns_the_entry_it_closes() {
-    let mut grouper = EntryGrouper::new(Preset::Logback);
+    let mut grouper = EntryGrouper::new(built_in("logback"));
     grouper.push(ONE.as_bytes());
     grouper.push(FRAME.as_bytes());
     let closed = grouper
         .push(TWO.as_bytes())
         .expect("TWO closes ONE's entry");
     assert_eq!(closed.lines, 0..2);
-    assert_eq!(closed.head, parse(Preset::Logback, ONE.as_bytes()));
+    assert_eq!(closed.head, parse(built_in("logback"), ONE.as_bytes()));
     assert!(closed.has_exception);
 }
 
 #[test]
 fn last_entry_stays_open() {
-    let mut grouper = EntryGrouper::new(Preset::Logback);
+    let mut grouper = EntryGrouper::new(built_in("logback"));
     let closed: Vec<Entry> = [ONE, TWO, FRAME]
         .iter()
         .filter_map(|line| grouper.push(line.as_bytes()))
@@ -106,8 +106,8 @@ fn last_entry_stays_open() {
 #[test]
 fn head_holds_the_columns_of_the_first_line() {
     let entries = logback(&[ONE, FRAME, TWO]);
-    assert_eq!(entries[0].head, parse(Preset::Logback, ONE.as_bytes()));
-    assert_eq!(entries[1].head, parse(Preset::Logback, TWO.as_bytes()));
+    assert_eq!(entries[0].head, parse(built_in("logback"), ONE.as_bytes()));
+    assert_eq!(entries[1].head, parse(built_in("logback"), TWO.as_bytes()));
 }
 
 #[test]
@@ -115,11 +115,11 @@ fn colour_codes_around_an_entry_start_are_stripped_before_parsing() {
     let line =
         "\x1b[0m\x1b[31m12:00:01,233 ERROR [org.jboss.msc] (MSC service thread 1-1) failed\x1b[0m";
     let plain = "12:00:01,233 ERROR [org.jboss.msc] (MSC service thread 1-1) failed";
-    let entries = group(Preset::WildflyConsole, &["banner", line]);
+    let entries = group(built_in("wildfly-console"), &["banner", line]);
     assert_eq!(spans(&entries), [0..1, 1..2]);
     assert_eq!(
         entries[1].head,
-        parse(Preset::WildflyConsole, plain.as_bytes())
+        parse(built_in("wildfly-console"), plain.as_bytes())
     );
 }
 
@@ -233,7 +233,7 @@ fn single_line_entry_has_no_exception() {
 fn stack_frame_after_the_timestamp_is_not_an_exception() {
     // WildFly logs every line a deployment prints to stderr as an entry of its own.
     let line = "2026-10-07 09:18:09,904 ERROR [stderr] (default task-9) \tat com.example.ReportDao.load(ReportDao.java:29)";
-    let entries = group(Preset::Wildfly, &[line]);
+    let entries = group(built_in("wildfly"), &[line]);
     assert_eq!(headless(&entries), [false]);
     assert_eq!(exceptions(&entries), [false]);
 }
@@ -269,7 +269,7 @@ fn continuation_lines_are_checked_after_stripping_colour_codes() {
 
 #[test]
 fn raw_closes_the_previous_line_with_every_line() {
-    let mut grouper = EntryGrouper::new(Preset::Raw);
+    let mut grouper = EntryGrouper::new(built_in("raw"));
     assert_eq!(grouper.push(b"first"), None);
     let closed = grouper
         .push(FRAME.as_bytes())
@@ -346,6 +346,68 @@ fn unqualified_header_is_an_exception_line() {
     assert!(is("PSQLException: duplicate key"));
 }
 
+#[test]
+fn python_traceback_header_is_an_exception_line() {
+    assert!(is("Traceback (most recent call last):"));
+}
+
+#[test]
+fn python_file_line_is_an_exception_line() {
+    assert!(is(r#"  File "/app/shop/orders.py", line 12, in load"#));
+}
+
+#[test]
+fn python_exception_during_handling_is_an_exception_line() {
+    assert!(is(
+        "During handling of the above exception, another exception occurred:"
+    ));
+}
+
+#[test]
+fn python_direct_cause_is_an_exception_line() {
+    assert!(is(
+        "The above exception was the direct cause of the following exception:"
+    ));
+}
+
+#[test]
+fn go_panic_is_an_exception_line() {
+    assert!(is(
+        "panic: runtime error: index out of range [5] with length 3"
+    ));
+}
+
+#[test]
+fn go_goroutine_header_is_an_exception_line() {
+    assert!(is("goroutine 1 [running]:"));
+    assert!(is("goroutine 7 [chan receive, 2 minutes]:"));
+}
+
+#[test]
+fn go_frame_is_an_exception_line() {
+    assert!(is("\t/usr/local/go/src/runtime/panic.go:770 +0x132"));
+}
+
+#[test]
+fn go_frame_without_an_offset_is_an_exception_line() {
+    assert!(is("\t/app/cmd/shop/main.go:12"));
+}
+
+#[test]
+fn dotnet_inner_exception_is_an_exception_line() {
+    assert!(is(" ---> System.IO.IOException: The disk is full"));
+}
+
+#[test]
+fn dotnet_end_of_inner_exception_is_an_exception_line() {
+    assert!(is("   --- End of inner exception stack trace ---"));
+}
+
+#[test]
+fn dotnet_end_of_stack_trace_from_previous_location_is_an_exception_line() {
+    assert!(is("--- End of stack trace from previous location ---"));
+}
+
 // --- is_exception_line: what doesn't ---
 
 #[test]
@@ -394,6 +456,32 @@ fn class_name_that_only_contains_exception_is_not_a_header() {
 #[test]
 fn exception_named_mid_line_is_not_a_header() {
     assert!(!is("Request failed: java.lang.IllegalStateException: boom"));
+}
+
+#[test]
+fn message_about_a_missing_file_is_not_a_python_file_line() {
+    assert!(!is("File not found"));
+    assert!(!is("  File not found: /data/inbox/orders.csv"));
+}
+
+#[test]
+fn indented_path_that_is_not_a_go_file_is_not_a_go_frame() {
+    assert!(!is("\t/data/inbox/orders.csv:12"));
+}
+
+#[test]
+fn word_goroutine_without_a_number_and_state_is_not_a_goroutine_header() {
+    assert!(!is("goroutine leak detected in worker pool"));
+    assert!(!is("goroutine 12 finished"));
+}
+
+/// Like the Java lines, the lines of the other ecosystems count only at the start.
+#[test]
+fn ecosystem_markers_mid_line_are_not_exception_lines() {
+    assert!(!is("worker said: Traceback (most recent call last):"));
+    assert!(!is("recovered from panic: nil map"));
+    assert!(!is("stock 12 ---> 11"));
+    assert!(!is("note --- End of inner exception stack trace ---"));
 }
 
 #[test]
@@ -457,12 +545,12 @@ fn log_lines() -> impl Strategy<Value = Vec<Vec<u8>>> {
     prop::collection::vec(log_line(), 0..40)
 }
 
-fn any_preset() -> impl Strategy<Value = Preset> {
-    prop::sample::select(Preset::value_variants().to_vec())
+fn any_preset() -> impl Strategy<Value = &'static Format> {
+    prop::sample::select(BUILT_IN.iter().collect::<Vec<_>>())
 }
 
 /// Whether `line` starts an entry under `preset`, as the preset's parser sees it.
-fn starts_entry(preset: Preset, line: &[u8]) -> bool {
+fn starts_entry(preset: &'static Format, line: &[u8]) -> bool {
     preset
         .entry_parser()
         .is_none_or(|parser| parser.parse(&strip_ansi(line)).is_some())
@@ -515,7 +603,7 @@ proptest! {
     ) {
         for entry in group(preset, &lines) {
             // Under Raw every entry lacks a head, but none is headless.
-            let headless = entry.head.is_none() && preset != Preset::Raw;
+            let headless = entry.head.is_none() && preset != built_in("raw");
             let checked = if headless {
                 entry.lines.clone()
             } else {
@@ -557,7 +645,7 @@ proptest! {
 
     #[test]
     fn raw_makes_one_entry_per_line_without_exceptions(lines in log_lines()) {
-        let entries = group(Preset::Raw, &lines);
+        let entries = group(built_in("raw"), &lines);
         prop_assert_eq!(entries.len(), lines.len());
         for (i, entry) in entries.iter().enumerate() {
             prop_assert_eq!(entry.lines.clone(), i..i + 1);

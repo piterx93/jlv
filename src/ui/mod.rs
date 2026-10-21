@@ -98,8 +98,10 @@ const TAB_STOP: usize = 4;
 /// row, columns separated by a space: the timestamp in the app's zone
 /// (the configured format, `%H:%M:%S%.3f` below 100 columns), the level (5 wide,
 /// in the style of [`App::colors`]), the thread if shown (15 wide, a longer name keeps
-/// its end after `…`), the class abbreviated to fit (30% of the width, from 24 to 40 columns,
+/// its end after `…`), the logger abbreviated to fit (30% of the width, from 24 to 40 columns,
 /// cut with `…` if even the abbreviation is too wide) and the message in the rest.
+/// A column the format lacks (see [`Format::has`](crate::format::Format::has)) is left out and
+/// the message takes its width.
 /// The headless entry has only a message, its first line. A folded entry's message
 /// ends with ` [+N]`, N being the lines it hides; an unfolded entry's continuation
 /// lines are rows of their own, in the message column. Messages are cut at the
@@ -118,8 +120,8 @@ const TAB_STOP: usize = 4;
 /// the panel hides, then the key that toggles it and the name). The footer then
 /// shows the panel's keys, `j/k Move  Space/1-6 Toggle  Enter Apply  Esc Cancel`.
 ///
-/// The class panel is drawn the same way, a box 44 columns wide and 10 high titled
-/// ` Classes `: one line per rule line of the panel, as ` ▶com.myco.*` (`▶` on the
+/// The logger panel is drawn the same way, a box 44 columns wide and 10 high titled
+/// ` Loggers `: one line per rule line of the panel, as ` ▶com.myco.*` (`▶` on the
 /// cursor's line). The footer then shows `↑/↓ Line (↓ at the end adds one)  Enter
 /// Apply  Esc Cancel`, or, while the panel has an [error](crate::app::ClassPanel::error),
 /// why its rules don't parse.
@@ -162,8 +164,9 @@ const TAB_STOP: usize = 4;
 /// lines, and at most what leaves the rows 5), with a plain border (`┌─┐`), or a thick
 /// one (`┏━┓`) while it has the [focus](App::focus). Inside, one column in from each
 /// side, it shows the selected entry ([`App::details_entry`]): under a preset, a
-/// first line with the full class and the thread in parentheses, as
-/// `com.example.App (main)`, then the message of the entry's first line, then every
+/// first line with the full logger and the thread in parentheses, as
+/// `com.example.App (main)` (a part the entry lacks is left out, and a thread alone
+/// stays in parentheses), then the message of the entry's first line, then every
 /// continuation line; the headless entry, and every entry under `Raw`, show their
 /// lines as they are. Lines are made safe to show like the rows and wrapped at the
 /// box's inner width, cut at the column rather than at a word. The pane is scrolled as
@@ -195,8 +198,8 @@ const TAB_STOP: usize = 4;
 ///
 /// While a filter is active, the line below the header is the filter bar, taken from
 /// the body: `Filters: ` and the active filters two spaces apart, in this order,
-/// `level[W E F]` (the first letters of the levels shown), `class[com.myco.*
-/// !org.hibernate]` (the class rules), `time[last 10m (file)]` (the time filter) and
+/// `level[W E F]` (the first letters of the levels shown), `logger[com.myco.*
+/// !org.hibernate]` (the logger rules), `time[last 10m (file)]` (the time filter) and
 /// `text[timeout]` (the pattern; `text[time.*out (regex, ignore case)]` with the
 /// options that are on). Without filters there is no bar.
 pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
@@ -241,7 +244,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         "vilog ─ {} ─ {} ─ {}{status} ",
         printable(app.file_name()),
         human_size(app.size()),
-        app.settings().preset,
+        app.settings().format.name,
     );
     let after_dot = format!("{after_dot}{notice}{indexing}{matches}{key_notice}");
     let bar = Style::new().reversed();
@@ -459,7 +462,7 @@ fn render_class_panel(frame: &mut Frame, panel: &ClassPanel, body: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" Classes "))
+            .block(Block::bordered().title(" Loggers "))
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         area,
     );
@@ -535,7 +538,7 @@ fn filter_bar(app: &App) -> Option<String> {
     }
     if filters.classes != Classes::default() {
         active.push(format!(
-            "class[{}]",
+            "logger[{}]",
             printable(&filters.classes.rules().join(" "))
         ));
     }
