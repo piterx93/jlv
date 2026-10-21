@@ -148,8 +148,8 @@ One JSON object per line, as written by logstash-logback-encoder, ECS loggers, z
 | exception | `stack_trace`, `error.stack_trace`, `stacktrace`, `exception`, `exc_info`, `@x`, `Exception`, `stack`, `err.stack` |
 
 - A dotted candidate matches a literal dotted key (`"log.level"`, as ECS loggers write it) and the same path one object deep (`{"log":{"level":…}}`). Deeper nesting isn't searched.
-- **Mapping per file:** the keys are chosen once, from the detection sample (§6.4): for each column the first candidate present in at least half of the sampled JSON lines. Every line is then read with the same mapping. A file whose lines have no message key still opens as JSON; its message column shows the raw line.
-- **Levels:** strings go through the aliases of §6.6. Numbers are read on the pino/bunyan scale (10 trace … 60 fatal). A CLEF file (one that maps `@t`) without `@l` on a line means Information.
+- **Mapping per file:** the keys of timestamp, level, logger, thread and message are chosen once, from the detection sample (§6.4): for each column the first candidate present in at least half of the sampled JSON lines. Every line is then read with the same mapping. A file whose lines have no message key still opens as JSON; its message column shows the raw line. The exception is not part of the mapping, since exceptions are too rare to be on half of the lines: on each line the first exception candidate present (not empty, not `null`) is that line's exception.
+- **Levels:** strings go through the aliases of §6.6. Numbers are read on the pino/bunyan scale (10 trace … 60 fatal). A CLEF file (one that maps `@t`) maps the level to `@l` however few lines carry it, and a line without `@l` means Information.
 - **Timestamps:** strings go through §6.7; unquoted numbers are epoch time (§6.7).
 - **Exceptions:** an entry has an exception when its exception field is present, not empty and not `null`.
 - **Docker `json-file`:** `{"log":"…\n","stream":"stdout","time":"2026-10-07T10:00:00.123456789Z"}` is an ordinary mapping: message from `log` with the trailing newline dropped, timestamp from `time`. The inner line is not parsed again.

@@ -3,11 +3,11 @@
 use std::ops::Range;
 
 use insta::assert_snapshot;
-use vilog::format::{EntryHead, Preset, strip_ansi};
+use vilog::format::{EntryHead, Format, strip_ansi};
 
 mod common;
 
-use common::{fixture, fixtures, lines};
+use common::{built_in, fixture, fixtures, lines};
 
 /// The fixture's lines without line endings and ANSI-stripped, as the parser gets
 /// them.
@@ -18,7 +18,7 @@ fn stripped_lines(name: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn parse(preset: Preset, line: &[u8]) -> Option<EntryHead> {
+fn parse(preset: &'static Format, line: &[u8]) -> Option<EntryHead> {
     preset
         .entry_parser()
         .unwrap_or_else(|| panic!("{preset:?} has no entry parser"))
@@ -30,9 +30,9 @@ fn text(line: &[u8], span: Range<usize>) -> String {
 }
 
 /// What `preset` makes of the fixture `name`. A line that starts an entry shows as
-/// `timestamp | level | thread | class | message`, a run of N lines that don't as
+/// `timestamp | level | thread | logger | message`, a run of N lines that don't as
 /// `+N`. Tabs show as `\t`.
-fn outline(preset: Preset, name: &str) -> String {
+fn outline(preset: &'static Format, name: &str) -> String {
     let mut out = Vec::new();
     let mut run = 0;
     for line in stripped_lines(name) {
@@ -44,8 +44,8 @@ fn outline(preset: Preset, name: &str) -> String {
             out.push(format!("+{run}"));
             run = 0;
         }
-        let columns = [head.timestamp, head.level, head.thread, head.class]
-            .map(|span| text(&line, span))
+        let columns = [head.timestamp, head.level, head.thread, head.logger]
+            .map(|span| span.map_or_else(String::new, |span| text(&line, span)))
             .join(" | ");
         let message = text(&line, head.message);
         if message.is_empty() {
@@ -62,7 +62,7 @@ fn outline(preset: Preset, name: &str) -> String {
 
 #[test]
 fn finds_every_entry_of_the_logback_fixture() {
-    assert_snapshot!(outline(Preset::Logback, "logback.log"), @r#"
+    assert_snapshot!(outline(built_in("logback"), "logback.log"), @r#"
     2026-10-07 09:14:02.118 | INFO | main | com.example.shop.ShopApplication | Starting ShopApplication v1.4.2 using Java 21.0.4 with PID 48213
     2026-10-07 09:14:02.121 | DEBUG | main | com.example.shop.ShopApplication | Running with Spring Boot v3.3.4, Spring v6.1.13
     2026-10-07 09:14:03.502 | INFO | main | o.s.b.w.e.tomcat.TomcatWebServer | Tomcat initialized with port 8080 (http)
@@ -93,7 +93,7 @@ fn finds_every_entry_of_the_logback_fixture() {
 
 #[test]
 fn finds_every_entry_of_the_logback_basic_fixture() {
-    assert_snapshot!(outline(Preset::LogbackBasic, "logback-basic.log"), @r#"
+    assert_snapshot!(outline(built_in("logback-basic"), "logback-basic.log"), @r#"
     23:58:41.007 | INFO | main | com.example.batch.BatchApp | Starting nightly import
     23:58:41.093 | DEBUG | main | c.e.batch.config.ImportConfig | Source directory: /data/inbox
     23:58:41.102 | DEBUG | main | c.e.batch.config.ImportConfig | Batch size: 500
@@ -123,7 +123,7 @@ fn finds_every_entry_of_the_logback_basic_fixture() {
 
 #[test]
 fn finds_every_entry_of_the_spring3_fixture() {
-    assert_snapshot!(outline(Preset::Spring3, "spring3.log"), @r#"
+    assert_snapshot!(outline(built_in("spring3"), "spring3.log"), @r#"
     +10
     2026-10-07T09:14:02.118+02:00 | INFO | main | com.example.shop.ShopApplication | Starting ShopApplication v1.4.2 using Java 21.0.4 with PID 48213 (/opt/shop/shop.jar started by shop in /opt/shop)
     2026-10-07T09:14:02.121+02:00 | DEBUG | main | com.example.shop.ShopApplication | Running with Spring Boot v3.3.4, Spring v6.1.13
@@ -161,7 +161,7 @@ fn finds_every_entry_of_the_spring3_fixture() {
 
 #[test]
 fn finds_every_entry_of_the_spring2_fixture() {
-    assert_snapshot!(outline(Preset::Spring2, "spring2.log"), @r#"
+    assert_snapshot!(outline(built_in("spring2"), "spring2.log"), @r#"
     2026-10-07 09:14:02.118 | INFO | main | com.example.shop.ShopApplication | Starting ShopApplication v1.2.0 using Java 11.0.24 on shop-01 with PID 48213 (/opt/shop/shop.jar started by shop in /opt/shop)
     2026-10-07 09:14:02.121 | DEBUG | main | com.example.shop.ShopApplication | Running with Spring Boot v2.7.18, Spring v5.3.31
     2026-10-07 09:14:02.122 | INFO | main | com.example.shop.ShopApplication | No active profile set, falling back to 1 default profile: "default"
@@ -190,7 +190,7 @@ fn finds_every_entry_of_the_spring2_fixture() {
 
 #[test]
 fn finds_every_entry_of_the_wildfly_fixture() {
-    assert_snapshot!(outline(Preset::Wildfly, "wildfly.log"), @r#"
+    assert_snapshot!(outline(built_in("wildfly"), "wildfly.log"), @r#"
     2026-10-07 09:13:51,202 | INFO | main | org.jboss.modules | JBoss Modules version 2.1.5.Final
     2026-10-07 09:13:51,804 | INFO | main | org.jboss.msc | JBoss MSC version 1.5.5.Final
     2026-10-07 09:13:51,813 | INFO | main | org.jboss.threads | JBoss Threads version 2.4.0.Final
@@ -229,7 +229,7 @@ fn finds_every_entry_of_the_wildfly_console_fixture() {
         fixture("wildfly-console.log").contains(&0x1b),
         "the console fixture should be coloured"
     );
-    assert_snapshot!(outline(Preset::WildflyConsole, "wildfly-console.log"), @r#"
+    assert_snapshot!(outline(built_in("wildfly-console"), "wildfly-console.log"), @r#"
     +12
     23:59:56,102 | INFO | main | org.jboss.modules | JBoss Modules version 2.1.5.Final
     23:59:56,690 | INFO | main | org.jboss.msc | JBoss MSC version 1.5.5.Final

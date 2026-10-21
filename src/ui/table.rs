@@ -2,6 +2,7 @@
 //! columns of its preset, or whole under `Raw`, and the continuation lines of the
 //! unfolded entries.
 
+use std::borrow::Cow;
 use std::iter;
 use std::ops::Range;
 
@@ -11,9 +12,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{Theme, abbreviate, printable, printable_from};
+use super::{Theme, abbreviate, json, printable, printable_from};
 use crate::app::{App, Search, ShownLine};
-use crate::format::{EntryParser, strip_ansi};
+use crate::format::{Column, EntryParser, Kind, Mapping, strip_ansi};
 use crate::source;
 
 /// The width of the `▶` marker of the selected row.
@@ -22,8 +23,8 @@ const MARKER: usize = 1;
 const MIN_NUMBER_WIDTH: usize = 4;
 const LEVEL_WIDTH: usize = 5;
 const THREAD_WIDTH: usize = 15;
-const MIN_CLASS_WIDTH: usize = 24;
-const MAX_CLASS_WIDTH: usize = 40;
+const MIN_LOGGER_WIDTH: usize = 24;
+const MAX_LOGGER_WIDTH: usize = 40;
 /// The narrowest screen whose timestamps show the date.
 const DATE_FROM_WIDTH: usize = 100;
 /// Timestamp formats and the width of what they print.
@@ -115,39 +116,52 @@ struct Columns {
     message: usize,
 }
 
-/// The columns before the message, under a preset that has them.
+/// The columns before the message, under a preset that has them. A width is `None`
+/// for a column the format doesn't have, or the thread while it is hidden.
 struct Table {
     parser: EntryParser,
+    /// The keys of the columns, for a JSON lines file.
+    json: Option<Mapping>,
     timestamp_format: String,
-    timestamp: usize,
-    /// `None` while the thread column is hidden.
+    timestamp: Option<usize>,
+    level: Option<usize>,
     thread: Option<usize>,
-    class: usize,
+    logger: Option<usize>,
 }
 
 impl Table {
     /// The width of the columns before the message, each with the space after it.
     fn width(&self) -> usize {
-        let thread = self.thread.map_or(0, |thread| thread + 1);
-        self.timestamp + 1 + LEVEL_WIDTH + 1 + thread + self.class + 1
+        [self.timestamp, self.level, self.thread, self.logger]
+            .into_iter()
+            .flatten()
+            .map(|width| width + 1)
+            .sum()
     }
 }
 
 impl Columns {
     fn new(app: &App, width: usize) -> Self {
-        let table = app.settings().preset.entry_parser().map(|parser| {
+        let table = app.settings().format.entry_parser().map(|parser| {
             let (timestamp_format, timestamp) = if width < DATE_FROM_WIDTH {
                 (TIME.0.to_owned(), TIME.1)
             } else {
                 let timestamps = app.timestamps();
                 (timestamps.format.clone(), timestamps.width)
             };
+            let format = app.settings().format;
+            let column = |column, width| format.has(column).then_some(width);
             Table {
                 parser,
+                json: matches!(format.kind, Kind::Json).then_some(app.settings().mapping),
                 timestamp_format,
-                timestamp,
-                thread: app.shows_thread().then_some(THREAD_WIDTH),
-                class: (width * 3 / 10).clamp(MIN_CLASS_WIDTH, MAX_CLASS_WIDTH),
+                timestamp: column(Column::Timestamp, timestamp),
+                level: column(Column::Level, LEVEL_WIDTH),
+                thread: column(Column::Thread, THREAD_WIDTH).filter(|_| app.shows_thread()),
+                logger: column(
+                    Column::Logger,
+                    (width * 3 / 10).clamp(MIN_LOGGER_WIDTH, MAX_LOGGER_WIDTH),
+                ),
             }
         });
         let lead = table.as_ref().map_or(0, Table::width);
@@ -193,38 +207,81 @@ impl Columns {
             return row.highlighted(search, shown.line, 0..shown.line.len());
         };
         let line = strip_ansi(shown.line);
-        let head = shown.first.then(|| table.parser.parse(&line)).flatten();
-        let Some(head) = head else {
+        let parts = shown.first.then(|| table.parts(&line)).flatten();
+        let Some(parts) = parts else {
             // Continuation lines and the headless entry have nothing but a message.
             let blank = Span::raw(" ".repeat(self.lead));
             let row = Row::new(vec![blank], text(&line), shown.hidden);
             return row.highlighted(search, &line, 0..line.len());
         };
         let record = shown.record;
-        let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
-            let local = app.settings().zone.to_datetime(timestamp);
-            local.strftime(&table.timestamp_format).to_string()
-        });
-        let level = record
-            .level()
-            .map_or_else(|| text(&line[head.level]), |level| level.name().to_owned());
-        let mut cells = vec![
-            Span::raw(cell(&timestamp, table.timestamp) + " "),
-            Span::styled(
-                cell(&level, LEVEL_WIDTH),
-                theme.paint(app.colors().level(record.level())),
-            ),
-            Span::raw(" "),
-        ];
-        if let Some(width) = table.thread {
-            let thread = text(&line[head.thread]);
-            cells.push(Span::raw(cell_keeping_end(&thread, width) + " "));
+        let mut cells = Vec::new();
+        if let Some(width) = table.timestamp {
+            let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
+                let local = app.settings().zone.to_datetime(timestamp);
+                local.strftime(&table.timestamp_format).to_string()
+            });
+            cells.push(Span::raw(cell(&timestamp, width) + " "));
         }
-        let class = text(&line[head.class]);
-        let class = cell(&abbreviate(&class, table.class), table.class);
-        cells.push(Span::raw(class + " "));
-        let row = Row::new(cells, text(&line[head.message.clone()]), shown.hidden);
-        row.highlighted(search, &line, head.message)
+        if let Some(width) = table.level {
+            let level = record
+                .level()
+                .map_or(parts.level, |level| level.name().to_owned());
+            let style = theme.paint(app.colors().level(record.level()));
+            cells.push(Span::styled(cell(&level, width), style));
+            cells.push(Span::raw(" "));
+        }
+        if let Some(width) = table.thread {
+            cells.push(Span::raw(cell_keeping_end(&parts.thread, width) + " "));
+        }
+        if let Some(width) = table.logger {
+            cells.push(Span::raw(
+                cell(&abbreviate(&parts.logger, width), width) + " ",
+            ));
+        }
+        let row = Row::new(
+            cells,
+            text(&parts.source[parts.message.clone()]),
+            shown.hidden,
+        );
+        row.highlighted(search, &parts.source, parts.message)
+    }
+}
+
+/// The columns of a first line that the table shows besides the timestamp, and the
+/// message in `source[message]`.
+struct Parts<'a> {
+    level: String,
+    thread: String,
+    logger: String,
+    source: Cow<'a, [u8]>,
+    message: Range<usize>,
+}
+
+impl Table {
+    /// The parts of `line` if it starts an entry, else `None`. A column the format has
+    /// may still be empty in an entry.
+    fn parts<'a>(&self, line: &'a [u8]) -> Option<Parts<'a>> {
+        if let Some(mapping) = &self.json {
+            let columns = mapping.text(line)?;
+            let message = json::row_message(line, &columns);
+            return Some(Parts {
+                level: String::new(),
+                thread: json::column(line, columns.thread.as_ref()),
+                logger: json::column(line, columns.logger.as_ref()),
+                message: 0..message.len(),
+                source: message,
+            });
+        }
+        let head = self.parser.parse(line)?;
+        let part = |span: Option<Range<usize>>| span.map_or_else(String::new, |s| text(&line[s]));
+        Some(Parts {
+            level: part(head.level),
+            thread: part(head.thread),
+            logger: part(head.logger),
+            source: Cow::Borrowed(line),
+            message: head.message,
+        })
     }
 }
 

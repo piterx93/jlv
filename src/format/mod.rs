@@ -1,4 +1,4 @@
-//! Understanding log lines: the format presets and detecting which one a file is in,
+//! Understanding log lines: the formats and detecting which one a file is in,
 //! severity levels, removing terminal escape codes before a line is parsed,
 //! grouping lines into entries, reading their timestamps and dating them.
 
@@ -9,6 +9,8 @@ use memchr::{memchr, memchr2};
 mod dates;
 mod detect;
 mod entry;
+pub mod json;
+mod mapping;
 mod preset;
 mod time;
 
@@ -16,7 +18,10 @@ pub(crate) use dates::DatesForward;
 pub use dates::{Anchor, DatesBackward, midnights_between, resolve_timestamps};
 pub use detect::detect;
 pub use entry::{Entry, EntryGrouper, is_exception_line};
-pub use preset::{EntryHead, EntryParser, Preset};
+pub use mapping::{JsonColumns, JsonText, Mapping, Other, decoded_line};
+pub use preset::{BUILT_IN, Column, EntryHead, EntryParser, Format, Kind, Layout};
+#[cfg(test)]
+pub(crate) use preset::{EntryPattern, Pattern, text};
 pub use time::LogTime;
 
 #[cfg(test)]
@@ -57,23 +62,60 @@ impl Level {
     }
 
     /// Reads a level token as it appears in a log line, e.g. `INFO ` or `warning`.
-    /// Surrounding spaces and tabs and letter case don't matter; `WARNING` means
-    /// `Warn`. Anything else is `None`.
+    /// Surrounding spaces and tabs and letter case don't matter. Besides the canonical
+    /// names it knows the aliases of the PRD (`WRN`, `SEVERE`, `CRITICAL`, ...). Anything
+    /// else is `None`.
     pub fn parse(token: &[u8]) -> Option<Level> {
-        const NAMES: [(&[u8], Level); 7] = [
+        const NAMES: &[(&[u8], Level)] = &[
             (b"TRACE", Level::Trace),
+            (b"TRCE", Level::Trace),
+            (b"VRB", Level::Trace),
+            (b"VERBOSE", Level::Trace),
+            (b"FINER", Level::Trace),
+            (b"FINEST", Level::Trace),
             (b"DEBUG", Level::Debug),
+            (b"DBG", Level::Debug),
+            (b"DBUG", Level::Debug),
+            (b"FINE", Level::Debug),
             (b"INFO", Level::Info),
+            (b"INF", Level::Info),
+            (b"INFORMATION", Level::Info),
+            (b"NOTICE", Level::Info),
+            (b"CONFIG", Level::Info),
             (b"WARN", Level::Warn),
             (b"WARNING", Level::Warn),
+            (b"WRN", Level::Warn),
             (b"ERROR", Level::Error),
+            (b"ERR", Level::Error),
+            (b"FAIL", Level::Error),
+            (b"SEVERE", Level::Error),
             (b"FATAL", Level::Fatal),
+            (b"FTL", Level::Fatal),
+            (b"CRITICAL", Level::Fatal),
+            (b"CRIT", Level::Fatal),
+            (b"PANIC", Level::Fatal),
+            (b"EMERG", Level::Fatal),
+            (b"ALERT", Level::Fatal),
         ];
         let name = trim_padding(token);
         NAMES
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|&(_, level)| level)
+    }
+
+    /// Reads a numeric level on the pino/bunyan scale: 10 is `Trace`, 20 `Debug`, and
+    /// so on up to 60 for `Fatal`. Any other number is `None`.
+    pub fn from_pino(number: u64) -> Option<Level> {
+        match number {
+            10 => Some(Level::Trace),
+            20 => Some(Level::Debug),
+            30 => Some(Level::Info),
+            40 => Some(Level::Warn),
+            50 => Some(Level::Error),
+            60 => Some(Level::Fatal),
+            _ => None,
+        }
     }
 }
 

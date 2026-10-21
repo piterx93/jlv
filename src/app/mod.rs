@@ -24,12 +24,12 @@ use crate::clipboard::{Clipboard, CopyError, entry_text};
 use crate::config::{Colors, Config, Ui};
 use crate::export;
 use crate::filter::{
-    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
-    TimeSpec,
+    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Reader, Rule, TimeFilter,
+    TimeRange, TimeSpec,
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Liveness, Options, Watcher};
-use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
+use crate::format::{Anchor, BUILT_IN, Column, Format, Level, Mapping, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::keymap::{Keymap, normalized};
@@ -69,7 +69,7 @@ pub enum Action {
     /// Shows or hides the gutter of file line numbers.
     ToggleLineNumbers,
     ToggleWrap,
-    /// Reads the file in the next preset of [`Preset::ALL`].
+    /// Reads the file in the next format of [`BUILT_IN`].
     CyclePreset,
     /// Unfolds the selected entry if it is folded, folds it if it is not.
     ToggleFold,
@@ -555,8 +555,11 @@ impl Panel {
     }
 }
 
-/// What [`App::notice`] says after `c` or `C` on an entry without a class.
-const NO_CLASS: &str = "the selected entry has no class";
+/// What [`App::notice`] says after `c` or `C` on an entry without a logger.
+const NO_CLASS: &str = "the selected entry has no logger";
+
+/// What [`App::notice`] says after `T` on a format without threads.
+const NO_THREAD_COLUMN: &str = "the format has no thread column";
 
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
 /// message column by.
@@ -574,8 +577,9 @@ const TAIL_WINDOW: usize = 65_536;
 /// the viewer gives up on the tail and waits for the whole index.
 const TAIL_LIMIT: usize = 4_194_304;
 
-/// How many entries the filter engine evaluates per chunk. It holds the index for a
-/// chunk at a time, and taking in what the followed file appends has to wait for it.
+/// How many entries the filter engine evaluates per chunk, and a chunk per
+/// core at once. It holds the index for a batch at a time, and taking in what the
+/// followed file appends has to wait for it.
 const FILTER_CHUNK: usize = 1024;
 
 /// How long the viewer waits for the filter engine to evaluate the few entries that
@@ -643,14 +647,14 @@ struct Filter {
 }
 
 impl Filter {
-    /// The filter of `index`, read in `preset`, whose matches fold as `all`, the
+    /// The filter of `index`, read as `reader` says, whose matches fold as `all`, the
     /// index's fold state, folds them.
-    fn spawn(index: &SharedIndex, preset: Preset, filters: Filters, all: &Folds) -> Self {
+    fn spawn(index: &SharedIndex, reader: Reader, filters: Filters, all: &Folds) -> Self {
         let options = filter::Options {
             chunk: FILTER_CHUNK,
         };
         Filter {
-            engine: Engine::spawn(Arc::clone(index), preset, filters, options),
+            engine: Engine::spawn(Arc::clone(index), reader, filters, options),
             // In the index's mode, only the matches it excepts are exceptions here.
             folds: all.empty_like(),
         }
@@ -999,7 +1003,7 @@ impl Timestamps {
 
 impl App {
     /// A viewer over `source`, which starts indexing it in the background in the
-    /// preset `format` names. Without one the preset is detected from the file's first
+    /// format `format` names. Without one the format is detected from the file's first
     /// lines ([`detect`](crate::format::detect)); when none fits, the file is read in
     /// `Raw` and [`format_unrecognized`](Self::format_unrecognized) says so. `path` is
     /// where the file was opened from; its name and `mtime`, the file's modification
@@ -1022,7 +1026,7 @@ impl App {
     pub fn new(
         path: &Path,
         source: Source,
-        format: Option<Preset>,
+        format: Option<&'static Format>,
         zone: TimeZone,
         mtime: Timestamp,
         follow: bool,
@@ -1035,9 +1039,11 @@ impl App {
         let anchor = Anchor::for_file(path, mtime, &zone);
         let source = Arc::new(source);
         let settings = Settings {
-            preset: picked.unwrap_or(Preset::Raw),
+            format: picked
+                .unwrap_or_else(|| Format::by_id("raw").expect("the built-in formats include raw")),
             zone,
             anchor,
+            mapping: Mapping::choose(source::lines(source.bytes())),
         };
         let progress = Progress {
             indexed: 0,
@@ -1150,7 +1156,7 @@ impl App {
             let dated = self.progress.is_complete()
                 && self
                     .settings
-                    .preset
+                    .format
                     .entry_parser()
                     .is_some_and(|parser| !parser.has_date());
             if dated {
@@ -1189,7 +1195,7 @@ impl App {
         self.progress
     }
 
-    /// How the file is indexed: the preset, the zone and the anchor `new` made of
+    /// How the file is indexed: the format, the zone and the anchor `new` made of
     /// its arguments.
     pub fn settings(&self) -> &Settings {
         &self.settings
@@ -2037,6 +2043,9 @@ impl App {
             Action::ToggleFollow => self.follow(),
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
+            Action::ToggleThread if !self.settings.format.has(Column::Thread) => {
+                self.notice = Some(Cow::Borrowed(NO_THREAD_COLUMN));
+            }
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
             Action::CycleFocus => self.cycle_focus(),
             Action::ToggleHistogram => self.toggle_histogram(),
@@ -2288,9 +2297,10 @@ impl App {
     }
 
     /// What the viewer has to tell about the last key, until the next one: `the
-    /// selected entry has no class` after [`Action::OnlyClass`] or
-    /// [`Action::HideClass`] on an entry without a class (or with no row selected),
-    /// which then change nothing.
+    /// selected entry has no logger` after [`Action::OnlyClass`] or
+    /// [`Action::HideClass`] on an entry without a logger (or with no row selected),
+    /// which then change nothing, and `the format has no thread column` after
+    /// [`Action::ToggleThread`] on a format without threads.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
@@ -2305,14 +2315,16 @@ impl App {
         self.quit
     }
 
-    /// Indexes the file again in the preset after the current one in
-    /// [`Preset::ALL`]. It opens again at the end while following, at the top
-    /// otherwise; a file that can't be followed opens again as `new` opened it.
+    /// Indexes the file again in the format after the current one in
+    /// [`BUILT_IN`], the first after the last. It opens again at the end while
+    /// following, at the top otherwise; a file that can't be followed opens again as
+    /// `new` opened it.
     fn cycle_preset(&mut self) {
-        let presets = Preset::ALL;
-        // `ALL` holds every preset, so the current one is always found.
-        let current = presets.iter().position(|&p| p == self.settings.preset);
-        self.settings.preset = presets[current.map_or(0, |i| (i + 1) % presets.len())];
+        let at = BUILT_IN
+            .iter()
+            .position(|format| *format == *self.settings.format)
+            .map_or(0, |at| at + 1);
+        self.settings.format = &BUILT_IN[at % BUILT_IN.len()];
         self.unrecognized = false;
         self.folds = Folds::default();
         self.truncated = false;
@@ -2361,7 +2373,7 @@ impl App {
             };
             Engine::spawn_search(
                 Arc::clone(&self.index),
-                self.settings.preset,
+                self.reader(),
                 self.filters.clone(),
                 search.matcher.clone(),
                 options,
@@ -2582,12 +2594,16 @@ impl App {
         })
     }
 
+    fn reader(&self) -> Reader {
+        Reader::new(self.settings.format, self.settings.mapping)
+    }
+
     /// Starts evaluating the filters over the index, in place of any engine at work.
     fn start_filter(&mut self) {
         self.cancel_jump();
         let filters = self.filters.clone();
-        let preset = self.settings.preset;
-        self.filter = Some(Filter::spawn(&self.index, preset, filters, &self.folds));
+        let reader = self.reader();
+        self.filter = Some(Filter::spawn(&self.index, reader, filters, &self.folds));
     }
 
     /// Indexes the source from the start, the rows opening as `opening` says.

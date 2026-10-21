@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 use vilog::app::Action;
-use vilog::filter::{Engine, Filters, Indexed, Levels, Options};
+use vilog::filter::{Engine, Filters, Indexed, Levels, Options, Reader};
 use vilog::format::Level;
 use vilog::matcher::{self, Matcher};
 
@@ -57,7 +57,8 @@ fn filtering(c: &mut Criterion, log: &BenchLog) {
     let options = Options {
         chunk: FILTER_CHUNK,
     };
-    let mut engine = Engine::spawn(indexed, settings.preset, Filters::default(), options);
+    let reader = Reader::new(settings.format, settings.mapping);
+    let mut engine = Engine::spawn(indexed, reader, Filters::default(), options);
     let text = |pattern, regex| {
         let options = matcher::Options {
             regex,

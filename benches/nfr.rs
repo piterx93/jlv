@@ -161,7 +161,7 @@ fn follow_latency(log: &BenchLog) {
     // Latency while indexing goes on isn't what §13 asks about.
     support::poll_until(&mut app, |app| app.progress().is_complete());
     let source = log.open();
-    let preset = support::settings(log.path(), &source).preset;
+    let preset = support::settings(log.path(), &source).format;
     let generated = source.bytes().len() as u64;
     drop(source);
     let probe = Arc::new(Mutex::new(Probe::default()));

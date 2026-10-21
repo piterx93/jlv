@@ -102,7 +102,7 @@ pub struct Follow {
 #[serde(default, deny_unknown_fields)]
 pub struct Filters {
     /// `default_class_excludes`, one exclude rule per item: the class filter vilog
-    /// starts with unless `--class` is given.
+    /// starts with unless `--logger` is given.
     #[serde(deserialize_with = "class_excludes")]
     pub default_class_excludes: Classes,
 }

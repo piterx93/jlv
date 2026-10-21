@@ -5,9 +5,10 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 
+use super::json;
 use super::table::{text, wrap};
 use crate::app::{App, Focus};
-use crate::format::strip_ansi;
+use crate::format::{Kind, strip_ansi};
 use crate::source;
 
 pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -41,7 +42,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(super) const DETAILS_CAP: usize = 1 << 20;
 
 /// The lines of the selected entry made safe to show. Under a preset the first line
-/// becomes the full class and the thread, then the message.
+/// becomes the full logger and the thread, then the message.
 fn entry_lines(app: &App) -> Vec<String> {
     let Some(entry) = app.details_entry() else {
         return Vec::new();
@@ -55,21 +56,42 @@ fn entry_lines(app: &App) -> Vec<String> {
 
 fn entry_head(app: &App, entry: &[u8]) -> Vec<String> {
     let mut lines = source::lines(entry);
-    let Some(parser) = app.settings().preset.entry_parser() else {
+    let Some(parser) = app.settings().format.entry_parser() else {
         return lines.map(text).collect();
     };
     let mut shown = Vec::new();
     if let Some(first) = lines.next() {
         let first = strip_ansi(first);
-        match parser.parse(&first) {
-            Some(head) => {
-                let thread = text(&first[head.thread]);
-                shown.push(format!("{} ({thread})", text(&first[head.class])));
-                shown.push(text(&first[head.message]));
+        let settings = app.settings();
+        let columns = match settings.format.kind {
+            Kind::Json => settings.mapping.text(&first),
+            _ => None,
+        };
+        if let Some(columns) = columns {
+            shown.extend(json::details(&first, &columns));
+        } else {
+            match parser.parse(&first) {
+                Some(head) => {
+                    let logger = head.logger.map(|logger| text(&first[logger]));
+                    let thread = head.thread.map(|thread| text(&first[thread]));
+                    shown.extend(source_line(logger, thread));
+                    shown.push(text(&first[head.message]));
+                }
+                None => shown.push(text(&first)),
             }
-            None => shown.push(text(&first)),
         }
     }
     shown.extend(lines.map(|line| text(&strip_ansi(line))));
     shown
+}
+
+/// The line above the message: the logger and the thread in parentheses, whichever
+/// the entry has.
+pub(super) fn source_line(logger: Option<String>, thread: Option<String>) -> Option<String> {
+    match (logger, thread) {
+        (Some(logger), Some(thread)) => Some(format!("{logger} ({thread})")),
+        (Some(only), None) => Some(only),
+        (None, Some(thread)) => Some(format!("({thread})")),
+        (None, None) => None,
+    }
 }

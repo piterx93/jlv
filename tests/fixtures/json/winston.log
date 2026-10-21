@@ -1,0 +1,8 @@
+{"level":"info","message":"server started on port 3000","timestamp":"2026-03-14T09:12:01.104Z"}
+{"level":"debug","message":"connecting to redis","timestamp":"2026-03-14T09:12:01.310Z"}
+{"level":"http","message":"GET /health 200 3ms","timestamp":"2026-03-14T09:12:02.020Z"}
+{"level":"warn","message":"config key \"timeout\" missing, using default","timestamp":"2026-03-14T09:12:03.481Z"}
+{"level":"error","message":"unhandled rejection: connect ECONNREFUSED 127.0.0.1:5432","stack":"Error: connect ECONNREFUSED 127.0.0.1:5432\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1555:16)\n    at Pool.connect (/app/src/db.js:18:9)","timestamp":"2026-03-14T09:12:04.775Z"}
+{"level":"info","message":"retrying in 5s","timestamp":"2026-03-14T09:12:05.002Z"}
+{"level":"verbose","message":"pool size 4","timestamp":"2026-03-14T09:12:06.450Z"}
+{"level":"info","message":"shutting down","timestamp":"2026-03-14T09:12:07.900Z"}

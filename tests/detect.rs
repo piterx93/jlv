@@ -1,14 +1,14 @@
 //! Format detection on the fixture logs in `tests/fixtures`, one per preset.
 
-use vilog::format::{Preset, detect};
+use vilog::format::{Format, Mapping, detect};
 
 mod common;
 
-use common::{fixture, fixtures, lines};
+use common::{built_in, fixture, fixtures, lines};
 
 /// What detection makes of a file with these bytes, split into lines as the viewer
 /// splits them.
-fn detect_bytes(bytes: &[u8]) -> Option<Preset> {
+fn detect_bytes(bytes: &[u8]) -> Option<&'static Format> {
     detect(lines(bytes))
 }
 
@@ -16,6 +16,120 @@ fn detect_bytes(bytes: &[u8]) -> Option<Preset> {
 fn every_fixture_is_detected_as_its_own_preset() {
     for (preset, name) in fixtures() {
         assert_eq!(detect_bytes(&fixture(name)), Some(preset), "{name}");
+    }
+}
+
+/// The JSON fixtures in `tests/fixtures/json` and the mapping each is read with:
+/// timestamp, level, logger, thread and message key.
+const JSON_FIXTURES: [(&str, [Option<&str>; 5]); 11] = [
+    (
+        "zap",
+        [Some("ts"), Some("level"), Some("logger"), None, Some("msg")],
+    ),
+    (
+        "slog",
+        [Some("time"), Some("level"), None, None, Some("msg")],
+    ),
+    (
+        "pino",
+        [Some("time"), Some("level"), Some("name"), None, Some("msg")],
+    ),
+    (
+        "winston",
+        [
+            Some("timestamp"),
+            Some("level"),
+            None,
+            None,
+            Some("message"),
+        ],
+    ),
+    (
+        "structlog",
+        [
+            Some("timestamp"),
+            Some("level"),
+            Some("logger"),
+            None,
+            Some("event"),
+        ],
+    ),
+    (
+        "python-json-logger",
+        [
+            Some("asctime"),
+            Some("levelname"),
+            Some("name"),
+            None,
+            Some("message"),
+        ],
+    ),
+    (
+        "serilog-clef",
+        [
+            Some("@t"),
+            Some("@l"),
+            Some("SourceContext"),
+            None,
+            Some("@mt"),
+        ],
+    ),
+    (
+        "ms-json-console",
+        [
+            Some("Timestamp"),
+            Some("LogLevel"),
+            Some("Category"),
+            None,
+            Some("Message"),
+        ],
+    ),
+    (
+        "logstash-logback",
+        [
+            Some("@timestamp"),
+            Some("level"),
+            Some("logger_name"),
+            Some("thread_name"),
+            Some("message"),
+        ],
+    ),
+    (
+        "ecs",
+        [
+            Some("@timestamp"),
+            Some("log.level"),
+            Some("log.logger"),
+            Some("process.thread.name"),
+            Some("message"),
+        ],
+    ),
+    (
+        "docker-json-file",
+        [Some("time"), None, None, None, Some("log")],
+    ),
+];
+
+#[test]
+fn every_json_fixture_is_detected_as_json() {
+    for (name, _) in JSON_FIXTURES {
+        let bytes = fixture(&format!("json/{name}.log"));
+        assert_eq!(detect_bytes(&bytes), Some(built_in("json")), "{name}");
+    }
+}
+
+#[test]
+fn every_json_fixture_maps_the_keys_its_library_writes() {
+    for (name, [timestamp, level, logger, thread, message]) in JSON_FIXTURES {
+        let bytes = fixture(&format!("json/{name}.log"));
+        let expected = Mapping {
+            timestamp,
+            level,
+            logger,
+            thread,
+            message,
+        };
+        assert_eq!(Mapping::choose(lines(&bytes)), expected, "{name}");
     }
 }
 
@@ -51,4 +165,34 @@ fn no_fixture_is_recognized_after_200_lines_of_jvm_startup_noise() {
         let detection = detect_bytes(&bytes);
         assert_eq!(detection, None, "{name}");
     }
+}
+
+/// Traces of Python, Go, Node.js and .NET in a Java log, as when it records what a
+/// child process printed, are left out of the sample like Java's. Only the lines of a
+/// Go trace that name a function stay in, too few to tip the score.
+#[test]
+fn every_fixture_with_traces_of_every_ecosystem_mixed_in_is_detected_as_its_own_preset() {
+    let traces = fixture("traces.log");
+    let traces = continuation_lines(&traces);
+    for (preset, name) in fixtures() {
+        let bytes = fixture(name);
+        let mixed: Vec<&[u8]> = lines(&bytes)
+            .chunks(TRACE_EVERY)
+            .flat_map(|chunk| [chunk, &traces].concat())
+            .collect();
+        assert_eq!(detect(mixed), Some(preset), "{name}");
+    }
+}
+
+/// How many fixture lines come before each copy of the traces.
+const TRACE_EVERY: usize = 30;
+
+/// The lines of `bytes` that don't start a Logback entry.
+fn continuation_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    let parser = built_in("logback")
+        .entry_parser()
+        .expect("logback has entries");
+    let mut lines = lines(bytes);
+    lines.retain(|line| parser.parse(line).is_none());
+    lines
 }

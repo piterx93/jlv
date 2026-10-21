@@ -1,0 +1,8 @@
+{"level":"info","ts":1773479521.104213,"logger":"orders","caller":"orders/service.go:41","msg":"server started","addr":":8080"}
+{"level":"debug","ts":1773479521.310877,"logger":"orders.db","caller":"db/pool.go:88","msg":"connection pool ready","size":10}
+{"level":"info","ts":1773479522.020451,"logger":"orders","caller":"orders/handler.go:57","msg":"order created","order_id":42,"customer":"Alice"}
+{"level":"warn","ts":1773479523.481002,"logger":"orders.http","caller":"http/client.go:112","msg":"slow upstream, retrying","attempt":2,"elapsed":"1.4s"}
+{"level":"error","ts":1773479524.775390,"logger":"orders.db","caller":"db/query.go:203","msg":"query failed: unknown column \"total\"","error":"pq: column \"total\" does not exist","stacktrace":"github.com/acme/orders/db.(*Store).Query\n\t/src/db/query.go:203\ngithub.com/acme/orders.(*Service).Create\n\t/src/orders/service.go:97\nmain.main\n\t/src/main.go:30"}
+{"level":"info","ts":1773479525.002118,"logger":"orders","caller":"orders/handler.go:64","msg":"order retried","order_id":43}
+{"level":"dpanic","ts":1773479526.450660,"logger":"orders","caller":"orders/cache.go:19","msg":"cache invariant broken","key":"user:7"}
+{"level":"info","ts":1773479527.900001,"logger":"orders","caller":"orders/service.go:120","msg":"shutting down"}

@@ -1,7 +1,8 @@
 //! A synthetic Java application log for the benchmarks: the levels of a busy
 //! service, stack traces under errors and some warnings, now and then a payload line
 //! of a few kilobytes and, rarely, one past the viewer's 64 KiB render cap. The same
-//! spec always gives the same bytes.
+//! spec always gives the same bytes. In the `json` layout an entry is one pino line
+//! and its stack trace is the `err.stack` string.
 //!
 //! Every message starts with `req-<n> `, `n` counting the entries from 0, so that a
 //! harness can tell on screen which entry it is looking at.
@@ -11,12 +12,13 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use jiff::civil::{Date, date};
-use vilog::format::{Level, Preset};
+use jiff::tz::TimeZone;
+use vilog::format::{Format, Level};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Spec {
-    /// Whose layout the entries have. `Raw` reads any lines, so it gets Logback's.
-    pub preset: Preset,
+    /// Whose layout the entries have. `raw` reads any lines, so it gets Logback's.
+    pub preset: &'static Format,
     /// The log ends with the first whole entry that reaches this many bytes.
     pub size: u64,
     pub seed: u64,
@@ -41,7 +43,7 @@ pub fn generate(path: &Path, spec: Spec) -> io::Result<u64> {
 
 /// One INFO entry in `preset`'s layout with `message`, dated after every entry
 /// [`generate`] writes, for appending to a generated log.
-pub fn line(preset: Preset, message: &str) -> Vec<u8> {
+pub fn line(preset: &'static Format, message: &str) -> Vec<u8> {
     let clock = Clock {
         date: date(2030, 1, 1),
         millis: 0,
@@ -49,6 +51,9 @@ pub fn line(preset: Preset, message: &str) -> Vec<u8> {
     let mut line = Vec::new();
     write_head(&mut line, preset, &clock, Level::Info, "main", PROBE_CLASS);
     line.extend_from_slice(message.as_bytes());
+    if is_json(preset) {
+        line.extend_from_slice(b"\"}");
+    }
     line.push(b'\n');
     line
 }
@@ -131,7 +136,7 @@ const FRAMES: &[(&str, &str)] = &[
 ];
 
 struct Log {
-    preset: Preset,
+    preset: &'static Format,
     rng: Rng,
     clock: Clock,
     seq: u64,
@@ -156,17 +161,32 @@ impl Log {
         let thread = self.rng.pick(THREADS);
         let class = self.rng.pick(CLASSES);
         write_head(out, self.preset, &self.clock, level, thread, class);
+        let json = is_json(self.preset);
+        let message_at = out.len();
         // Writing to a Vec can't fail, here and below.
         let _ = write!(out, "req-{} ", self.seq);
         self.write_message(out, level);
-        out.push(b'\n');
         let traced = match level {
             Level::Error => self.rng.per_mille(700),
             Level::Warn => self.rng.per_mille(100),
             _ => false,
         };
-        if traced {
-            self.write_trace(out);
+        if json {
+            escape_from(out, message_at);
+            out.push(b'"');
+            if traced {
+                out.extend_from_slice(b",\"err\":{\"stack\":\"");
+                let trace_at = out.len();
+                self.write_trace(out);
+                escape_from(out, trace_at);
+                out.extend_from_slice(b"\"}");
+            }
+            out.extend_from_slice(b"}\n");
+        } else {
+            out.push(b'\n');
+            if traced {
+                self.write_trace(out);
+            }
         }
         self.seq += 1;
     }
@@ -250,44 +270,71 @@ impl Log {
     }
 }
 
+fn is_json(preset: &Format) -> bool {
+    preset.id == "json"
+}
+
+/// Replaces what `out` holds from `from` on with the same text as the inside of a JSON
+/// string.
+fn escape_from(out: &mut Vec<u8>, from: usize) {
+    let raw = out.split_off(from);
+    for byte in raw {
+        match byte {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            _ => out.push(byte),
+        }
+    }
+}
+
 /// An entry's first line up to where the message starts.
 fn write_head(
     out: &mut Vec<u8>,
-    preset: Preset,
+    preset: &'static Format,
     clock: &Clock,
     level: Level,
     thread: &str,
     class: &str,
 ) {
+    // Pino numbers its levels 10 (trace) to 60 (fatal).
+    let pino_level = (level as u8 + 1) * 10;
     let level = level.name();
-    let _ = match preset {
-        Preset::Logback | Preset::Raw => {
+    let _ = match preset.id {
+        "logback" | "raw" => {
             clock.write_date_time(out, ' ', '.');
             write!(out, " [{thread}] {level:<5} {class} - ")
         }
-        Preset::LogbackBasic => {
+        "logback-basic" => {
             clock.write_time(out, '.');
             write!(out, " [{thread}] {level:<5} {class} -- ")
         }
-        Preset::Spring3 => {
+        "spring3" => {
             clock.write_date_time(out, 'T', '.');
             write!(
                 out,
                 "+02:00 {level:>5} {PID} --- [shop] [{thread:>15}] {class:<40} : "
             )
         }
-        Preset::Spring2 => {
+        "spring2" => {
             clock.write_date_time(out, ' ', '.');
             write!(out, " {level:>5} {PID} --- [{thread:>15}] {class:<40} : ")
         }
-        Preset::Wildfly => {
+        "wildfly" => {
             clock.write_date_time(out, ' ', ',');
             write!(out, " {level:<5} [{class}] ({thread}) ")
         }
-        Preset::WildflyConsole => {
+        "wildfly-console" => {
             clock.write_time(out, ',');
             write!(out, " {level:<5} [{class}] ({thread}) ")
         }
+        "json" => write!(
+            out,
+            "{{\"level\":{pino_level},\"time\":{},\"pid\":{PID},\"hostname\":\"bench-host\",\"name\":\"{class}\",\"msg\":\"",
+            clock.epoch_millis()
+        ),
+        other => panic!("no layout written for {other}"),
     };
 }
 
@@ -306,6 +353,12 @@ impl Clock {
             // Fails only past the year 9999, a few million years of entries away.
             self.date = self.date.tomorrow().expect("the log ends before 9999");
         }
+    }
+
+    fn epoch_millis(&self) -> i64 {
+        // UTC has no gaps, so this can't fail for dates in 1..=9999.
+        let midnight = self.date.to_zoned(TimeZone::UTC).expect("UTC has no gaps");
+        midnight.timestamp().as_millisecond() + i64::from(self.millis)
     }
 
     fn write_date_time(&self, out: &mut Vec<u8>, separator: char, fraction: char) {

@@ -5,13 +5,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::format::strip_ansi;
-use crate::test_support::EXAMPLES;
-
-/// Every preset but `Raw`, which comes last in [`Preset::ALL`].
-const STRUCTURED: [Preset; 6] = {
-    let [structured @ .., _raw] = Preset::ALL;
-    structured
-};
+use crate::test_support::{EXAMPLES, built_in, no_thread_or_logger, no_timestamp, text_formats};
 
 /// Spring Boot's default correlation group with a trace and a span: `traceId(32)`,
 /// `spanId(16)`.
@@ -22,29 +16,32 @@ fn blank_correlation() -> String {
     " ".repeat(32 + 1 + 16)
 }
 
-fn parser(preset: Preset) -> EntryParser {
+fn parser(preset: &'static Format) -> EntryParser {
     preset
         .entry_parser()
-        .unwrap_or_else(|| panic!("{preset:?} has no entry parser"))
+        .unwrap_or_else(|| panic!("{} has no entry parser", preset.id))
 }
 
-fn parse(preset: Preset, line: &[u8]) -> Option<EntryHead> {
+fn parse(preset: &'static Format, line: &[u8]) -> Option<EntryHead> {
     parser(preset).parse(line)
 }
 
-/// The columns `preset` finds in `line` as text: timestamp, level, thread, class,
+/// The columns `preset` finds in `line` as text: timestamp, level, thread, logger,
 /// message.
-fn columns(preset: Preset, line: &str) -> [String; 5] {
+fn columns(preset: &'static Format, line: &str) -> [String; 5] {
     let head = parse(preset, line.as_bytes())
-        .unwrap_or_else(|| panic!("{preset:?} doesn't parse {line:?}"));
+        .unwrap_or_else(|| panic!("{} doesn't parse {line:?}", preset.id));
     [
         head.timestamp,
         head.level,
         head.thread,
-        head.class,
-        head.message,
+        head.logger,
+        Some(head.message),
     ]
-    .map(|span| String::from_utf8_lossy(&line.as_bytes()[span]).into_owned())
+    .map(|span| {
+        let span = span.expect("the built-in formats have every column");
+        String::from_utf8_lossy(&line.as_bytes()[span]).into_owned()
+    })
 }
 
 /// What goes into an entry's first line, to write it the way each preset does.
@@ -114,15 +111,15 @@ fn padding(text: &str, width: usize) -> String {
 
 /// `parts` written as `preset`'s pattern writes an entry's first line, with the
 /// columns `parse` should find in it.
-fn entry_line(preset: Preset, parts: &Parts) -> (String, EntryHead) {
+fn entry_line(preset: &'static Format, parts: &Parts) -> (String, EntryHead) {
     let p = parts;
     let time = format!("{}{}{}", p.time, p.separator, p.fraction);
     let mut line = Line::default();
-    let head = match preset {
+    let head = match preset.id {
         // %d [%thread] %-5level %logger - %msg
-        Preset::Logback | Preset::LogbackBasic => {
-            let timestamp = match preset {
-                Preset::Logback => line.push(&format!("{} {time}", p.date)),
+        "logback" | "logback-basic" => {
+            let timestamp = match preset.id {
+                "logback" => line.push(&format!("{} {time}", p.date)),
                 _ => line.push(&time),
             };
             line.push(" [");
@@ -138,31 +135,31 @@ fn entry_line(preset: Preset, parts: &Parts) -> (String, EntryHead) {
             line.push(&format!(" {} ", p.dashes));
             let message = line.push(&p.message);
             EntryHead {
-                timestamp,
-                level,
-                thread,
-                class,
+                timestamp: Some(timestamp),
+                level: Some(level),
+                thread: Some(thread),
+                logger: Some(class),
                 message,
             }
         }
         // %d %5p PID --- [app] [%15.15t] [correlation] %-40.40logger : %m
-        Preset::Spring3 | Preset::Spring2 => {
-            let timestamp = match preset {
-                Preset::Spring3 => line.push(&format!("{}T{time}{}", p.date, p.offset)),
+        "spring3" | "spring2" => {
+            let timestamp = match preset.id {
+                "spring3" => line.push(&format!("{}T{time}{}", p.date, p.offset)),
                 _ => line.push(&format!("{} {time}", p.date)),
             };
             line.push(" ");
             line.push(&padding(&p.level, 5));
             let level = line.push(&p.level);
             line.push(&format!(" {} --- ", p.pid));
-            if let (Preset::Spring3, Some(app)) = (preset, &p.app) {
+            if let ("spring3", Some(app)) = (preset.id, &p.app) {
                 line.push(&format!("[{app}] "));
             }
             line.push("[");
             line.push(&padding(&p.thread, 15));
             let thread = line.push(&p.thread);
             line.push("] ");
-            if let (Preset::Spring3, Some(correlation)) = (preset, &p.correlation) {
+            if let ("spring3", Some(correlation)) = (preset.id, &p.correlation) {
                 line.push(&format!("[{correlation}] "));
             }
             let class = line.push(&p.class);
@@ -170,17 +167,17 @@ fn entry_line(preset: Preset, parts: &Parts) -> (String, EntryHead) {
             line.push(" : ");
             let message = line.push(&p.message);
             EntryHead {
-                timestamp,
-                level,
-                thread,
-                class,
+                timestamp: Some(timestamp),
+                level: Some(level),
+                thread: Some(thread),
+                logger: Some(class),
                 message,
             }
         }
         // %d %-5p [%c] (%t) %s%e
-        Preset::Wildfly | Preset::WildflyConsole => {
-            let timestamp = match preset {
-                Preset::Wildfly => line.push(&format!("{} {time}", p.date)),
+        "wildfly" | "wildfly-console" => {
+            let timestamp = match preset.id {
+                "wildfly" => line.push(&format!("{} {time}", p.date)),
                 _ => line.push(&time),
             };
             line.push(" ");
@@ -193,40 +190,92 @@ fn entry_line(preset: Preset, parts: &Parts) -> (String, EntryHead) {
             line.push(") ");
             let message = line.push(&p.message);
             EntryHead {
-                timestamp,
-                level,
-                thread,
-                class,
+                timestamp: Some(timestamp),
+                level: Some(level),
+                thread: Some(thread),
+                logger: Some(class),
                 message,
             }
         }
-        Preset::Raw => panic!("Raw has no entry lines"),
+        other => panic!("no entry lines written for {other}"),
     };
     (line.0, head)
 }
 
 #[track_caller]
-fn assert_parses(preset: Preset, parts: &Parts) {
+fn assert_parses(preset: &'static Format, parts: &Parts) {
     let (line, head) = entry_line(preset, parts);
     assert_eq!(
         parse(preset, line.as_bytes()),
         Some(head),
-        "{preset:?}: {line:?}"
+        "{}: {line:?}",
+        preset.id
     );
 }
 
 #[track_caller]
 fn assert_every_preset_parses(parts: &Parts) {
-    for preset in STRUCTURED {
+    for preset in text_formats() {
         assert_parses(preset, parts);
     }
 }
 
-// --- presets ---
+// --- the table ---
+
+const ALL_COLUMNS: [Column; 4] = [
+    Column::Timestamp,
+    Column::Level,
+    Column::Thread,
+    Column::Logger,
+];
+
+/// The columns `format` has, in the order of [`ALL_COLUMNS`].
+fn columns_of(format: &'static Format) -> Vec<Column> {
+    ALL_COLUMNS
+        .into_iter()
+        .filter(|&column| format.has(column))
+        .collect()
+}
 
 #[test]
-fn every_preset_has_a_name_for_the_header() {
-    let names: Vec<String> = Preset::ALL.iter().map(Preset::to_string).collect();
+fn every_built_in_text_format_has_every_column() {
+    for format in text_formats() {
+        assert_eq!(columns_of(format), ALL_COLUMNS, "{format:?}");
+    }
+}
+
+#[test]
+fn raw_has_no_columns() {
+    assert_eq!(columns_of(built_in("raw")), []);
+}
+
+#[test]
+fn a_format_has_the_columns_its_pattern_has_groups_for() {
+    assert_eq!(
+        columns_of(no_thread_or_logger()),
+        [Column::Timestamp, Column::Level]
+    );
+    assert_eq!(columns_of(no_timestamp()), [Column::Level, Column::Logger]);
+}
+
+#[test]
+fn a_column_the_format_lacks_has_no_span() {
+    let line = "WARNING:app.orders:Payment retry 1/3";
+    assert_eq!(
+        parse(no_timestamp(), line.as_bytes()),
+        Some(EntryHead {
+            timestamp: None,
+            level: Some(0..7),
+            thread: None,
+            logger: Some(8..18),
+            message: 19..line.len(),
+        })
+    );
+}
+
+#[test]
+fn every_format_has_a_name_for_the_header() {
+    let names: Vec<&str> = BUILT_IN.iter().map(|format| format.name).collect();
     assert_eq!(
         names,
         [
@@ -236,6 +285,7 @@ fn every_preset_has_a_name_for_the_header() {
             "Spring Boot 2",
             "WildFly",
             "WildFly console",
+            "JSON",
             "Raw",
         ]
     );
@@ -243,32 +293,66 @@ fn every_preset_has_a_name_for_the_header() {
 
 #[test]
 fn raw_comes_last() {
-    assert_eq!(Preset::ALL.last(), Some(&Preset::Raw));
+    let last = BUILT_IN.last().expect("the table has formats");
+    assert_eq!(last.id, "raw");
+    assert!(matches!(last.kind, Kind::Raw));
 }
 
 #[test]
-fn all_has_every_preset_once() {
-    let unique: HashSet<Preset> = Preset::ALL.into_iter().collect();
-    assert_eq!(unique, Preset::value_variants().iter().copied().collect());
+fn ids_are_unique() {
+    let ids: HashSet<&str> = BUILT_IN.iter().map(|format| format.id).collect();
+    assert_eq!(ids.len(), BUILT_IN.len());
+}
+
+#[test]
+fn by_id_finds_every_built_in_format() {
+    for format in BUILT_IN {
+        let found = Format::by_id(format.id).map(|found| found.id);
+        assert_eq!(found, Some(format.id));
+    }
+}
+
+#[test]
+fn by_id_of_a_name_not_in_the_table_is_none() {
+    for id in ["log4j", "", "Logback", "logback ", "spring"] {
+        assert!(Format::by_id(id).is_none(), "{id:?}");
+    }
+}
+
+#[test]
+fn formats_are_equal_only_to_themselves() {
+    for (i, a) in BUILT_IN.iter().enumerate() {
+        for (j, b) in BUILT_IN.iter().enumerate() {
+            assert_eq!(a == b, i == j, "{} == {}", a.id, b.id);
+        }
+    }
+}
+
+#[test]
+fn debug_shows_only_the_id() {
+    assert_eq!(format!("{:?}", built_in("logback")), r#"Format("logback")"#);
 }
 
 #[test]
 fn raw_has_no_entry_parser() {
-    assert!(Preset::Raw.entry_parser().is_none());
+    assert!(built_in("raw").entry_parser().is_none());
 }
 
 #[test]
 fn only_logback_basic_and_wildfly_console_have_no_date() {
-    let dated = STRUCTURED.map(|preset| (preset, parser(preset).has_date()));
+    let dated: Vec<(&str, bool)> = text_formats()
+        .into_iter()
+        .map(|format| (format.id, parser(format).has_date()))
+        .collect();
     assert_eq!(
         dated,
         [
-            (Preset::Logback, true),
-            (Preset::LogbackBasic, false),
-            (Preset::Spring3, true),
-            (Preset::Spring2, true),
-            (Preset::Wildfly, true),
-            (Preset::WildflyConsole, false),
+            ("logback", true),
+            ("logback-basic", false),
+            ("spring3", true),
+            ("spring2", true),
+            ("wildfly", true),
+            ("wildfly-console", false),
         ]
     );
 }
@@ -278,7 +362,7 @@ fn only_logback_basic_and_wildfly_console_have_no_date() {
 #[test]
 fn parses_the_logback_example() {
     assert_eq!(
-        columns(Preset::Logback, EXAMPLES[0].1),
+        columns(built_in("logback"), EXAMPLES[0].1),
         [
             "2026-10-07 12:00:00.123",
             "INFO",
@@ -292,7 +376,7 @@ fn parses_the_logback_example() {
 #[test]
 fn parses_the_logback_basic_example() {
     assert_eq!(
-        columns(Preset::LogbackBasic, EXAMPLES[1].1),
+        columns(built_in("logback-basic"), EXAMPLES[1].1),
         ["12:00:00.123", "INFO", "main", "com.example.App", "Started"]
     );
 }
@@ -300,7 +384,7 @@ fn parses_the_logback_basic_example() {
 #[test]
 fn parses_the_spring3_example() {
     assert_eq!(
-        columns(Preset::Spring3, EXAMPLES[2].1),
+        columns(built_in("spring3"), EXAMPLES[2].1),
         [
             "2026-10-07T12:00:00.123+02:00",
             "INFO",
@@ -314,7 +398,7 @@ fn parses_the_spring3_example() {
 #[test]
 fn parses_the_spring2_example() {
     assert_eq!(
-        columns(Preset::Spring2, EXAMPLES[3].1),
+        columns(built_in("spring2"), EXAMPLES[3].1),
         [
             "2026-10-07 12:00:00.123",
             "INFO",
@@ -328,7 +412,7 @@ fn parses_the_spring2_example() {
 #[test]
 fn parses_the_wildfly_example() {
     assert_eq!(
-        columns(Preset::Wildfly, EXAMPLES[4].1),
+        columns(built_in("wildfly"), EXAMPLES[4].1),
         [
             "2026-10-07 12:00:00,123",
             "INFO",
@@ -342,7 +426,7 @@ fn parses_the_wildfly_example() {
 #[test]
 fn parses_the_wildfly_console_example() {
     assert_eq!(
-        columns(Preset::WildflyConsole, EXAMPLES[5].1),
+        columns(built_in("wildfly-console"), EXAMPLES[5].1),
         [
             "12:00:00,123",
             "INFO",
@@ -359,7 +443,7 @@ fn coloured_wildfly_console_line_parses_once_stripped() {
     let line = strip_ansi(coloured);
     let text = String::from_utf8(line.into_owned()).unwrap();
     assert_eq!(
-        columns(Preset::WildflyConsole, &text),
+        columns(built_in("wildfly-console"), &text),
         [
             "12:00:00,123",
             "WARN",
@@ -373,8 +457,13 @@ fn coloured_wildfly_console_line_parses_once_stripped() {
 #[test]
 fn examples_start_entries_only_under_their_own_preset() {
     for (own, line) in EXAMPLES {
-        for preset in STRUCTURED.into_iter().filter(|&p| p != own) {
-            assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line}");
+        for preset in text_formats().into_iter().filter(|p| p.id != own) {
+            assert_eq!(
+                parse(preset, line.as_bytes()),
+                None,
+                "{}: {line}",
+                preset.id
+            );
         }
     }
 }
@@ -405,7 +494,7 @@ fn fraction_may_have_one_to_nine_digits() {
 fn spring3_offset_may_be_z_or_negative() {
     for offset in ["Z", "-05:00", "+00:00", "+05:30"] {
         assert_parses(
-            Preset::Spring3,
+            built_in("spring3"),
             &Parts {
                 offset: offset.into(),
                 ..Parts::default()
@@ -447,7 +536,7 @@ fn every_level_name_parses() {
 /// The level column shows these as unknown (PRD §6.4); the line still starts an entry.
 #[test]
 fn unknown_level_word_still_starts_an_entry() {
-    for level in ["SEVERE", "NOTICE", "FINE"] {
+    for level in ["AUDIT", "STATS", "VERB"] {
         assert_every_preset_parses(&Parts {
             level: level.into(),
             ..Parts::default()
@@ -461,7 +550,7 @@ fn unknown_level_word_still_starts_an_entry() {
 fn spring3_app_name_is_optional() {
     for app in [Some("myapp"), Some("order-service"), None] {
         assert_parses(
-            Preset::Spring3,
+            built_in("spring3"),
             &Parts {
                 app: app.map(Into::into),
                 ..Parts::default()
@@ -473,7 +562,7 @@ fn spring3_app_name_is_optional() {
 #[test]
 fn spring3_without_app_name_takes_the_only_bracket_as_the_thread() {
     let line = "2026-10-07T12:00:00.123Z  INFO 1 --- [nio-8080-exec-1] com.example.App                          : x";
-    assert_eq!(columns(Preset::Spring3, line)[2], "nio-8080-exec-1");
+    assert_eq!(columns(built_in("spring3"), line)[2], "nio-8080-exec-1");
 }
 
 /// Spring Boot 3.2+ with Micrometer Tracing (`logging.pattern.correlation`).
@@ -481,7 +570,7 @@ fn spring3_without_app_name_takes_the_only_bracket_as_the_thread() {
 fn spring3_trace_and_span_ids_are_not_part_of_the_thread() {
     for app in [Some("myapp"), None] {
         assert_parses(
-            Preset::Spring3,
+            built_in("spring3"),
             &Parts {
                 app: app.map(Into::into),
                 thread: "nio-8080-exec-1".into(),
@@ -496,7 +585,7 @@ fn spring3_trace_and_span_ids_are_not_part_of_the_thread() {
 fn spring3_blank_correlation_group_is_not_part_of_the_thread() {
     for app in [Some("myapp"), None] {
         assert_parses(
-            Preset::Spring3,
+            built_in("spring3"),
             &Parts {
                 app: app.map(Into::into),
                 correlation: Some(blank_correlation()),
@@ -512,7 +601,7 @@ fn spring3_line_with_trace_ids_reads_like_the_boot_docs() {
                 [6bfb3c0e8f1d4a2b9c7e5d3f1a2b4c6d-1a2b4c6d8e0f2a4b] \
                 o.s.web.servlet.DispatcherServlet        : Completed initialization in 2 ms";
     assert_eq!(
-        columns(Preset::Spring3, line),
+        columns(built_in("spring3"), line),
         [
             "2026-10-07T09:31:02.415+02:00",
             "INFO",
@@ -596,7 +685,7 @@ fn class_may_contain_brackets() {
 
 #[test]
 fn logback_class_may_be_padded_before_the_dash() {
-    for preset in [Preset::Logback, Preset::LogbackBasic] {
+    for preset in [built_in("logback"), built_in("logback-basic")] {
         assert_parses(
             preset,
             &Parts {
@@ -609,7 +698,7 @@ fn logback_class_may_be_padded_before_the_dash() {
 
 #[test]
 fn spring_class_longer_than_its_column_still_parses() {
-    for preset in [Preset::Spring3, Preset::Spring2] {
+    for preset in [built_in("spring3"), built_in("spring2")] {
         assert_parses(
             preset,
             &Parts {
@@ -624,7 +713,7 @@ fn spring_class_longer_than_its_column_still_parses() {
 
 #[test]
 fn logback_message_may_follow_one_or_two_dashes() {
-    for preset in [Preset::Logback, Preset::LogbackBasic] {
+    for preset in [built_in("logback"), built_in("logback-basic")] {
         for dashes in ["-", "--"] {
             assert_parses(
                 preset,
@@ -689,7 +778,7 @@ fn message_may_be_empty() {
 /// without the space after its separator.
 #[test]
 fn empty_message_may_lack_the_space_after_its_separator() {
-    for preset in STRUCTURED {
+    for preset in text_formats() {
         let (line, head) = entry_line(
             preset,
             &Parts {
@@ -712,7 +801,7 @@ fn empty_message_may_lack_the_space_after_its_separator() {
 
 #[test]
 fn message_may_contain_bytes_that_are_not_utf8() {
-    for preset in STRUCTURED {
+    for preset in text_formats() {
         let (line, head) = entry_line(
             preset,
             &Parts {
@@ -761,7 +850,7 @@ fn continuation_lines_do_not_start_an_entry() {
         "{\"level\":\"INFO\",\"message\":\"json\"}",
         "INFO  com.example.App - no timestamp",
     ];
-    for preset in STRUCTURED {
+    for preset in text_formats() {
         for line in lines {
             assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line:?}");
         }
@@ -770,7 +859,7 @@ fn continuation_lines_do_not_start_an_entry() {
 
 #[test]
 fn entry_line_indented_by_whitespace_does_not_start_an_entry() {
-    for preset in STRUCTURED {
+    for preset in text_formats() {
         let (line, _) = entry_line(preset, &Parts::default());
         for indent in [" ", "\t"] {
             let indented = format!("{indent}{line}");
@@ -785,7 +874,7 @@ fn entry_line_indented_by_whitespace_does_not_start_an_entry() {
 
 #[test]
 fn entry_line_cut_before_the_message_separator_does_not_start_an_entry() {
-    for preset in STRUCTURED {
+    for preset in text_formats() {
         let (line, head) = entry_line(preset, &Parts::default());
         // `- `, ` : ` or `) ` before the message: cut before its first character.
         let cut = head.message.start - 2;
@@ -794,7 +883,8 @@ fn entry_line_cut_before_the_message_separator_does_not_start_an_entry() {
             assert_eq!(
                 parse(preset, prefix),
                 None,
-                "{preset:?}: {:?}",
+                "{}: {:?}",
+                preset.id,
                 String::from_utf8_lossy(prefix)
             );
         }
@@ -805,15 +895,15 @@ fn entry_line_cut_before_the_message_separator_does_not_start_an_entry() {
 fn level_that_is_not_a_word_does_not_start_an_entry() {
     let lines = [
         (
-            Preset::Logback,
+            built_in("logback"),
             "2026-10-07 12:00:00.123 [main] 42 com.example.App - x",
         ),
         (
-            Preset::Spring2,
+            built_in("spring2"),
             "2026-10-07 12:00:00.123  --- 1 --- [main] com.example.App : x",
         ),
         (
-            Preset::Wildfly,
+            built_in("wildfly"),
             "2026-10-07 12:00:00,123 [INFO] [org.jboss.as] (main) x",
         ),
     ];
@@ -829,20 +919,93 @@ fn level_that_is_not_a_word_does_not_start_an_entry() {
 fn thread_never_runs_past_a_closing_bracket_and_space() {
     let lines = [
         (
-            Preset::Logback,
+            built_in("logback"),
             "2026-10-07 12:00:00.123 [main] 42 x - [y] INFO c - z",
         ),
         (
-            Preset::Logback,
+            built_in("logback"),
             "2026-10-07 12:00:00.123 [pool [a] 1] INFO c - z",
         ),
         (
-            Preset::Spring2,
+            built_in("spring2"),
             "2026-10-07 12:00:00.123  INFO 12345 --- [pool [a] 1] c.e.App                                  : x",
         ),
     ];
     for (preset, line) in lines {
         assert_eq!(parse(preset, line.as_bytes()), None, "{preset:?}: {line}");
+    }
+}
+
+// --- JSON lines ---
+
+fn message_mapping() -> Mapping {
+    Mapping {
+        message: Some("msg"),
+        ..Mapping::default()
+    }
+}
+
+/// The message a JSON parser with `mapping` finds on `line`, which must start an entry.
+fn json_message(mapping: Mapping, line: &str) -> &str {
+    let head = EntryParser::json(mapping)
+        .parse(line.as_bytes())
+        .unwrap_or_else(|| panic!("{line:?} doesn't start an entry"));
+    &line[head.message]
+}
+
+#[test]
+fn json_message_is_the_text_of_the_mapped_key() {
+    let line = r#"{"level":"info","msg":"Order \"42\" created","order":42}"#;
+    assert_eq!(
+        json_message(message_mapping(), line),
+        r#"Order \"42\" created"#
+    );
+}
+
+#[test]
+fn json_message_ends_before_a_trailing_newline_escape() {
+    // Docker's json-file driver keeps the newline the container printed.
+    let mapping = Mapping {
+        message: Some("log"),
+        ..Mapping::default()
+    };
+    let line = r#"{"log":"Order 42 created\n","stream":"stdout"}"#;
+    assert_eq!(json_message(mapping, line), "Order 42 created");
+    // An escaped backslash followed by `n` is not a newline.
+    let line = r#"{"log":"saved to C:\\n","stream":"stdout"}"#;
+    assert_eq!(json_message(mapping, line), r"saved to C:\\n");
+}
+
+#[test]
+fn json_line_without_the_mapped_message_key_has_the_whole_line_as_message() {
+    let line = r#"{"level":"info","text":"Order 42 created"}"#;
+    assert_eq!(json_message(message_mapping(), line), line);
+}
+
+#[test]
+fn json_mapping_without_a_message_key_has_the_whole_line_as_message() {
+    let line = r#"{"level":"info","msg":"Order 42 created"}"#;
+    assert_eq!(json_message(Mapping::default(), line), line);
+}
+
+#[test]
+fn json_object_after_spaces_or_a_byte_order_mark_starts_an_entry() {
+    for line in ["  {\"msg\":\"a\"}", "\u{feff}{\"msg\":\"a\"}"] {
+        assert_eq!(json_message(message_mapping(), line), "a", "{line:?}");
+    }
+}
+
+#[test]
+fn json_line_that_is_not_an_object_does_not_start_an_entry() {
+    let parser = EntryParser::json(message_mapping());
+    for line in [
+        "\tat com.acme.OrderService.place(OrderService.java:88)",
+        "Starting orders v1.4.2",
+        "[1,2]",
+        "\"msg\"",
+        "",
+    ] {
+        assert_eq!(parser.parse(line.as_bytes()), None, "{line:?}");
     }
 }
 
@@ -919,8 +1082,8 @@ fn correlation() -> impl Strategy<Value = String> {
     prop_oneof!["[0-9a-f]{32}-[0-9a-f]{16}", Just(blank_correlation()),]
 }
 
-fn structured() -> impl Strategy<Value = Preset> {
-    prop::sample::select(STRUCTURED.to_vec())
+fn structured() -> impl Strategy<Value = &'static Format> {
+    prop::sample::select(text_formats())
 }
 
 /// Bytes that log lines are made of, so random input gets far into a pattern.
@@ -968,6 +1131,16 @@ proptest! {
     }
 
     #[test]
+    fn json_parse_never_panics_and_keeps_the_message_in_the_line(
+        rest in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let bytes = [b"{".as_slice(), &rest].concat();
+        if let Some(head) = EntryParser::json(message_mapping()).parse(&bytes) {
+            prop_assert!(head.message.start <= head.message.end && head.message.end <= bytes.len());
+        }
+    }
+
+    #[test]
     fn entry_lines_parse_with_exact_spans(preset in structured(), parts in parts()) {
         let (line, head) = entry_line(preset, &parts);
         prop_assert_eq!(parse(preset, line.as_bytes()), Some(head), "{:?}", line);
@@ -980,8 +1153,8 @@ proptest! {
         parts in parts(),
     ) {
         let (line, _) = entry_line(own, &parts);
-        for other in STRUCTURED.into_iter().filter(|&other| other != own) {
-            prop_assert_eq!(parse(other, line.as_bytes()), None, "{:?}: {:?}", other, line);
+        for other in text_formats().into_iter().filter(|&other| other != own) {
+            prop_assert_eq!(parse(other, line.as_bytes()), None, "{}: {:?}", other.id, line);
         }
     }
 
@@ -991,8 +1164,8 @@ proptest! {
         correlation in correlation(),
     ) {
         let parts = Parts { correlation: Some(correlation), ..parts };
-        let (line, head) = entry_line(Preset::Spring3, &parts);
-        prop_assert_eq!(parse(Preset::Spring3, line.as_bytes()), Some(head), "{:?}", line);
+        let (line, head) = entry_line(built_in("spring3"), &parts);
+        prop_assert_eq!(parse(built_in("spring3"), line.as_bytes()), Some(head), "{:?}", line);
     }
 
     #[test]
@@ -1001,9 +1174,9 @@ proptest! {
         correlation in correlation(),
     ) {
         let parts = Parts { correlation: Some(correlation), ..parts };
-        let (line, _) = entry_line(Preset::Spring3, &parts);
-        for other in STRUCTURED.into_iter().filter(|&other| other != Preset::Spring3) {
-            prop_assert_eq!(parse(other, line.as_bytes()), None, "{:?}: {:?}", other, line);
+        let (line, _) = entry_line(built_in("spring3"), &parts);
+        for other in text_formats().into_iter().filter(|&other| other != built_in("spring3")) {
+            prop_assert_eq!(parse(other, line.as_bytes()), None, "{}: {:?}", other.id, line);
         }
     }
 
@@ -1019,7 +1192,8 @@ proptest! {
         let i = at.index(bytes.len());
         bytes[i] = byte;
         if let Some(head) = parse(preset, &bytes) {
-            let mut spans = [head.timestamp, head.level, head.thread, head.class, head.message.clone()];
+            let columns = [head.timestamp, head.level, head.thread, head.logger];
+            let mut spans: Vec<_> = columns.into_iter().flatten().chain([head.message.clone()]).collect();
             spans.sort_by_key(|span| span.start);
             prop_assert!(spans.windows(2).all(|pair| pair[0].end <= pair[1].start), "{:?}", spans);
             prop_assert_eq!(spans.last(), Some(&head.message));

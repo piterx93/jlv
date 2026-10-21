@@ -3,14 +3,14 @@
 use std::ops::Range;
 
 use insta::assert_snapshot;
-use vilog::format::{Entry, EntryGrouper, Preset, strip_ansi};
+use vilog::format::{Entry, EntryGrouper, Format, strip_ansi};
 
 mod common;
 
-use common::{fixture, fixtures, lines};
+use common::{built_in, fixture, fixtures, lines};
 
 /// Feeds `lines` to a grouper for `preset` and returns every entry, the open one last.
-fn group(preset: Preset, lines: &[&[u8]]) -> Vec<Entry> {
+fn group(preset: &'static Format, lines: &[&[u8]]) -> Vec<Entry> {
     let mut grouper = EntryGrouper::new(preset);
     let mut entries: Vec<Entry> = lines.iter().filter_map(|line| grouper.push(line)).collect();
     entries.extend(grouper.open_entry().cloned());
@@ -24,7 +24,7 @@ fn text(line: &[u8], span: Range<usize>) -> String {
 /// The entries `preset` finds in the fixture `name`, one per line: the number of the
 /// first line (from 1), its timestamp and level or `(headless)`, `+N` for N
 /// continuation lines and `exception` if it has one.
-fn outline(preset: Preset, name: &str) -> String {
+fn outline(preset: &'static Format, name: &str) -> String {
     let bytes = fixture(name);
     let lines = lines(&bytes);
     let mut out = Vec::new();
@@ -36,8 +36,8 @@ fn outline(preset: Preset, name: &str) -> String {
                 let line = strip_ansi(lines[first]);
                 format!(
                     "{} {}",
-                    text(&line, head.timestamp),
-                    text(&line, head.level)
+                    text(&line, head.timestamp.unwrap()),
+                    text(&line, head.level.unwrap())
                 )
             }
         };
@@ -56,7 +56,7 @@ fn outline(preset: Preset, name: &str) -> String {
 
 #[test]
 fn groups_the_logback_fixture() {
-    assert_snapshot!(outline(Preset::Logback, "logback.log"), @r"
+    assert_snapshot!(outline(built_in("logback"), "logback.log"), @r"
      1 2026-10-07 09:14:02.118 INFO
      2 2026-10-07 09:14:02.121 DEBUG
      3 2026-10-07 09:14:03.502 INFO
@@ -84,7 +84,7 @@ fn groups_the_logback_fixture() {
 
 #[test]
 fn groups_the_logback_basic_fixture() {
-    assert_snapshot!(outline(Preset::LogbackBasic, "logback-basic.log"), @r"
+    assert_snapshot!(outline(built_in("logback-basic"), "logback-basic.log"), @r"
      1 23:58:41.007 INFO
      2 23:58:41.093 DEBUG
      3 23:58:41.102 DEBUG
@@ -114,7 +114,7 @@ fn groups_the_logback_basic_fixture() {
 /// the stack traces stay in their entries.
 #[test]
 fn groups_the_spring3_fixture() {
-    assert_snapshot!(outline(Preset::Spring3, "spring3.log"), @r"
+    assert_snapshot!(outline(built_in("spring3"), "spring3.log"), @r"
      1 (headless) +9
     11 2026-10-07T09:14:02.118+02:00 INFO
     12 2026-10-07T09:14:02.121+02:00 DEBUG
@@ -149,7 +149,7 @@ fn groups_the_spring3_fixture() {
 
 #[test]
 fn groups_the_spring2_fixture() {
-    assert_snapshot!(outline(Preset::Spring2, "spring2.log"), @r"
+    assert_snapshot!(outline(built_in("spring2"), "spring2.log"), @r"
      1 2026-10-07 09:14:02.118 INFO
      2 2026-10-07 09:14:02.121 DEBUG
      3 2026-10-07 09:14:02.122 INFO
@@ -178,7 +178,7 @@ fn groups_the_spring2_fixture() {
 /// as an entry of its own, and an entry's first line is never checked.
 #[test]
 fn groups_the_wildfly_fixture() {
-    assert_snapshot!(outline(Preset::Wildfly, "wildfly.log"), @r"
+    assert_snapshot!(outline(built_in("wildfly"), "wildfly.log"), @r"
      1 2026-10-07 09:13:51,202 INFO
      2 2026-10-07 09:13:51,804 INFO
      3 2026-10-07 09:13:51,813 INFO
@@ -214,7 +214,7 @@ fn groups_the_wildfly_fixture() {
 /// neither has the service report at line 42.
 #[test]
 fn groups_the_wildfly_console_fixture() {
-    assert_snapshot!(outline(Preset::WildflyConsole, "wildfly-console.log"), @r"
+    assert_snapshot!(outline(built_in("wildfly-console"), "wildfly-console.log"), @r"
      1 (headless) +11
     13 23:59:56,102 INFO
     14 23:59:56,690 INFO
@@ -243,12 +243,25 @@ fn groups_the_wildfly_console_fixture() {
     ");
 }
 
+/// A Python traceback with a chained exception, a Go panic with two goroutines, a
+/// Node.js `TypeError` and a .NET exception with an inner one, each under an entry.
+#[test]
+fn trace_of_every_ecosystem_is_one_entry_with_an_exception() {
+    assert_snapshot!(outline(built_in("logback"), "traces.log"), @r"
+     1 2026-10-07 09:20:01.100 ERROR +14 exception
+    16 2026-10-07 09:20:02.200 ERROR +13 exception
+    30 2026-10-07 09:20:03.300 ERROR +5 exception
+    36 2026-10-07 09:20:04.400 ERROR +8 exception
+    45 2026-10-07 09:20:05.500 INFO
+    ");
+}
+
 #[test]
 fn raw_makes_every_fixture_line_an_entry_without_exceptions() {
     for (_, name) in fixtures() {
         let bytes = fixture(name);
         let lines = lines(&bytes);
-        let entries = group(Preset::Raw, &lines);
+        let entries = group(built_in("raw"), &lines);
         assert_eq!(entries.len(), lines.len(), "{name}");
         for (i, entry) in entries.iter().enumerate() {
             assert_eq!(entry.lines, i..i + 1, "{name}");

@@ -7,9 +7,10 @@ use jiff::tz::TimeZone;
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::{Anchor, Level, Preset};
+use crate::format::{Anchor, Format, Level, Mapping};
 use crate::index::{self, Chunk, Settings};
 use crate::matcher::{self, Matcher};
+use crate::test_support::built_in;
 
 /// How long evaluating a test log of a few entries may take before the test fails.
 /// It takes milliseconds; the deadline is only there so that an engine that never
@@ -25,18 +26,19 @@ const LEVELS: [Level; 6] = [
     Level::Fatal,
 ];
 
-fn settings(preset: Preset) -> Settings {
+fn settings(preset: &'static Format) -> Settings {
     let zone = TimeZone::UTC;
     let mtime: Timestamp = "2026-10-08T12:00:00Z".parse().unwrap();
     Settings {
-        preset,
+        format: preset,
         anchor: Anchor::Modified(zone.to_datetime(mtime)),
         zone,
+        mapping: Mapping::default(),
     }
 }
 
 /// `log` and its index, shared as the viewer shares them with the engine.
-fn indexed(preset: Preset, log: &[u8]) -> Arc<RwLock<Indexed<Vec<u8>>>> {
+fn indexed(preset: &'static Format, log: &[u8]) -> Arc<RwLock<Indexed<Vec<u8>>>> {
     let settings = settings(preset);
     let records = Chunk::index(log, 0, 0..log.len(), &settings).finish(&settings);
     Arc::new(RwLock::new(Indexed {
@@ -63,11 +65,16 @@ fn finish(engine: &mut Engine, total: usize, mut check: impl FnMut(&Filtered)) -
     }
 }
 
+/// How the engine reads `format`, with no JSON keys.
+fn reader(format: &'static Format) -> Reader {
+    Reader::new(format, Mapping::default())
+}
+
 /// What `filters` find in `log`, once all of it is evaluated.
-fn filter(preset: Preset, log: &str, filters: Filters) -> Filtered {
+fn filter(preset: &'static Format, log: &str, filters: Filters) -> Filtered {
     let indexed = indexed(preset, log.as_bytes());
     let total = indexed.read().unwrap().records.len();
-    let mut engine = Engine::spawn(indexed, preset, filters, Options { chunk: 2 });
+    let mut engine = Engine::spawn(indexed, reader(preset), filters, Options { chunk: 2 });
     finish(&mut engine, total, |_| {})
 }
 
@@ -86,7 +93,7 @@ fn counts(pairs: &[(Level, u32)]) -> [u32; 6] {
 #[test]
 fn an_empty_index_matches_nothing() {
     assert_eq!(
-        filter(Preset::Logback, "", Filters::default()),
+        filter(built_in("logback"), "", Filters::default()),
         Filtered::default()
     );
 }
@@ -103,7 +110,7 @@ fn counters_ignore_the_level_filter() {
         filters.levels.set(level, false);
     }
     assert_eq!(
-        filter(Preset::Logback, log, filters),
+        filter(built_in("logback"), log, filters),
         Filtered {
             evaluated: 3,
             entries: vec![],
@@ -154,7 +161,7 @@ fn only_shows_just_the_levels_it_names() {
 const WITHOUT_LEVELS: &str = "\
 started
 2026-10-07 12:00:00.000 [main] INFO  com.myco.Order - created
-2026-10-07 12:00:01.000 [main] SEVERE com.myco.Order - failed
+2026-10-07 12:00:01.000 [main] AUDIT com.myco.Order - failed
 ";
 
 #[test]
@@ -163,7 +170,7 @@ fn with_every_level_off_no_entry_matches_not_even_one_without_a_level() {
         levels: Levels::only(&[]),
         ..Filters::default()
     };
-    let found = filter(Preset::Logback, WITHOUT_LEVELS, filters);
+    let found = filter(built_in("logback"), WITHOUT_LEVELS, filters);
     assert_eq!(found.entries, [] as [u32; 0]);
 }
 
@@ -171,7 +178,7 @@ fn with_every_level_off_no_entry_matches_not_even_one_without_a_level() {
 fn entries_without_a_level_are_hidden_while_any_level_is_off() {
     let mut filters = Filters::default();
     filters.levels.toggle(Level::Trace);
-    let found = filter(Preset::Logback, WITHOUT_LEVELS, filters);
+    let found = filter(built_in("logback"), WITHOUT_LEVELS, filters);
     assert_eq!(found.entries, [1]);
 }
 
@@ -181,7 +188,7 @@ fn raw_entries_are_matched_over_the_whole_line() {
         text: text("beta"),
         ..Filters::default()
     };
-    let found = filter(Preset::Raw, "alpha beta\ngamma\n", filters);
+    let found = filter(built_in("raw"), "alpha beta\ngamma\n", filters);
     assert_eq!(found.entries, [0]);
 }
 
@@ -208,7 +215,7 @@ fn escape_codes_are_stripped_before_matching() {
         ..Filters::default()
     };
     for filters in [class, message, continuation] {
-        let found = filter(Preset::Logback, log, filters.clone());
+        let found = filter(built_in("logback"), log, filters.clone());
         assert_eq!(found.entries, [0], "{filters:?}");
     }
 }
@@ -221,15 +228,19 @@ fn continuation_lines_appended_to_the_last_entry_are_matched() {
         text: text("Boom"),
         ..Filters::default()
     };
-    let indexed = indexed(Preset::Logback, log.as_bytes());
+    let indexed = indexed(built_in("logback"), log.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&indexed),
-        Preset::Logback,
+        reader(built_in("logback")),
         filters,
         Options { chunk: 1 },
     );
     assert_eq!(finish(&mut engine, 1, |_| {}).entries, [] as [u32; 0]);
-    append(&indexed, Preset::Logback, format!("{log}{more}").as_bytes());
+    append(
+        &indexed,
+        built_in("logback"),
+        format!("{log}{more}").as_bytes(),
+    );
     engine.reread(0);
     assert_eq!(finish(&mut engine, 1, |_| {}).entries, [0]);
 }
@@ -241,10 +252,10 @@ fn results_of_entries_read_again_are_never_published_stale() {
     };
     let before = [line(0, "one"), line(1, "boom"), line(2, "boom")].concat();
     let after = [line(0, "one"), line(1, "two"), line(2, "boom")].concat();
-    let shared = indexed(Preset::Logback, before.as_bytes());
+    let shared = indexed(built_in("logback"), before.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&shared),
-        Preset::Logback,
+        reader(built_in("logback")),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -254,7 +265,7 @@ fn results_of_entries_read_again_are_never_published_stale() {
     let found = finish(&mut engine, 3, |_| {});
     assert_eq!(found.entries, [1, 2]);
     assert_eq!(found.counts, counts(&[(Level::Info, 2)]));
-    let rewritten = Arc::into_inner(indexed(Preset::Logback, after.as_bytes())).unwrap();
+    let rewritten = Arc::into_inner(indexed(built_in("logback"), after.as_bytes())).unwrap();
     *shared.write().unwrap() = rewritten.into_inner().unwrap();
     engine.reread(1);
     // From here on, the second and third entries count only as they read now.
@@ -283,8 +294,8 @@ fn new_filters_from_an_entry_on_keep_the_results_before_it() {
     ]
     .concat();
     let mut engine = Engine::spawn(
-        indexed(Preset::Logback, log.as_bytes()),
-        Preset::Logback,
+        indexed(built_in("logback"), log.as_bytes()),
+        reader(built_in("logback")),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -318,7 +329,7 @@ fn new_filters_from_an_entry_on_keep_the_results_before_it() {
 
 /// Brings `indexed` up to date with `log`, the whole file after more was appended,
 /// as the viewer does.
-fn append(indexed: &RwLock<Indexed<Vec<u8>>>, preset: Preset, log: &[u8]) -> usize {
+fn append(indexed: &RwLock<Indexed<Vec<u8>>>, preset: &'static Format, log: &[u8]) -> usize {
     let mut indexed = indexed.write().unwrap();
     let known = indexed.records.len();
     index::append(&mut indexed.records, log, &settings(preset));
@@ -343,7 +354,7 @@ struct Entry {
 #[derive(Debug, Clone)]
 struct Head {
     second: u8,
-    /// `None` is written as `SEVERE`, a level word vilog doesn't know.
+    /// `None` is written as `AUDIT`, a level word vilog doesn't know.
     level: Option<Level>,
     class: &'static str,
     message: &'static str,
@@ -412,23 +423,39 @@ impl Model {
         class_passes && time_passes && text_passes
     }
 
-    fn naive(&self, entries: &[Entry]) -> Filtered {
-        let mut filtered = Filtered {
-            evaluated: entries.len(),
-            ..Filtered::default()
-        };
-        for (i, entry) in entries.iter().enumerate() {
-            if !self.passes_others(entry) {
-                continue;
-            }
-            if let Some(level) = entry.head.as_ref().and_then(|head| head.level) {
-                filtered.counts[level as usize] += 1;
-            }
-            if self.passes_level(entry) {
-                filtered.entries.push(i as u32);
+    /// What a naive filter finds in the entries `run`, with a search for `search`
+    /// if given.
+    fn naive_run(
+        &self,
+        entries: &[Entry],
+        run: std::ops::Range<usize>,
+        search: Option<&str>,
+    ) -> Evaluated {
+        let mut found = Evaluated::default();
+        for (i, entry) in run.clone().zip(&entries[run]) {
+            let passes = self.passes_others(entry);
+            let level = entry.head.as_ref().and_then(|head| head.level);
+            found.counted.push(level.filter(|_| passes));
+            let searched =
+                search.is_none_or(|word| render(std::slice::from_ref(entry)).contains(word));
+            if passes && self.passes_level(entry) && searched {
+                found.entries.push(i as u32);
             }
         }
-        filtered
+        found
+    }
+
+    fn naive(&self, entries: &[Entry]) -> Filtered {
+        let run = self.naive_run(entries, 0..entries.len(), None);
+        let mut counts = [0; 6];
+        for level in run.counted.into_iter().flatten() {
+            counts[level as usize] += 1;
+        }
+        Filtered {
+            evaluated: entries.len(),
+            entries: run.entries,
+            counts,
+        }
     }
 }
 
@@ -436,7 +463,7 @@ fn render(entries: &[Entry]) -> String {
     let mut log = String::new();
     for entry in entries {
         if let Some(head) = &entry.head {
-            let level = head.level.map_or("SEVERE", |level| {
+            let level = head.level.map_or("AUDIT", |level| {
                 ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"][level as usize]
             });
             log.push_str(&format!(
@@ -522,10 +549,10 @@ proptest! {
         chunk in 1..5usize,
         polls in 0..4usize,
     ) {
-        let indexed = indexed(Preset::Logback, render(&entries).as_bytes());
+        let indexed = indexed(built_in("logback"), render(&entries).as_bytes());
         let mut engine = Engine::spawn(
             indexed,
-            Preset::Logback,
+            reader(built_in("logback")),
             first.filters(),
             Options { chunk },
         );
@@ -550,21 +577,125 @@ proptest! {
     ) {
         let log = render(&entries);
         let cut = cut.index(log.len() + 1);
-        let indexed = indexed(Preset::Logback, &log.as_bytes()[..cut]);
+        let indexed = indexed(built_in("logback"), &log.as_bytes()[..cut]);
         let mut engine = Engine::spawn(
             Arc::clone(&indexed),
-            Preset::Logback,
+            reader(built_in("logback")),
             model.filters(),
             Options { chunk },
         );
         for _ in 0..polls {
             engine.poll();
         }
-        let known = append(&indexed, Preset::Logback, log.as_bytes());
+        let known = append(&indexed, built_in("logback"), log.as_bytes());
         engine.reread(known.saturating_sub(1));
         let found = finish(&mut engine, entries.len(), |_| {});
         prop_assert_eq!(found, model.naive(&entries));
     }
+}
+
+/// What [`evaluate`] finds in the entries `run` of the log `entries` make, on
+/// `threads` threads.
+fn evaluate_run(
+    entries: &[Entry],
+    model: &Model,
+    search: Option<&str>,
+    run: std::ops::Range<usize>,
+    threads: usize,
+) -> Evaluated {
+    let indexed = indexed(built_in("logback"), render(entries).as_bytes());
+    let search = search.map(|word| Matcher::new(word, matcher::Options::default()).unwrap());
+    evaluate(
+        &indexed.read().unwrap(),
+        reader(built_in("logback")),
+        &model.filters(),
+        search.as_ref(),
+        run,
+        threads,
+    )
+}
+
+proptest! {
+    #[test]
+    fn evaluating_a_run_on_any_number_of_threads_matches_a_naive_filter(
+        entries in entries(),
+        model in model(),
+        search in prop::option::of(word()),
+        ends in (any::<prop::sample::Index>(), any::<prop::sample::Index>()),
+        threads in 0..6usize,
+    ) {
+        let (a, b) = (ends.0.index(entries.len() + 1), ends.1.index(entries.len() + 1));
+        let run = a.min(b)..a.max(b);
+        prop_assert_eq!(
+            evaluate_run(&entries, &model, search, run.clone(), threads),
+            model.naive_run(&entries, run, search)
+        );
+    }
+}
+
+/// Long enough that each of the threads has thousands of entries to evaluate.
+#[test]
+fn a_long_run_split_across_threads_matches_a_naive_filter() {
+    let entries: Vec<Entry> = (0..20_000)
+        .map(|i| Entry {
+            head: Some(Head {
+                second: (i % 6) as u8,
+                level: LEVELS.get(i % 7).copied(),
+                class: CLASSES[i % 3],
+                message: WORDS[i / 3 % 4],
+            }),
+            lines: WORDS[..i % 5 % 3].to_vec(),
+        })
+        .collect();
+    let model = Model {
+        levels: [true, false, true, true, true, true],
+        include: vec!["myco"],
+        exclude: vec!["Client"],
+        time: Some((1, None)),
+        text: Some("beta"),
+    };
+    let run = 3..entries.len() - 2;
+    let expected = model.naive_run(&entries, run.clone(), Some("alpha"));
+    // The pattern of the entries repeats every 420, so matches are all over the run.
+    assert!(expected.entries.len() > 900, "{}", expected.entries.len());
+    assert_eq!(
+        evaluate_run(&entries, &model, Some("alpha"), run, 4),
+        expected
+    );
+}
+
+#[test]
+fn only_a_text_filter_a_class_filter_or_a_search_read_the_entry_bytes() {
+    let job = |filters: Filters, search: Option<&str>| Job {
+        generation: 0,
+        filters: Arc::new(filters),
+        search: search.map(|word| Arc::new(text(word).unwrap())),
+        from: 0,
+    };
+    let index_only = Filters {
+        levels: Levels::only(&[Level::Error]),
+        time: Some(TimeRange {
+            start: at_second(0),
+            end: None,
+        }),
+        ..Filters::default()
+    };
+    let message = Filters {
+        text: text("boom"),
+        ..Filters::default()
+    };
+    let class = Filters {
+        classes: classes(&["com.myco.*"]),
+        ..Filters::default()
+    };
+    let reads = [
+        job(index_only.clone(), None),
+        job(index_only, Some("boom")),
+        job(message, None),
+        job(class, None),
+    ]
+    .map(|job| job.reads_entries());
+    assert_eq!(reads, [false, true, true, true]);
 }
 
 // --- class rules ---
@@ -726,10 +857,10 @@ fn a_rule_given_twice_counts_once() {
 }
 
 #[test]
-fn a_rule_naming_no_class_is_an_error_naming_it() {
+fn a_rule_naming_no_logger_is_an_error_naming_it() {
     for rule in ["!", "*", ".*", "!*", "!.*"] {
         let error = Classes::parse(["Order", rule]).unwrap_err();
-        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+        assert_eq!(error, format!("logger rule '{rule}' names no logger"));
     }
 }
 
@@ -737,7 +868,10 @@ fn a_rule_naming_no_class_is_an_error_naming_it() {
 fn a_star_anywhere_but_in_a_trailing_dot_star_is_an_error_naming_the_rule() {
     for rule in ["Order*", "com.*.Order", "com.myco.**"] {
         let error = Classes::parse([rule]).unwrap_err();
-        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+        assert!(
+            error.starts_with(&format!("logger rule '{rule}' ")),
+            "{rule}: {error}"
+        );
     }
 }
 
@@ -760,7 +894,7 @@ fn class_rules_see_the_full_class_name_of_the_first_line() {
         classes: classes(&["com.myco.*"]),
         ..Filters::default()
     };
-    assert_eq!(filter(Preset::Logback, log, filters).entries, [0]);
+    assert_eq!(filter(built_in("logback"), log, filters).entries, [0]);
 }
 
 const SEGMENTS: [&str; 7] = [
@@ -829,4 +963,28 @@ proptest! {
             classes.passes(class.as_deref());
         }
     }
+}
+
+/// Only the JSON format searches decoded (PRD §9.2): read in another, a line that is
+/// a JSON object is searched as written, so `"hi"` doesn't find `\"hi\"`.
+#[test]
+fn search_outside_the_json_format_matches_escapes_as_written() {
+    let log = r#"{"msg":"say \"hi\""}"#.to_owned() + "\n";
+    let raw = built_in("raw");
+    let indexed = indexed(raw, log.as_bytes());
+    let found = |word: &str| {
+        let search = Matcher::new(word, matcher::Options::default()).unwrap();
+        let index = indexed.read().unwrap();
+        evaluate(
+            &index,
+            reader(raw),
+            &Filters::default(),
+            Some(&search),
+            0..1,
+            1,
+        )
+        .entries
+    };
+    assert_eq!(found(r#""hi""#), Vec::<u32>::new());
+    assert_eq!(found(r#"\"hi\""#), [0]);
 }

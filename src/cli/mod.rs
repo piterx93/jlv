@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::filter::{Classes, Levels, TimeSpec};
-use crate::format::{Level, Preset};
+use crate::format::{Format, Level};
 
 #[cfg(test)]
 mod tests;
@@ -19,8 +19,8 @@ pub struct Args {
     pub file: PathBuf,
 
     /// Force a format instead of detecting it
-    #[arg(short, long, value_enum, value_name = "PRESET")]
-    pub format: Option<Preset>,
+    #[arg(short, long, value_enum, value_name = "NAME")]
+    pub format: Option<&'static Format>,
 
     /// Open at the top, don't follow
     #[arg(long)]
@@ -30,9 +30,9 @@ pub struct Args {
     #[arg(short, long, value_name = "LEVELS", value_parser = parse_levels)]
     pub level: Option<Levels>,
 
-    /// Initial class filter, e.g. 'com.myco.*,!org.hibernate'
-    #[arg(short, long, value_name = "RULES", value_parser = parse_classes)]
-    pub class: Option<Classes>,
+    /// Initial logger filter, e.g. 'com.myco.*,!org.hibernate'
+    #[arg(short = 'c', long = "logger", alias = "class", value_name = "RULES", value_parser = parse_classes)]
+    pub logger: Option<Classes>,
 
     /// Initial time filter, e.g. 10m or 12:00-12:30
     #[arg(short, long, value_name = "SPEC", value_parser = TimeSpec::parse)]
@@ -48,7 +48,7 @@ pub struct Args {
 }
 
 /// The levels `-l/--level` names, comma-separated, the only ones shown at first.
-/// Names are case-insensitive and `WARNING` means `WARN`; empty items are skipped and
+/// Names are read as `Level::parse` reads them, aliases included; empty items are skipped and
 /// a level named twice counts once. An unknown name, or no name at all, is an error
 /// that lists the valid names.
 pub fn parse_levels(arg: &str) -> Result<Levels, String> {

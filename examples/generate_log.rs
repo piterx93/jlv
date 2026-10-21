@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::Parser;
-use vilog::format::Preset;
+use vilog::format::Format;
 
 #[path = "../benches/support/generator.rs"]
 #[expect(dead_code, reason = "the probe line is for the benchmarks")]
@@ -28,7 +28,7 @@ struct Args {
     #[arg(default_value = "1G", value_parser = parse_size)]
     size: u64,
     #[arg(long, value_enum, default_value = "logback")]
-    format: Preset,
+    format: &'static Format,
     /// Another seed gives another log of the same kind.
     #[arg(long, default_value_t = 1)]
     seed: u64,

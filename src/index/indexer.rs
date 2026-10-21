@@ -98,6 +98,7 @@ impl Indexer {
                     records: found,
                     indexed,
                 } => {
+                    reserve(records, found.len(), indexed, self.progress.total);
                     records.extend(found);
                     self.progress.indexed = indexed;
                 }
@@ -105,6 +106,12 @@ impl Indexer {
                     records: last,
                     timestamps,
                 } => {
+                    reserve(
+                        records,
+                        last.len(),
+                        self.progress.total,
+                        self.progress.total,
+                    );
                     records.extend(last);
                     set_timestamps(records, &timestamps);
                     self.progress.indexed = self.progress.total;
@@ -113,6 +120,21 @@ impl Indexer {
         }
         self.progress
     }
+}
+
+/// Makes room for `incoming` records by the density seen so far, so the index ends
+/// with little spare room where doubling would leave up to half of it unused. The
+/// guess is capped at doubling, which a skewed start can't push past.
+fn reserve(records: &mut Vec<Record>, incoming: usize, indexed: u64, total: u64) {
+    let needed = records.len() + incoming;
+    if needed <= records.capacity() {
+        return;
+    }
+    let seen = u128::from(indexed.max(1));
+    let estimate = (needed as u128 * u128::from(total) / seen).min(2 * needed as u128);
+    // A thirtysecond of slack keeps a slightly low guess from reallocating.
+    let target = usize::try_from(estimate + estimate / 32).unwrap_or(needed);
+    records.reserve_exact(target.max(needed) - records.len());
 }
 
 impl Drop for Indexer {

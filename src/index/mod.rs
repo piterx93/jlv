@@ -18,8 +18,8 @@ use jiff::tz::TimeZone;
 use memchr::memchr;
 
 use crate::format::{
-    Anchor, DatesBackward, EntryGrouper, EntryHead, EntryParser, Level, LogTime, Preset,
-    strip_ansi_into,
+    Anchor, DatesBackward, EntryGrouper, EntryHead, EntryParser, Format, JsonColumns, Kind, Level,
+    LogTime, Mapping, strip_ansi_into,
 };
 use crate::source;
 
@@ -37,12 +37,15 @@ mod tests;
 /// How to read a file's entries.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub preset: Preset,
+    pub format: &'static Format,
     /// The time zone of timestamps without an offset.
     pub zone: TimeZone,
     /// Where dating a time-only preset's entries starts (see
     /// [`Anchor::for_file`]). Other presets don't use it.
     pub anchor: Anchor,
+    /// Which keys a JSON lines file's columns are read from, as
+    /// [`Mapping::choose`] picks them from the file. Other formats don't use it.
+    pub mapping: Mapping,
 }
 
 /// One entry of the index, at most 32 bytes.
@@ -105,6 +108,15 @@ impl Record {
         }
     }
 
+    /// Keeps `class` unless it reaches past what 16 bits hold.
+    fn set_class(&mut self, class: Option<&Range<usize>>) {
+        if let Some(class) = class
+            && let (Ok(start), Ok(end)) = (u16::try_from(class.start), u16::try_from(class.end))
+        {
+            (self.class_start, self.class_end) = (start, end);
+        }
+    }
+
     /// Where the entry is in the file: from the first byte of its first line to the
     /// first byte of the next entry, or to the end of the file. The line endings are
     /// part of it, so the entries of a file cover it without gaps.
@@ -139,11 +151,11 @@ impl Record {
     }
 
     /// The class column of the entry's first line, as a byte range into that line
-    /// once ANSI escape codes are stripped ([`EntryHead::class`]). `None` for the
-    /// headless entry, under `Raw`, and when the span reaches past byte 65 535 of the
+    /// once ANSI escape codes are stripped ([`EntryHead::logger`]). `None` for the
+    /// headless entry, under `Raw`, for a format without a logger, and when the span reaches past byte 65 535 of the
     /// line (`end > 65_535`), which is too far into the line to be kept here.
     ///
-    /// [`EntryHead::class`]: crate::format::EntryHead::class
+    /// [`EntryHead::logger`]: crate::format::EntryHead::logger
     pub fn class(&self) -> Option<Range<usize>> {
         (self.class_start < self.class_end)
             .then(|| usize::from(self.class_start)..usize::from(self.class_end))
@@ -244,7 +256,7 @@ impl Chunk {
     fn close(&mut self, end: u64, has_exception: bool) {
         if let Some(last) = self.records.last_mut() {
             last.end = U48::new(end);
-            last.has_exception = has_exception;
+            last.has_exception |= has_exception;
         }
     }
 }
@@ -283,6 +295,9 @@ fn first_line_start(bytes: &[u8], range: &Range<usize>) -> usize {
 /// Groups the lines of one chunk into entries and keeps a record of each.
 struct ChunkReader<'a> {
     zone: &'a TimeZone,
+    /// The mapping of a JSON lines file, whose entries carry their own exception
+    /// field and no columns the grouper finds.
+    json: Option<&'a Mapping>,
     parser: Option<EntryParser>,
     time_only: bool,
     grouper: EntryGrouper,
@@ -293,12 +308,13 @@ struct ChunkReader<'a> {
 
 impl<'a> ChunkReader<'a> {
     fn new(settings: &'a Settings) -> Self {
-        let parser = settings.preset.entry_parser();
+        let parser = settings.format.entry_parser();
         ChunkReader {
             zone: &settings.zone,
+            json: matches!(settings.format.kind, Kind::Json).then_some(&settings.mapping),
             parser,
             time_only: parser.is_some_and(|parser| !parser.has_date()),
-            grouper: EntryGrouper::new(settings.preset),
+            grouper: EntryGrouper::new(settings.format),
             stripped: Vec::new(),
             chunk: Chunk::empty(),
         }
@@ -316,14 +332,18 @@ impl<'a> ChunkReader<'a> {
         // A line that closes an entry opens the next, and the first line opens one.
         let opens = closed.is_some() || self.chunk.records.is_empty();
         if let Some(closed) = closed {
-            self.chunk.close(offset, closed.has_exception);
+            // In JSON lines the entry's own exception field decides, not what its
+            // continuation lines look like.
+            self.chunk
+                .close(offset, self.json.is_none() && closed.has_exception);
         }
         if let Some(open) = self.grouper.open_entry()
             && opens
         {
-            let (mut record, time) = match self.parser.zip(open.head.as_ref()) {
-                Some((parser, head)) => read_head(offset, line, head, parser, self.zone),
-                None => (Record::new(offset), None),
+            let (mut record, time) = match (self.json, self.parser.zip(open.head.as_ref())) {
+                (Some(mapping), Some(_)) => (read_json(offset, line, mapping, self.zone), None),
+                (None, Some((parser, head))) => read_head(offset, line, head, parser, self.zone),
+                _ => (Record::new(offset), None),
             };
             record.line = U48::new(self.chunk.lines);
             // The grouper only makes the first lines an entry without a head, unless
@@ -339,7 +359,8 @@ impl<'a> ChunkReader<'a> {
     /// The chunk, once the last line, which ends at `end`, is pushed.
     fn finish(mut self, end: u64) -> Chunk {
         if let Some(open) = self.grouper.open_entry() {
-            self.chunk.close(end, open.has_exception);
+            self.chunk
+                .close(end, self.json.is_none() && open.has_exception);
         }
         let timestamps = self
             .chunk
@@ -362,14 +383,13 @@ fn read_head(
     zone: &TimeZone,
 ) -> (Record, Option<Time>) {
     let mut record = Record::new(offset);
-    record.level = Level::parse(&line[head.level.clone()]);
-    if let (Ok(start), Ok(end)) = (
-        u16::try_from(head.class.start),
-        u16::try_from(head.class.end),
-    ) {
-        (record.class_start, record.class_end) = (start, end);
-    }
-    let time = match parser.timestamp(&line[head.timestamp.clone()], zone) {
+    record.level = head
+        .level
+        .clone()
+        .and_then(|level| Level::parse(&line[level]));
+    record.set_class(head.logger.as_ref());
+    let timestamp = head.timestamp.clone();
+    let time = match timestamp.and_then(|timestamp| parser.timestamp(&line[timestamp], zone)) {
         Some(LogTime::Instant(instant)) => {
             record.timestamp = instant.as_microsecond();
             None
@@ -378,6 +398,22 @@ fn read_head(
         None => None,
     };
     (record, time)
+}
+
+/// The record of a JSON line that starts at `offset`; `line` is ANSI-stripped.
+fn read_json(offset: u64, line: &[u8], mapping: &Mapping, zone: &TimeZone) -> Record {
+    let JsonColumns {
+        timestamp,
+        level,
+        logger,
+        has_exception,
+    } = mapping.read(line, zone);
+    let mut record = Record::new(offset);
+    record.timestamp = timestamp.map_or(NO_TIMESTAMP, Timestamp::as_microsecond);
+    record.level = level;
+    record.has_exception = has_exception;
+    record.set_class(logger.as_ref());
+    record
 }
 
 /// Gives each of `timestamps` that is [`NO_TIMESTAMP`] the one before it, `previous`

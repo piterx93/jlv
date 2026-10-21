@@ -17,13 +17,15 @@ use super::*;
 use crate::app::{Action, FileChange};
 use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
-use crate::format::Preset;
+use crate::format::{BUILT_IN, Format};
 use crate::matcher::{self, Matcher};
 use crate::mouse::HitMap;
+use crate::test_support::built_in;
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
-    following_app, hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
-    wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
+    following_app, hide_line_numbers, key, named_app, no_logger, no_thread_or_logger, no_timestamp,
+    numbered_log, row, spike_log, unindexed_app, wait_for_filter, wait_for_index,
+    wait_for_index_within, wait_for_search,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -307,7 +309,7 @@ fn class_panel_shows_one_rule_per_line_over_the_rows() {
     " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
     " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
     " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
-    " 12:00:00.007 [mai┌ Classes ─────────────────────────────────┐                  "
+    " 12:00:00.007 [mai┌ Loggers ─────────────────────────────────┐                  "
     " 12:00:00.008 [mai│  com.myco.*                              │                  "
     " 12:00:00.009 [mai│ ▶!org.hibernate                          │                  "
     " 12:00:00.010 [mai│                                          │                  "
@@ -459,7 +461,7 @@ const FILTER_LOG: &str = concat!(
 
 #[test]
 fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_bar() {
-    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), FILTER_LOG.as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "vilog ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                     E:2 W:3 I:1 D:1"
     "▶12:04:00.000 WARN  com.myco.pay.PayClient   Retry 1/3 after timeout            "
@@ -488,11 +490,34 @@ fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_ba
     "#);
 }
 
+/// `-l crit,wrn` on entries written with level aliases: the FATAL and WARN entries
+/// stay, under their canonical names.
+#[test]
+fn level_aliases_of_the_level_option_show_the_entries_under_canonical_names() {
+    let log = "\
+2026-10-07 12:00:00.000 [main] Information com.myco.App - Started
+2026-10-07 12:00:01.000 [main] wrn com.myco.App - Pool almost full
+2026-10-07 12:00:02.000 [main] ERR com.myco.App - Payment failed
+2026-10-07 12:00:03.000 [main] CRITICAL com.myco.App - Out of memory
+";
+    let mut app = app_in(built_in("logback"), log.as_bytes());
+    app.set_filters(Filters {
+        levels: crate::cli::parse_levels("crit,wrn").unwrap(),
+        ..Filters::default()
+    });
+    wait_for_filter(&mut app);
+    assert_snapshot!(lines_after(&mut app, &[], 1..=3), @r"
+    Filters: level[W F]
+    ▶12:00:01.000 WARN  com.myco.App             Pool almost full
+     12:00:03.000 FATAL com.myco.App             Out of memory
+    ");
+}
+
 /// The counters count the INFO entry the level filter hides, but none of the entries
 /// the other filters hide.
 #[test]
 fn filter_bar_shows_every_active_filter_under_the_header() {
-    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), FILTER_LOG.as_bytes());
     app.set_filters(Filters {
         levels: Levels::only(&[Level::Warn, Level::Error, Level::Fatal]),
         classes: Classes::parse(["com.myco.*", "!Sql"]).unwrap(),
@@ -506,7 +531,7 @@ fn filter_bar_shows_every_active_filter_under_the_header() {
     wait_for_filter(&mut app);
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "vilog ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                         E:1 W:1 I:1"
-    "Filters: level[W E F]  class[com.myco.* !Sql]  time[last 5m (file)]  text[time] "
+    "Filters: level[W E F]  logger[com.myco.* !Sql]  time[last 5m (file)]  text[time]"
     "▶12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
     " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
     "                                                                                "
@@ -627,7 +652,7 @@ fn header_ends_with_the_notice_about_the_last_key() {
     draw(&mut terminal, &mut app, Theme::Styled);
     assert_eq!(
         row(&terminal, 0),
-        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ the selected entry has no class"
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ the selected entry has no logger"
     );
 }
 
@@ -660,9 +685,9 @@ const HEADLESS_FIRST_LOG: &str = concat!(
     "2026-10-07 12:00:04.000 [main] ERROR com.example.App - error\n",
 );
 
-/// The header at `width` columns after `c` on the headless entry, which has no class.
+/// The header at `width` columns after `c` on the headless entry, which has no logger.
 fn header_with_a_notice(width: u16) -> String {
-    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), HEADLESS_FIRST_LOG.as_bytes());
     let mut terminal = drawn(&mut app, width, 24, Theme::Styled);
     app.key(char_key('c'));
     draw(&mut terminal, &mut app, Theme::Styled);
@@ -672,22 +697,22 @@ fn header_with_a_notice(width: u16) -> String {
 #[test]
 fn level_counters_take_the_columns_the_title_leaves_after_a_space() {
     assert_eq!(
-        header_with_a_notice(98),
-        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class E:1 W:1 I:1 D:1 T:1"
+        header_with_a_notice(99),
+        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no logger E:1 W:1 I:1 D:1 T:1"
     );
 }
 
 #[test]
 fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
     assert_eq!(
-        header_with_a_notice(97),
-        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class"
+        header_with_a_notice(98),
+        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no logger"
     );
 }
 
 #[test]
 fn header_shows_the_indexing_progress_until_the_index_is_complete() {
-    let mut app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
+    let mut app = unindexed_app(built_in("raw"), numbered_log(100).as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ indexing 0%                         "
     "                                                                                "
@@ -719,7 +744,7 @@ fn header_shows_the_indexing_progress_until_the_index_is_complete() {
 #[test]
 fn header_names_the_preset_the_file_is_read_in() {
     let mut app = app_in(
-        Preset::Logback,
+        built_in("logback"),
         b"2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
     );
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
@@ -731,7 +756,7 @@ fn header_names_the_preset_the_file_is_read_in() {
 
 #[test]
 fn empty_file_shows_no_indexing_progress() {
-    let mut app = unindexed_app(Preset::Raw, b"");
+    let mut app = unindexed_app(built_in("raw"), b"");
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
     assert_eq!(row(&terminal, 0), "vilog ─ app.log ─ 0 B ─ Raw ─ PAUSED ●");
 }
@@ -867,7 +892,7 @@ const TABLE_LOG: &str = concat!(
 );
 
 fn table() -> App {
-    app_in(Preset::Logback, TABLE_LOG.as_bytes())
+    app_in(built_in("logback"), TABLE_LOG.as_bytes())
 }
 
 /// The buffer's debug view lists every change of style; a single entry at 0,0 means
@@ -986,7 +1011,7 @@ fn class_column_grows_to_at_most_40_columns() {
 #[test]
 fn level_column_names_the_level_however_the_line_spells_it() {
     let mut app = app_in(
-        Preset::Logback,
+        built_in("logback"),
         b"2026-10-07 12:00:00.100 [main] warning com.example.App - Retry\n",
     );
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
@@ -1075,7 +1100,7 @@ const LONG_MESSAGE_LOG: &str = concat!(
 );
 
 fn long_messages() -> App {
-    app_in(Preset::Logback, LONG_MESSAGE_LOG.as_bytes())
+    app_in(built_in("logback"), LONG_MESSAGE_LOG.as_bytes())
 }
 
 #[test]
@@ -1142,7 +1167,7 @@ fn two_line_entries() -> App {
             )
         })
         .collect();
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 /// The first 13 columns of screen lines `lines` after `w` and then `j` `downs` times.
@@ -1184,7 +1209,7 @@ fn mixed_height_entries(two_lines_first: bool) -> App {
             )
         })
         .collect();
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 /// The first 13 columns of screen lines `lines` after pressing `keys`.
@@ -1224,6 +1249,128 @@ fn wrapped_messages_continue_under_the_message_column_next_to_the_thread() {
                                                                  CDEFGHIJKLMNOPQRSTU
                                                                  VWXYZ
      12:00:00.200 WARN  main            com.example.App          short message
+    ");
+}
+
+// --- formats without some columns ---
+
+/// Entries in [`no_thread_or_logger`], one of them with a message longer than the
+/// screen and one with a stack trace.
+const NO_THREAD_LOG: &str = concat!(
+    "2026-10-07 12:00:00.123 [INF] Order 42 created\n",
+    "2026-10-07 12:00:01.000 [WRN] Payment retry 1/3 for order 42 after the gateway timed out, waiting 2 s before the next attempt\n",
+    "2026-10-07 12:00:02.000 [ERR] Payment failed\n",
+    "System.TimeoutException: The operation has timed out.\n",
+    "   at Shop.Payments.Gateway.Charge()\n",
+);
+
+fn no_thread_table() -> App {
+    app_in(no_thread_or_logger(), NO_THREAD_LOG.as_bytes())
+}
+
+/// Entries in [`no_timestamp`], one with a logger name abbreviated to fit.
+const NO_TIMESTAMP_LOG: &str = concat!(
+    "WARNING:app.orders:Payment retry 1/3\n",
+    "INFO:app.orders.api.handlers.checkout:Order 42 created\n",
+    "ERROR:root:Payment failed\n",
+);
+
+fn no_timestamp_table() -> App {
+    app_in(no_timestamp(), NO_TIMESTAMP_LOG.as_bytes())
+}
+
+/// PRD §7.2: the message takes the width of the columns that aren't there.
+#[test]
+fn a_format_without_thread_and_logger_shows_neither_column() {
+    assert_snapshot!(screen_after(&mut no_thread_table(), &[]), @r#"
+    "vilog ─ app.log ─ 309 B ─ No thread or logger ─ PAUSED ●             E:1 W:1 I:1"
+    "▶12:00:00.123 INFO  Order 42 created                                            "
+    " 12:00:01.000 WARN  Payment retry 1/3 for order 42 after the gateway timed out, "
+    " 12:00:02.000 ERROR Payment failed [+2]                                         "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn an_entry_with_a_level_but_no_timestamp_shows_no_timestamp_column() {
+    assert_snapshot!(lines_after(&mut no_timestamp_table(), &[], 1..=3), @r"
+    ▶WARN  app.orders               Payment retry 1/3
+     INFO  a.o.a.handlers.checkout  Order 42 created
+     ERROR root                     Payment failed
+    ");
+}
+
+#[test]
+fn capital_t_on_a_format_without_threads_adds_no_column() {
+    assert_eq!(
+        lines_after(&mut no_thread_table(), &[char_key('T')], 1..=3),
+        lines_after(&mut no_thread_table(), &[], 1..=3)
+    );
+}
+
+#[test]
+fn details_pane_of_an_entry_without_logger_and_thread_starts_with_its_message() {
+    let keys = [char_key('j'), char_key('j'), key(KeyCode::Enter)];
+    assert_snapshot!(lines_after(&mut no_thread_table(), &keys, DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ Payment failed                                                               │
+    │ System.TimeoutException: The operation has timed out.                        │
+    │    at Shop.Payments.Gateway.Charge()                                         │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_of_an_entry_without_a_thread_shows_the_logger_alone() {
+    let keys = [key(KeyCode::Enter)];
+    assert_snapshot!(lines_after(&mut no_timestamp_table(), &keys, DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ app.orders                                                                   │
+    │ Payment retry 1/3                                                            │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+/// The thread keeps its parentheses, so that it doesn't read as a logger name.
+#[test]
+fn details_pane_of_an_entry_without_a_logger_shows_the_thread_in_parentheses() {
+    let log = "2026-10-07 12:00:00.123 [1234] [INFO] Booting worker\n";
+    let mut app = app_in(no_logger(), log.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ (1234)                                                                       │
+    │ Booting worker                                                               │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
     ");
 }
 
@@ -1282,7 +1429,7 @@ fn entries_with_frames(frames: &[usize]) -> App {
             format!("2026-10-07 12:00:00.{i:03} [main] INFO  com.example.App - step {i}\n{frames}")
         })
         .collect();
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 fn traces() -> App {
@@ -1562,7 +1709,7 @@ fn control_characters_in_the_file_name_are_replaced() {
 /// A viewer opened at the end of `numbered_log(3)`, on the 22 lines an 80×24
 /// screen has for rows, with the whole file indexed.
 fn three_lines_followed() -> App {
-    let mut app = following_app(Preset::Raw, numbered_log(3).as_bytes());
+    let mut app = following_app(built_in("raw"), numbered_log(3).as_bytes());
     app.resize(22);
     wait_for_index(&mut app);
     app
@@ -2191,7 +2338,7 @@ fn seven_digit_line_numbers_take_their_width_from_the_message_column() {
         entry(3, "done"),
     ]
     .concat();
-    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    let mut app = unindexed_app(built_in("logback"), log.as_bytes());
     wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
     assert_snapshot!(numbered(&mut app, 80, &[], 1..=3), @r#"
     "      1 ▶12:00:00.001 INFO  com.example.App          the first message [+999998]"
@@ -2215,7 +2362,7 @@ fn gutter_widens_when_the_file_reaches_10000_lines() {
 /// numbers aren't known yet.
 #[test]
 fn rows_read_from_the_end_of_the_file_have_blank_line_numbers() {
-    let mut app = following_app(Preset::Raw, numbered_log(30).as_bytes());
+    let mut app = following_app(built_in("raw"), numbered_log(30).as_bytes());
     assert_snapshot!(numbered(&mut app, 80, &[], 21..=22), @r#"
     "      12:00:00.029 [main] INFO  com.example.App - step 29"
     "     ▶12:00:00.030 [main] INFO  com.example.App - step 30"
@@ -2256,8 +2403,11 @@ fn any_action() -> impl Strategy<Value = Action> {
     ])
 }
 
-fn any_preset() -> impl Strategy<Value = Preset> {
-    prop::sample::select(Preset::ALL.to_vec())
+/// The built-in formats and the ones without some columns.
+fn any_preset() -> impl Strategy<Value = &'static Format> {
+    let mut formats: Vec<_> = BUILT_IN.iter().collect();
+    formats.extend([no_thread_or_logger(), no_timestamp()]);
+    prop::sample::select(formats)
 }
 
 /// Lines that start an entry in some preset mixed with arbitrary bytes.
@@ -2493,7 +2643,7 @@ const COLUMNS_LOG: &str = concat!(
 /// match is highlighted on both screen lines.
 #[test]
 fn highlights_stay_in_the_message_column_and_follow_tabs_and_wrapping() {
-    let mut app = app_in(Preset::Logback, COLUMNS_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), COLUMNS_LOG.as_bytes());
     let terminal = searched_terminal(&mut app, "App - step|done", &[char_key('w')]);
     assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
      12:00:00.001 INFO  com.example.App          step 1
@@ -2550,7 +2700,7 @@ fn long_trace() -> App {
         "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n\
          java.lang.IllegalStateException: boom\n{trace}"
     );
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 /// The screen lines of the details pane at 80×24.
@@ -2664,7 +2814,7 @@ fn details_pane_leaves_the_rows_above_it() {
 
 #[test]
 fn details_pane_shows_the_headless_entry_as_it_is() {
-    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), HEADLESS_FIRST_LOG.as_bytes());
     assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
     ┌ Details ─────────────────────────────────────────────────────────────────────┐
     │ starting up                                                                  │
@@ -2697,7 +2847,7 @@ fn details_pane_wraps_a_long_message_at_its_inner_width() {
         "2026-10-07 12:00:00.000 [main] INFO  com.example.App - {}\n",
         "0123456789".repeat(10)
     );
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
     ┌ Details ─────────────────────────────────────────────────────────────────────┐
     │ com.example.App (main)                                                       │
@@ -2717,7 +2867,7 @@ fn details_pane_shows_the_lines_appended_to_its_entry() {
         "java.lang.IllegalStateException: boom\n",
         "\tat com.example.App.main(App.java:10)\n",
     );
-    let mut app = following_app(Preset::Logback, log.as_bytes());
+    let mut app = following_app(built_in("logback"), log.as_bytes());
     wait_for_index(&mut app);
     let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter)]);
     let longer = format!("{log}\tat java.lang.Thread.run(Thread.java:1583)\n");
@@ -2752,7 +2902,7 @@ fn last_details_line(len: usize) -> String {
         "x".repeat(rest - 5)
     );
     assert_eq!(log.len(), len);
-    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    let mut app = unindexed_app(built_in("logback"), log.as_bytes());
     wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
     let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter), key(KeyCode::Tab)]);
     loop {
@@ -2781,7 +2931,7 @@ fn details_pane_shows_an_entry_as_long_as_its_cap_whole() {
 // --- histogram ---
 
 fn spike() -> App {
-    app_in(Preset::Logback, spike_log().as_bytes())
+    app_in(built_in("logback"), spike_log().as_bytes())
 }
 
 /// The keys that show the histogram, focus it and select its third bucket.
@@ -2809,7 +2959,7 @@ fn histogram_without_warnings_or_errors_is_blank_but_for_its_scale() {
         "2026-10-07 12:00:01.000 [main] INFO  com.example.App - Working\n",
         "2026-10-07 12:00:02.000 [main] INFO  com.example.App - Done\n",
     );
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     assert_snapshot!(lines_after(&mut app, &[char_key('H')], 1..=2), @r"
                                                                             max 0/1s
     ▶12:00:00.123 INFO  com.example.App          Started
@@ -2861,7 +3011,7 @@ fn logback_log(entries: impl IntoIterator<Item = (&'static str, &'static str)>) 
 
 /// A Logback viewer over one entry per `(timestamp, level)`.
 fn logback(entries: impl IntoIterator<Item = (&'static str, &'static str)>) -> App {
-    app_in(Preset::Logback, logback_log(entries).as_bytes())
+    app_in(built_in("logback"), logback_log(entries).as_bytes())
 }
 
 /// Three days in 6 h buckets: 3 warnings on the 7th from 12:00, 6 on the 8th from
@@ -2885,7 +3035,7 @@ fn spike_between(first: &'static str, at: &'static str, n: usize, last: &'static
         .chain(errors)
         .chain([(last, "INFO")]);
     // A six-digit spike is some 6 MB of log.
-    let mut app = unindexed_app(Preset::Logback, logback_log(entries).as_bytes());
+    let mut app = unindexed_app(built_in("logback"), logback_log(entries).as_bytes());
     wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
     app
 }
@@ -2978,7 +3128,7 @@ fn histogram_label_column_widens_when_new_entries_need_it() {
         ("2026-10-07 00:00:00", "INFO"),
         ("2026-10-09 08:00:00", "INFO"),
     ]);
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     let mut terminal = terminal_after(&mut app, &[char_key('H')]);
     let errors = std::iter::repeat_n(("2026-10-07 12:00:00", "ERROR"), 12_345);
     let grown = format!("{log}{}", logback_log(errors));
@@ -3103,9 +3253,9 @@ fn help_overlay_scrolls_a_page_with_page_down() {
     " 12:00:00.004 [ma│ F2            Level filter                 │                 "
     " 12:00:00.005 [ma│ F4 &          Text filter                  │                 "
     " 12:00:00.006 [ma│ F5            Time filter                  │                 "
-    " 12:00:00.007 [ma│ F6            Class filter                 │                 "
-    " 12:00:00.008 [ma│ c             Only this class              │                 "
-    " 12:00:00.009 [ma│ C             Hide this class              │                 "
+    " 12:00:00.007 [ma│ F6            Logger filter                │                 "
+    " 12:00:00.008 [ma│ c             Only this logger             │                 "
+    " 12:00:00.009 [ma│ C             Hide this logger             │                 "
     " 12:00:00.010 [ma│ x             Clear all filters            │                 "
     " 12:00:00.011 [ma│ Space         Fold or unfold entry         │                 "
     " 12:00:00.012 [ma│ z             Fold all                     │                 "
@@ -3134,9 +3284,9 @@ fn help_overlay_scrolled_to_its_end_shows_its_last_lines() {
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
     "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
-    " 12:00:00.002 [ma│ F6            Class filter                 │                 "
-    " 12:00:00.003 [ma│ c             Only this class              │                 "
-    " 12:00:00.004 [ma│ C             Hide this class              │                 "
+    " 12:00:00.002 [ma│ F6            Logger filter                │                 "
+    " 12:00:00.003 [ma│ c             Only this logger             │                 "
+    " 12:00:00.004 [ma│ C             Hide this logger             │                 "
     " 12:00:00.005 [ma│ x             Clear all filters            │                 "
     " 12:00:00.006 [ma│ Space         Fold or unfold entry         │                 "
     " 12:00:00.007 [ma│ z             Fold all                     │                 "
@@ -3222,4 +3372,160 @@ fn key_hints_show_remapped_keys() {
         row(&terminal, 23),
         "j/k Move  PgUp/PgDn Page  u/Ctrl-d Half page  g/G Top/Bottom  Q Quit"
     );
+}
+
+// --- JSON lines ---
+
+/// The rows of the JSON lines fixture `name` with its fifth entry selected, and that
+/// entry in the details pane, on a screen tall enough to show all of it.
+fn fifth_json_entry_in_details(name: &str) -> String {
+    let mut app = app_in(built_in("json"), &test_support::json_fixture(name));
+    let mut terminal = drawn(&mut app, 80, 42, Theme::Plain);
+    let keys = [char_key('j'); 4].into_iter().chain([key(KeyCode::Enter)]);
+    for key in keys {
+        app.apply(action(key).unwrap());
+        draw(&mut terminal, &mut app, Theme::Plain);
+    }
+    let lines: Vec<String> = (1..=8).chain(27..=40).map(|y| row(&terminal, y)).collect();
+    lines.join("\n")
+}
+
+/// pino writes levels and times as numbers, and an error's stack one object deep in
+/// `err.stack`: the rest of `err` follows the other fields as dotted keys.
+#[test]
+fn pino_entry_shows_its_columns_in_the_table_and_its_stack_and_fields_in_details() {
+    assert_snapshot!(fifth_json_entry_in_details("pino.log"), @r#"
+     10:30:00.000 INFO  api                      server listening at http://0.0.0.0:
+     10:30:00.412 DEBUG api                      route table built
+     10:30:01.087 INFO  api                      request completed
+     10:30:02.530 WARN  api                      deprecated header "X-Legacy" used
+    ▶10:30:03.114 ERROR api                      Cannot read properties of undefined
+     10:30:03.900 TRACE api                      cache probe
+     10:30:05.001 FATAL api                      out of memory, exiting
+     10:30:06.250 INFO  api                      café menu loaded
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ api                                                                          │
+    │ Cannot read properties of undefined (reading 'id')                           │
+    │ TypeError: Cannot read properties of undefined (reading 'id')                │
+    │     at getUser (/app/src/users.js:42:19)                                     │
+    │     at Layer.handle (/app/node_modules/express/lib/router/layer.js:95:5)     │
+    │     at next (/app/node_modules/express/lib/router/route.js:149:13)           │
+    │ level: 50                                                                    │
+    │ time: 1773484203114                                                          │
+    │ pid: 4121                                                                    │
+    │ hostname: web-1                                                              │
+    │ err.type: TypeError                                                          │
+    │ err.message: Cannot read properties of undefined (reading 'id')              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    "#);
+}
+
+/// The stack trace ends with a line break, which makes no empty line.
+#[test]
+fn logstash_entry_shows_its_columns_in_the_table_and_its_stack_and_fields_in_details() {
+    assert_snapshot!(fifth_json_entry_in_details("logstash-logback.log"), @r#"
+     08:12:01.104 INFO  c.a.o.OrderApplication   Started OrderApplication in 3.2 sec
+     08:12:01.310 DEBUG c.z.h.HikariDataSource   HikariPool-1 - Start completed.
+     08:12:02.020 INFO  c.a.orders.OrderService  Order 42 created
+     08:12:03.481 WARN  c.acme.orders.HttpClient Slow upstream, retry 2
+    ▶08:12:04.775 ERROR c.a.o.PaymentGateway     Payment failed for "Alice"
+     08:12:05.002 INFO  c.a.orders.OrderService  Zamówienie 43 przyjęte
+     08:12:06.450 TRACE com.acme.orders.Cache    Cache probe
+     08:12:07.900 INFO  c.a.o.OrderApplication   Shutting down
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ com.acme.orders.PaymentGateway (http-nio-8080-exec-1)                        │
+    │ Payment failed for "Alice"                                                   │
+    │ java.lang.IllegalStateException: Card declined                               │
+    │     at com.acme.orders.PaymentGateway.charge(PaymentGateway.java:31)         │
+    │     at com.acme.orders.OrderService.create(OrderService.java:97)             │
+    │     at java.base/java.lang.Thread.run(Thread.java:840)                       │
+    │ @timestamp: 2026-03-14T09:12:04.775+01:00                                    │
+    │ @version: 1                                                                  │
+    │ level: ERROR                                                                 │
+    │ level_value: 40000                                                           │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    "#);
+}
+
+/// A JSON log of one INFO entry of the logger `api` per message in `messages`, each
+/// written into the line as it is, a second apart from 09:12:01 UTC.
+fn json_log(messages: &[&str]) -> App {
+    let log: String = messages
+        .iter()
+        .zip(1..)
+        .map(|(message, second)| {
+            format!(
+                r#"{{"time":"2026-03-14T09:12:{second:02}Z","level":"INFO","name":"api","msg":{message}}}"#
+            ) + "\n"
+        })
+        .collect();
+    app_in(built_in("json"), log.as_bytes())
+}
+
+/// A message with escapes and a line break, as JSON writes it.
+const TWO_LINE_MESSAGE: &str = r#""café \"quoted\"\nsecond line""#;
+
+#[test]
+fn json_row_shows_the_first_line_of_the_decoded_message() {
+    let mut app = json_log(&[TWO_LINE_MESSAGE]);
+    assert_eq!(
+        lines_after(&mut app, &[], 1..=1),
+        r#"▶09:12:01.000 INFO  api                      café "quoted""#
+    );
+}
+
+/// The logger is already above the message, so it isn't among the fields.
+#[test]
+fn json_details_show_every_line_of_the_decoded_message_then_the_other_fields() {
+    let mut app = json_log(&[TWO_LINE_MESSAGE]);
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r#"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ api                                                                          │
+    │ café "quoted"                                                                │
+    │ second line                                                                  │
+    │ time: 2026-03-14T09:12:01Z                                                   │
+    │ level: INFO                                                                  │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    "#);
+}
+
+/// The message keeps its line when empty, as in a text format, so the fields don't
+/// read as the message.
+#[test]
+fn json_details_show_an_empty_message_as_an_empty_line() {
+    let mut app = json_log(&[r#""""#]);
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ api                                                                          │
+    │                                                                              │
+    │ time: 2026-03-14T09:12:01Z                                                   │
+    │ level: INFO                                                                  │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn json_message_that_is_not_a_string_is_shown_as_written() {
+    let mut app = json_log(&["42", r#"{"code":7,"text":"a\"b"}"#]);
+    assert_snapshot!(lines_after(&mut app, &[], 1..=2), @r#"
+    ▶09:12:01.000 INFO  api                      42
+     09:12:02.000 INFO  api                      {"code":7,"text":"a\"b"}
+    "#);
+}
+
+/// PRD §9.2: `"quoted"` finds `\"quoted\"` in the file.
+#[test]
+fn search_in_a_json_log_matches_and_highlights_the_decoded_text() {
+    let mut app = json_log(&[r#""user quoted twice""#, r#""user said \"quoted\" here""#]);
+    let terminal = searched_terminal(&mut app, r#""quoted""#, &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=2), @r#"
+     09:12:01.000 INFO  api                      user quoted twice
+    ▶09:12:02.000 INFO  api                      user said "quoted" here
+                                                           ^^^^^^^^
+    "#);
 }

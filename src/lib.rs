@@ -205,7 +205,7 @@ fn open_showing_progress(path: &Path, stderr: &mut dyn Write) -> Result<Source, 
 /// It opens at the end of the file, or at the top with `--no-follow`, and watches a
 /// plain file either way, so that `F` can follow it ([`App::watch`]); a gzip file is
 /// read-only and never watched. The file is
-/// read in the preset `--format` names, detected without it, `--level` and
+/// read in the format `--format` names, detected without it, `--level` and
 /// `--class` set the level and class filters it starts with, and `--since` the time
 /// filter, counted from the last entry. Timestamps without an
 /// offset are local time in the system's time zone, and a time-only log is dated
@@ -289,7 +289,7 @@ pub fn captures_mouse(args: &Args, config: &Config) -> bool {
 /// filter runs.
 pub fn initial_filters(args: &Args, config: &Config) -> Option<Filters> {
     let classes = args
-        .class
+        .logger
         .as_ref()
         .unwrap_or(&config.filters.default_class_excludes);
     if args.level.is_none() && *classes == Classes::default() {

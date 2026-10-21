@@ -1,4 +1,5 @@
-//! Shortening class names Logback-style to fit a column.
+//! Shortening logger names to fit a column: Logback-style for dotted class names,
+//! by dropping leading segments for paths such as a Go caller.
 
 use std::borrow::Cow;
 
@@ -20,7 +21,17 @@ mod tests;
 ///
 /// `com.mycompany.pay.PayClient` at width 18 is `c.m.pay.PayClient`, at 15 or less
 /// `c.m.p.PayClient`.
+///
+/// A name with a `/` before any `.` and a `.` after it is a path, such as the caller
+/// `internal/orders/service.go:42` of a Go logger. Its dots and colons belong to the
+/// file name, so leading segments are dropped instead, one at a time, until the rest
+/// fits. The last segment is always kept. A `/` among package names, as in Tomcat's
+/// `[/]`, or in a lambda's `Main$$Lambda$14/0x01` (Spring cuts the package off long
+/// names), doesn't make a path.
 pub fn abbreviate(name: &str, width: usize) -> Cow<'_, str> {
+    if is_path(name) {
+        return Cow::Borrowed(drop_leading_segments(name, width));
+    }
     let Some((packages, _)) = name.rsplit_once('.') else {
         return Cow::Borrowed(name);
     };
@@ -59,6 +70,22 @@ pub fn abbreviate(name: &str, width: usize) -> Cow<'_, str> {
         abbreviated.push_str(kept);
     }
     Cow::Owned(abbreviated)
+}
+
+fn is_path(name: &str) -> bool {
+    name.split_once('/')
+        .is_some_and(|(head, tail)| !head.contains('.') && tail.contains('.'))
+}
+
+fn drop_leading_segments(path: &str, width: usize) -> &str {
+    let mut rest = path;
+    while rest.width() > width {
+        match rest.split_once('/') {
+            Some((_, tail)) => rest = tail,
+            None => break,
+        }
+    }
+    rest
 }
 
 fn first_char(segment: &str) -> &str {
