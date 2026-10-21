@@ -2,8 +2,9 @@
 //! level counters of the header (PRD §7.1).
 //!
 //! The filters combine with AND. An [`Engine`] evaluates them on a background
-//! thread, a chunk of entries at a time, and publishes what it found after each
-//! chunk. Setting new filters starts a new generation and cancels the one running.
+//! thread, a batch of entries at a time (a chunk per core, evaluated in parallel),
+//! and publishes what it found after each batch. Setting new filters starts a new
+//! generation and cancels the one running.
 //! Entries appended to the index are evaluated as they come, and an entry the index
 //! read again is evaluated again.
 //!
@@ -13,6 +14,7 @@
 //! have a line the search matches.
 
 use std::fmt;
+use std::num::NonZero;
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, RwLock};
@@ -23,7 +25,9 @@ use jiff::Timestamp;
 use memchr::memmem;
 use regex::bytes::CaptureLocations;
 
-use crate::format::{self, EntryParser, Format, Level, strip_ansi_into};
+use crate::format::{
+    self, EntryParser, Format, Kind, Level, Mapping, decoded_line, json::Field, strip_ansi_into,
+};
 use crate::index::Record;
 use crate::matcher::Matcher;
 use crate::source;
@@ -222,8 +226,9 @@ pub struct Indexed<B> {
 /// How an [`Engine`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// Entries per chunk, at least 1. Results are published and cancellation is
-    /// noticed between chunks.
+    /// Entries per chunk and thread, at least 1. The engine evaluates a batch of
+    /// one chunk per thread at once; results are published and cancellation is
+    /// noticed between batches.
     pub chunk: usize,
 }
 
@@ -238,6 +243,85 @@ pub struct Filtered {
     /// Per level, indexed by `Level as usize`: the evaluated entries of that level
     /// that pass every filter but the level filter.
     pub counts: [u32; 6],
+}
+
+/// What [`evaluate`] found in a run of entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Evaluated {
+    /// The entries of the run that pass every filter, and the search if there is
+    /// one, as indices into the records, in ascending order.
+    pub entries: Vec<u32>,
+    /// Per entry of the run, in order: its level if it passes every filter but the
+    /// level filter, which is what it adds to [`Filtered::counts`].
+    pub counted: Vec<Option<Level>>,
+}
+
+/// Evaluates `filters`, and `search` if given, over the entries `entries` of
+/// `indexed`, read as `reader` says, as an [`Engine`] does: the run is split into parts
+/// evaluated on up to `threads` threads at once (0 counts as 1). The result is the
+/// same for any number of threads.
+fn evaluate<B: AsRef<[u8]> + Sync>(
+    indexed: &Indexed<B>,
+    reader: Reader,
+    filters: &Filters,
+    search: Option<&Matcher>,
+    entries: Range<usize>,
+    threads: usize,
+) -> Evaluated {
+    let check = Check { filters, search };
+    // Borrowed apart because `Indexed` as a whole would need `B: Send` to cross threads.
+    let (records, bytes) = (&indexed.records[..], indexed.bytes.as_ref().as_ref());
+    let run = |part: Range<usize>| {
+        let mut scratch = Scratch::new(reader);
+        check.run(records, bytes, part, &mut scratch)
+    };
+    let part_len = entries.len().div_ceil(threads.max(1)).max(1);
+    let parts: Vec<Range<usize>> = (entries.start..entries.end)
+        .step_by(part_len)
+        .map(|start| start..entries.end.min(start + part_len))
+        .collect();
+    let Some((last, rest)) = parts.split_last() else {
+        return Evaluated::default();
+    };
+    thread::scope(|scope| {
+        let handles: Vec<_> = rest
+            .iter()
+            .map(|part| scope.spawn(|| run(part.clone())))
+            .collect();
+        // The calling thread takes a part too, instead of only waiting.
+        let mut found = Vec::with_capacity(parts.len());
+        let tail = run(last.clone());
+        for handle in handles {
+            // A panic in a part is a bug in the filters; pass it on.
+            found.push(
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            );
+        }
+        found.push(tail);
+        found
+            .into_iter()
+            .fold(Evaluated::default(), |mut all, part| {
+                all.entries.extend(part.entries);
+                all.counted.extend(part.counted);
+                all
+            })
+    })
+}
+
+/// How a file's entries are read: its format and, for JSON lines, the keys its
+/// columns are in.
+#[derive(Debug, Clone, Copy)]
+pub struct Reader {
+    format: &'static Format,
+    mapping: Mapping,
+}
+
+impl Reader {
+    pub fn new(format: &'static Format, mapping: Mapping) -> Reader {
+        Reader { format, mapping }
+    }
 }
 
 /// Evaluates the filters over an index on a background thread. Dropping it stops
@@ -258,24 +342,25 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Starts evaluating `filters` over the entries of `indexed`, read in `format`.
+    /// Starts evaluating `filters` over the entries of `indexed`, read as `reader`
+    /// says.
     pub fn spawn<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        format: &'static Format,
+        reader: Reader,
         filters: Filters,
         options: Options,
     ) -> Engine
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
-        Self::spawn_with(indexed, format, filters, None, options)
+        Self::spawn_with(indexed, reader, filters, None, options)
     }
 
     /// Like [`spawn`](Self::spawn), but an entry passes only if one of its lines, with
     /// ANSI escape codes stripped, also matches `search`.
     pub fn spawn_search<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        format: &'static Format,
+        reader: Reader,
         filters: Filters,
         search: Matcher,
         options: Options,
@@ -283,12 +368,12 @@ impl Engine {
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
-        Self::spawn_with(indexed, format, filters, Some(Arc::new(search)), options)
+        Self::spawn_with(indexed, reader, filters, Some(Arc::new(search)), options)
     }
 
     fn spawn_with<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        format: &'static Format,
+        reader: Reader,
         filters: Filters,
         search: Option<Arc<Matcher>>,
         options: Options,
@@ -296,11 +381,13 @@ impl Engine {
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
+        let threads = thread::available_parallelism().map_or(1, NonZero::get);
         let (jobs, job_receiver) = mpsc::channel();
         let (update_sender, updates) = mpsc::channel();
         let worker = Worker {
             indexed,
-            parser: format.entry_parser(),
+            reader,
+            threads,
             chunk: options.chunk.max(1),
             jobs: job_receiver,
             updates: update_sender,
@@ -405,12 +492,13 @@ impl Engine {
     }
 
     fn take_in(&mut self, update: Update) {
-        for level in update.counted.iter().flatten() {
+        let found = update.found;
+        for level in found.counted.iter().flatten() {
             self.filtered.counts[*level as usize] += 1;
         }
-        self.filtered.evaluated += update.counted.len();
-        self.filtered.entries.extend(update.entries);
-        self.counted.extend(update.counted);
+        self.filtered.evaluated += found.counted.len();
+        self.filtered.entries.extend(found.entries);
+        self.counted.extend(found.counted);
     }
 }
 
@@ -422,32 +510,35 @@ struct Job {
     from: usize,
 }
 
-/// What the thread found in the chunk of entries that follows the ones published
+impl Job {
+    fn reads_entries(&self) -> bool {
+        self.search.is_some() || self.filters.text.is_some() || !self.filters.classes.is_empty()
+    }
+}
+
+/// What the threads found in the batch of entries that follows the ones published
 /// before in the same generation.
 struct Update {
     generation: u64,
-    /// The indices of the entries that pass every filter.
-    entries: Vec<u32>,
-    /// Per entry of the chunk, the level it adds to the counters, if any.
-    counted: Vec<Option<Level>>,
+    found: Evaluated,
 }
 
 struct Worker<B> {
     indexed: Arc<RwLock<Indexed<B>>>,
-    parser: Option<EntryParser>,
+    /// Entries per chunk, which one thread evaluates.
     chunk: usize,
+    reader: Reader,
+    /// The most threads a batch of a chunk each is evaluated on.
+    threads: usize,
     jobs: Receiver<Job>,
     updates: Sender<Update>,
 }
 
-impl<B: AsRef<[u8]>> Worker<B> {
-    /// Evaluates a chunk at a time until the job is done, then waits for the next.
+impl<B: AsRef<[u8]> + Sync> Worker<B> {
+    /// Evaluates a batch, a chunk per thread, at a time until the job is done, then
+    /// waits for the next.
     /// Ends when the engine is dropped, or when the viewer panicked holding the index.
     fn run(self) {
-        let mut scratch = Scratch {
-            buffer: Vec::new(),
-            parser: self.parser.map(|parser| (parser, parser.locations())),
-        };
         let Ok(job) = self.jobs.recv() else {
             return;
         };
@@ -467,17 +558,31 @@ impl<B: AsRef<[u8]>> Worker<B> {
                 job = next;
                 continue;
             }
-            let chunk = job.from..total.min(job.from + self.chunk);
-            let check = Check {
-                filters: &job.filters,
-                search: job.search.as_deref(),
+            let batch = job.from..total.min(job.from + self.chunk * self.threads);
+            // Threads cost more than they save when no entry bytes are read, or
+            // when the batch is a few entries.
+            let threads = if job.reads_entries() {
+                self.threads.min(batch.len().div_ceil(self.chunk))
+            } else {
+                1
             };
-            let update = check.chunk(&indexed, chunk.clone(), job.generation, &mut scratch);
+            let found = evaluate(
+                &indexed,
+                self.reader,
+                &job.filters,
+                job.search.as_deref(),
+                batch.clone(),
+                threads,
+            );
+            let update = Update {
+                generation: job.generation,
+                found,
+            };
             drop(indexed);
             if self.updates.send(update).is_err() {
                 return;
             }
-            job.from = chunk.end;
+            job.from = batch.end;
             let Some(newest) = self.newest(job) else {
                 return;
             };
@@ -499,10 +604,34 @@ impl<B: AsRef<[u8]>> Worker<B> {
 }
 
 /// What the thread reuses from one entry to the next: room to strip escape codes
-/// into, and to find the columns of a first line in.
+/// and to decode JSON strings into, and to find the columns of a first line in.
 struct Scratch {
     buffer: Vec<u8>,
-    parser: Option<(EntryParser, CaptureLocations)>,
+    decoded: Vec<u8>,
+    reading: Reading,
+}
+
+/// How the first line of an entry yields its message.
+enum Reading {
+    Text(EntryParser, CaptureLocations),
+    Json(Mapping),
+    /// The whole line is the message.
+    Raw,
+}
+
+impl Scratch {
+    fn new(reader: Reader) -> Scratch {
+        let reading = match (&reader.format.kind, reader.format.entry_parser()) {
+            (Kind::Json, _) => Reading::Json(reader.mapping),
+            (_, Some(parser)) => Reading::Text(parser, parser.locations()),
+            (_, None) => Reading::Raw,
+        };
+        Scratch {
+            buffer: Vec::new(),
+            decoded: Vec::new(),
+            reading,
+        }
+    }
 }
 
 /// The filters at work on entries.
@@ -512,20 +641,18 @@ struct Check<'a> {
 }
 
 impl Check<'_> {
-    fn chunk<B: AsRef<[u8]>>(
+    fn run(
         &self,
-        indexed: &Indexed<B>,
-        chunk: Range<usize>,
-        generation: u64,
+        records: &[Record],
+        bytes: &[u8],
+        run: Range<usize>,
         scratch: &mut Scratch,
-    ) -> Update {
-        let bytes = indexed.bytes.as_ref().as_ref();
-        let mut update = Update {
-            generation,
+    ) -> Evaluated {
+        let mut update = Evaluated {
             entries: Vec::new(),
-            counted: Vec::with_capacity(chunk.len()),
+            counted: Vec::with_capacity(run.len()),
         };
-        for (index, record) in chunk.clone().zip(&indexed.records[chunk]) {
+        for (index, record) in run.clone().zip(&records[run]) {
             let range = record.bytes();
             let entry = bytes
                 .get(range.start as usize..range.end as usize)
@@ -542,9 +669,19 @@ impl Check<'_> {
 
     /// Whether some line of `entry` matches the search, always true without one.
     fn finds(&self, entry: &[u8], scratch: &mut Scratch) -> bool {
-        self.search.is_none_or(|search| {
-            source::lines(entry)
-                .any(|line| search.is_match(strip_ansi_into(line, &mut scratch.buffer)))
+        let Some(search) = self.search else {
+            return true;
+        };
+        let json = matches!(scratch.reading, Reading::Json(_));
+        source::lines(entry).enumerate().any(|(i, line)| {
+            let line = strip_ansi_into(line, &mut scratch.buffer);
+            // Only a JSON entry's first line has strings to decode.
+            let line = if json && i == 0 {
+                decoded_line(line, &mut scratch.decoded)
+            } else {
+                line
+            };
+            search.is_match(line)
         })
     }
 
@@ -570,11 +707,28 @@ impl Check<'_> {
         let Some(text) = &filters.text else {
             return true;
         };
-        let head = match &mut scratch.parser {
-            Some((parser, locations)) => parser.parse_with(first, locations),
-            None => None,
+        let in_first = match &mut scratch.reading {
+            Reading::Text(parser, locations) => {
+                let head = parser.parse_with(first, locations);
+                text.is_match(head.map_or(first, |head| &first[head.message]))
+            }
+            Reading::Json(mapping) => json_matches(text, mapping, first, &mut scratch.decoded),
+            Reading::Raw => text.is_match(first),
         };
-        let message = head.map_or(first, |head| &first[head.message]);
-        text.is_match(message) || lines.any(|line| text.is_match(&format::strip_ansi(line)))
+        in_first || lines.any(|line| text.is_match(&format::strip_ansi(line)))
     }
+}
+
+/// Whether `text` matches the decoded message or exception of the JSON line `first`.
+/// A line without a message field has the whole line as its message.
+fn json_matches(text: &Matcher, mapping: &Mapping, first: &[u8], decoded: &mut Vec<u8>) -> bool {
+    let Some(columns) = mapping.text(first) else {
+        return text.is_match(first);
+    };
+    let mut matches = |field: &Field| text.is_match(field.text(first, decoded));
+    let in_message = match &columns.message {
+        Some(message) => matches(message),
+        None => text.is_match(first),
+    };
+    in_message || columns.exception.as_ref().is_some_and(matches)
 }

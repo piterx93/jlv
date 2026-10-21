@@ -1,0 +1,8 @@
+{"level":30,"time":1773484200000,"pid":4121,"hostname":"web-1","name":"api","msg":"server listening at http://0.0.0.0:3000"}
+{"level":20,"time":1773484200412,"pid":4121,"hostname":"web-1","name":"api","msg":"route table built","routes":18}
+{"level":30,"time":1773484201087,"pid":4121,"hostname":"web-1","name":"api","req":{"method":"GET","url":"/users/7"},"msg":"request completed","responseTime":12}
+{"level":40,"time":1773484202530,"pid":4121,"hostname":"web-1","name":"api","msg":"deprecated header \"X-Legacy\" used"}
+{"level":50,"time":1773484203114,"pid":4121,"hostname":"web-1","name":"api","err":{"type":"TypeError","message":"Cannot read properties of undefined (reading 'id')","stack":"TypeError: Cannot read properties of undefined (reading 'id')\n    at getUser (/app/src/users.js:42:19)\n    at Layer.handle (/app/node_modules/express/lib/router/layer.js:95:5)\n    at next (/app/node_modules/express/lib/router/route.js:149:13)"},"msg":"Cannot read properties of undefined (reading 'id')"}
+{"level":10,"time":1773484203900,"pid":4121,"hostname":"web-1","name":"api","msg":"cache probe"}
+{"level":60,"time":1773484205001,"pid":4121,"hostname":"web-1","name":"api","msg":"out of memory, exiting"}
+{"level":30,"time":1773484206250,"pid":4121,"hostname":"web-1","name":"api","msg":"café menu loaded"}

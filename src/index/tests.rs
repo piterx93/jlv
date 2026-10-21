@@ -10,7 +10,7 @@ use jiff::tz::TimeZone;
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::{BUILT_IN, strip_ansi};
+use crate::format::{BUILT_IN, Mapping, strip_ansi};
 use crate::test_support::{EXAMPLES, built_in, no_thread_or_logger, no_timestamp};
 
 fn zone(name: &str) -> TimeZone {
@@ -22,6 +22,7 @@ fn settings(preset: &'static Format) -> Settings {
         format: preset,
         zone: TimeZone::UTC,
         anchor: Anchor::Named("2026-10-08".parse().unwrap()),
+        mapping: JSON_MAPPING,
     }
 }
 
@@ -101,6 +102,24 @@ const EXCEPTION: &str = "java.lang.IllegalStateException: boom\n";
 const FRAME: &str = "\tat com.example.App.main(App.java:10)\n";
 const WRAPPED: &str = "  and the message goes on\n";
 const DONE: &str = "2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done\n";
+/// The keys of the JSON lines below, as `Mapping::choose` picks them from such a file.
+const JSON_MAPPING: Mapping = Mapping {
+    timestamp: Some("time"),
+    level: Some("level"),
+    logger: Some("logger"),
+    thread: None,
+    message: Some("msg"),
+};
+const JSON_STARTED: &str = concat!(
+    r#"{"time":"2026-10-07T12:00:00.123Z","level":"INFO","logger":"com.example.App","msg":"Started"}"#,
+    "\n"
+);
+/// A pino-style line: the level on the pino scale, the time in epoch milliseconds and
+/// the stack one object deep.
+const JSON_FAILED: &str = concat!(
+    r#"{"level":50,"time":1791374401500,"logger":"com.example.Pay","msg":"Failed","err":{"stack":"Error: boom\n    at main (app.js:1:1)"}}"#,
+    "\n"
+);
 /// An entry start whose timestamp names a day that doesn't exist.
 const ODD: &str = "2026-02-30 12:00:05.000 [main] INFO  com.example.App - Odd\n";
 
@@ -564,6 +583,119 @@ fn one_byte_chunks_give_the_same_entries_in_every_preset() {
     }
 }
 
+// --- JSON lines ---
+
+fn json(lines: &[&str]) -> Vec<Record> {
+    index_in(built_in("json"), &log(lines))
+}
+
+fn levels(records: &[Record]) -> Vec<Option<Level>> {
+    records.iter().map(Record::level).collect()
+}
+
+#[test]
+fn json_line_with_a_null_or_no_level_has_no_level() {
+    let records = json(&[
+        "{\"level\":null,\"msg\":\"a\"}\n",
+        "{\"msg\":\"b\"}\n",
+        JSON_STARTED,
+    ]);
+    assert_eq!(levels(&records), [None, None, Some(Level::Info)]);
+}
+
+#[test]
+fn json_timestamp_in_quotes_is_not_read_as_epoch_time() {
+    let records = json(&[
+        "{\"time\":\"1791374400123\",\"msg\":\"a\"}\n",
+        "{\"time\":1791374400123,\"msg\":\"b\"}\n",
+    ]);
+    assert_eq!(records[0].timestamp(), None);
+    assert_eq!(
+        records[1].timestamp(),
+        Some(instant("2026-10-07T12:00:00.123Z"))
+    );
+}
+
+#[test]
+fn json_exception_field_that_is_empty_or_null_is_no_exception() {
+    let records = json(&[
+        "{\"msg\":\"a\",\"stack_trace\":\"\"}\n",
+        "{\"msg\":\"b\",\"stack_trace\":null}\n",
+        "{\"msg\":\"c\",\"stack_trace\":\"java.lang.IllegalStateException: boom\"}\n",
+    ]);
+    assert_eq!(
+        records
+            .iter()
+            .map(Record::has_exception)
+            .collect::<Vec<_>>(),
+        [false, false, true]
+    );
+}
+
+/// The exception key isn't chosen for the file: each line has the first candidate
+/// that holds a value.
+#[test]
+fn json_exception_is_the_first_candidate_on_its_line_with_a_value() {
+    let records = json(&[
+        "{\"msg\":\"a\",\"stack_trace\":\"boom\"}\n",
+        "{\"msg\":\"b\",\"stack_trace\":\"\",\"exception\":\"boom\"}\n",
+    ]);
+    assert!(records.iter().all(Record::has_exception));
+}
+
+#[test]
+fn json_logger_after_a_byte_order_mark_or_leading_blanks_is_found_in_the_line() {
+    let lines = [
+        format!("\u{feff}{JSON_STARTED}"),
+        format!(" \t{JSON_STARTED}"),
+    ];
+    let records = json(&[&lines[0], &lines[1]]);
+    for (line, record) in lines.iter().zip(&records) {
+        assert_eq!(
+            &line[record.class().unwrap()],
+            "com.example.App",
+            "{line:?}"
+        );
+    }
+}
+
+/// In JSON lines the exception field decides: a continuation line that looks like a
+/// stack frame doesn't give the entry an exception.
+#[test]
+fn json_entry_continued_by_stack_trace_lines_has_no_exception() {
+    let records = json(&[JSON_STARTED, EXCEPTION, FRAME, JSON_FAILED]);
+    assert_eq!(
+        records
+            .iter()
+            .map(Record::has_exception)
+            .collect::<Vec<_>>(),
+        [false, true]
+    );
+}
+
+#[test]
+fn json_logger_value_reaching_past_64_kib_is_not_kept() {
+    let long = format!(
+        "{{\"level\":\"WARN\",\"logger\":\"{}\",\"msg\":\"m\"}}\n",
+        "a".repeat(70_000)
+    );
+    let records = json(&[&long, JSON_STARTED]);
+    assert_eq!(records[0].class(), None);
+    assert_eq!(records[0].level(), Some(Level::Warn));
+    assert!(records[1].class().is_some());
+}
+
+#[test]
+fn line_that_is_not_a_json_object_continues_the_entry_before() {
+    let plain = "plain text\n";
+    let records = json(&[JSON_STARTED, plain, JSON_FAILED]);
+    assert_eq!(
+        spans(&records),
+        laid_out(0, &[&[JSON_STARTED, plain], &[JSON_FAILED]])
+    );
+    assert_eq!(levels(&records), [Some(Level::Info), Some(Level::Error)]);
+}
+
 // --- files larger than 4 GiB ---
 
 const FIVE_GIB: u64 = 5 << 30;
@@ -607,6 +739,8 @@ fn any_bytes() -> impl Strategy<Value = Vec<u8>> {
         1 => Just(STARTED.as_bytes().to_vec()),
         1 => Just(example(built_in("logback-basic")).as_bytes().to_vec()),
         1 => Just(example(built_in("wildfly-console")).as_bytes().to_vec()),
+        1 => Just(JSON_STARTED.as_bytes().to_vec()),
+        1 => Just(JSON_FAILED.as_bytes().to_vec()),
     ];
     prop::collection::vec(piece, 0..40).prop_map(|pieces| pieces.concat())
 }
@@ -792,6 +926,8 @@ fn growing_log() -> impl Strategy<Value = Vec<u8>> {
         1 => Just(WRAPPED.trim_end().to_owned()),
         1 => Just(String::new()),
         1 => Just(ODD.trim_end().to_owned()),
+        1 => Just(JSON_STARTED.trim_end().to_owned()),
+        1 => Just(JSON_FAILED.trim_end().to_owned()),
     ];
     let ending = prop_oneof![Just("\n"), Just("\r\n")];
     (prop::collection::vec((line, ending), 0..30), any::<bool>()).prop_map(|(lines, terminated)| {
@@ -825,7 +961,11 @@ proptest! {
     #[test]
     fn appending_in_any_pieces_gives_the_index_of_the_whole_file(
         (bytes, cuts) in growing_log_and_cuts(),
-        preset in prop::sample::select(vec![built_in("logback"), built_in("logback-basic")]),
+        preset in prop::sample::select(vec![
+            built_in("logback"),
+            built_in("logback-basic"),
+            built_in("json"),
+        ]),
     ) {
         let settings = settings(preset);
         prop_assert_eq!(grown(&bytes, &cuts, &settings), index(&bytes, &settings));

@@ -11,7 +11,8 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use proptest::prelude::*;
 use vilog::format::{
-    Anchor, BUILT_IN, Entry, EntryGrouper, Format, Level, resolve_timestamps, strip_ansi,
+    Anchor, BUILT_IN, Entry, EntryGrouper, Format, Kind, Level, Mapping, resolve_timestamps,
+    strip_ansi,
 };
 use vilog::index::{Chunk, Indexer, Record, Settings, tail};
 
@@ -149,6 +150,7 @@ fn fixture_settings(preset: &'static Format) -> Settings {
         format: preset,
         zone: warsaw(),
         anchor: Anchor::Named("2026-10-08".parse().unwrap()),
+        mapping: Mapping::default(),
     }
 }
 
@@ -312,9 +314,35 @@ fn log_line() -> impl Strategy<Value = Vec<u8>> {
     .prop_map(|line| line.as_bytes().to_vec());
     prop_oneof![
         4 => start,
+        2 => json_start(),
         4 => continuation,
         1 => prop::collection::vec(any::<u8>(), 0..12),
     ]
+}
+
+/// The keys of the lines [`json_start`] writes.
+const JSON_MAPPING: Mapping = Mapping {
+    timestamp: Some("time"),
+    level: Some("level"),
+    logger: Some("logger"),
+    thread: None,
+    message: Some("msg"),
+};
+
+/// A JSON entry start at `hour:minute:second`, its level a name or a number on the
+/// pino scale, the latter with a stack one object deep.
+fn json_start() -> impl Strategy<Value = Vec<u8>> {
+    (0..26u8, 0..60u8, 0..60u8, any::<bool>()).prop_map(|(hour, minute, second, pino)| {
+        let time = format!("2026-10-07T{hour:02}:{minute:02}:{second:02}.123Z");
+        let line = if pino {
+            format!(
+                r#"{{"level":50,"time":"{time}","logger":"api","msg":"m","err":{{"stack":"Error: x\n    at f (a.js:1:1)"}}}}"#
+            )
+        } else {
+            format!(r#"{{"time":"{time}","level":"INFO","logger":"com.example.App","msg":"m"}}"#)
+        };
+        line.into_bytes()
+    })
 }
 
 /// A log of up to 40 lines ending in `\n` or `\r\n`, the last maybe in neither.
@@ -360,6 +388,7 @@ fn any_settings() -> impl Strategy<Value = Settings> {
         format: preset,
         zone: TimeZone::get(zone).unwrap(),
         anchor,
+        mapping: JSON_MAPPING,
     })
 }
 
@@ -426,6 +455,8 @@ proptest! {
         bytes in any_log(),
         settings in any_settings(),
     ) {
+        // `line_by_line` reads levels as text columns; JSON levels may be pino numbers.
+        prop_assume!(!matches!(settings.format.kind, Kind::Json));
         prop_assert_eq!(indexed(&index(&bytes, &settings)), line_by_line(&bytes, &settings));
     }
 }

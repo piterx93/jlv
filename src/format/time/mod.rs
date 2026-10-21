@@ -58,13 +58,6 @@ pub(crate) fn read(span: &[u8], zone: &TimeZone) -> Option<LogTime> {
 /// fraction of 1 to 9 digits after a `.`; 13 digits are milliseconds, 16
 /// microseconds and 19 nanoseconds, all without a fraction. `None` for any other
 /// count of digits and for anything that isn't such a number (a sign, an exponent).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the JSON and logfmt readers of the next milestone call it"
-    )
-)]
 pub(crate) fn epoch(number: &[u8]) -> Option<Timestamp> {
     let integer_len = number.iter().take_while(|b| b.is_ascii_digit()).count();
     let (integer, rest) = number.split_at(integer_len);

@@ -114,4 +114,10 @@ exclude_re = [
     # A handler that does nothing returns to an access that faults again, forever; the
     # test hangs until the timeout.
     'src/source/guard\.rs:\d+:\d+: replace on_sigbus with \(\)$',
+    # The size of a filter batch only changes how many entries each update carries; the
+    # results after every update are the same.
+    'src/filter/mod\.rs:\d+:\d+: replace \* with \+ in Worker<B>::run$',
+    # The unit is shifted left 4 bits before each hex digit, which takes at most 4, so
+    # OR and XOR never see two set bits in the same place.
+    'src/format/json/mod\.rs:\d+:\d+: replace \| with \^ in hex_unit$',
 ]

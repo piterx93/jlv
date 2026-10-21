@@ -7,7 +7,7 @@ use jiff::tz::TimeZone;
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::{Anchor, Format, Level};
+use crate::format::{Anchor, Format, Level, Mapping};
 use crate::index::{self, Chunk, Settings};
 use crate::matcher::{self, Matcher};
 use crate::test_support::built_in;
@@ -33,6 +33,7 @@ fn settings(preset: &'static Format) -> Settings {
         format: preset,
         anchor: Anchor::Modified(zone.to_datetime(mtime)),
         zone,
+        mapping: Mapping::default(),
     }
 }
 
@@ -64,11 +65,16 @@ fn finish(engine: &mut Engine, total: usize, mut check: impl FnMut(&Filtered)) -
     }
 }
 
+/// How the engine reads `format`, with no JSON keys.
+fn reader(format: &'static Format) -> Reader {
+    Reader::new(format, Mapping::default())
+}
+
 /// What `filters` find in `log`, once all of it is evaluated.
 fn filter(preset: &'static Format, log: &str, filters: Filters) -> Filtered {
     let indexed = indexed(preset, log.as_bytes());
     let total = indexed.read().unwrap().records.len();
-    let mut engine = Engine::spawn(indexed, preset, filters, Options { chunk: 2 });
+    let mut engine = Engine::spawn(indexed, reader(preset), filters, Options { chunk: 2 });
     finish(&mut engine, total, |_| {})
 }
 
@@ -225,7 +231,7 @@ fn continuation_lines_appended_to_the_last_entry_are_matched() {
     let indexed = indexed(built_in("logback"), log.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&indexed),
-        built_in("logback"),
+        reader(built_in("logback")),
         filters,
         Options { chunk: 1 },
     );
@@ -249,7 +255,7 @@ fn results_of_entries_read_again_are_never_published_stale() {
     let shared = indexed(built_in("logback"), before.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&shared),
-        built_in("logback"),
+        reader(built_in("logback")),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -289,7 +295,7 @@ fn new_filters_from_an_entry_on_keep_the_results_before_it() {
     .concat();
     let mut engine = Engine::spawn(
         indexed(built_in("logback"), log.as_bytes()),
-        built_in("logback"),
+        reader(built_in("logback")),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -417,23 +423,39 @@ impl Model {
         class_passes && time_passes && text_passes
     }
 
-    fn naive(&self, entries: &[Entry]) -> Filtered {
-        let mut filtered = Filtered {
-            evaluated: entries.len(),
-            ..Filtered::default()
-        };
-        for (i, entry) in entries.iter().enumerate() {
-            if !self.passes_others(entry) {
-                continue;
-            }
-            if let Some(level) = entry.head.as_ref().and_then(|head| head.level) {
-                filtered.counts[level as usize] += 1;
-            }
-            if self.passes_level(entry) {
-                filtered.entries.push(i as u32);
+    /// What a naive filter finds in the entries `run`, with a search for `search`
+    /// if given.
+    fn naive_run(
+        &self,
+        entries: &[Entry],
+        run: std::ops::Range<usize>,
+        search: Option<&str>,
+    ) -> Evaluated {
+        let mut found = Evaluated::default();
+        for (i, entry) in run.clone().zip(&entries[run]) {
+            let passes = self.passes_others(entry);
+            let level = entry.head.as_ref().and_then(|head| head.level);
+            found.counted.push(level.filter(|_| passes));
+            let searched =
+                search.is_none_or(|word| render(std::slice::from_ref(entry)).contains(word));
+            if passes && self.passes_level(entry) && searched {
+                found.entries.push(i as u32);
             }
         }
-        filtered
+        found
+    }
+
+    fn naive(&self, entries: &[Entry]) -> Filtered {
+        let run = self.naive_run(entries, 0..entries.len(), None);
+        let mut counts = [0; 6];
+        for level in run.counted.into_iter().flatten() {
+            counts[level as usize] += 1;
+        }
+        Filtered {
+            evaluated: entries.len(),
+            entries: run.entries,
+            counts,
+        }
     }
 }
 
@@ -530,7 +552,7 @@ proptest! {
         let indexed = indexed(built_in("logback"), render(&entries).as_bytes());
         let mut engine = Engine::spawn(
             indexed,
-            built_in("logback"),
+            reader(built_in("logback")),
             first.filters(),
             Options { chunk },
         );
@@ -558,7 +580,7 @@ proptest! {
         let indexed = indexed(built_in("logback"), &log.as_bytes()[..cut]);
         let mut engine = Engine::spawn(
             Arc::clone(&indexed),
-            built_in("logback"),
+            reader(built_in("logback")),
             model.filters(),
             Options { chunk },
         );
@@ -570,6 +592,110 @@ proptest! {
         let found = finish(&mut engine, entries.len(), |_| {});
         prop_assert_eq!(found, model.naive(&entries));
     }
+}
+
+/// What [`evaluate`] finds in the entries `run` of the log `entries` make, on
+/// `threads` threads.
+fn evaluate_run(
+    entries: &[Entry],
+    model: &Model,
+    search: Option<&str>,
+    run: std::ops::Range<usize>,
+    threads: usize,
+) -> Evaluated {
+    let indexed = indexed(built_in("logback"), render(entries).as_bytes());
+    let search = search.map(|word| Matcher::new(word, matcher::Options::default()).unwrap());
+    evaluate(
+        &indexed.read().unwrap(),
+        reader(built_in("logback")),
+        &model.filters(),
+        search.as_ref(),
+        run,
+        threads,
+    )
+}
+
+proptest! {
+    #[test]
+    fn evaluating_a_run_on_any_number_of_threads_matches_a_naive_filter(
+        entries in entries(),
+        model in model(),
+        search in prop::option::of(word()),
+        ends in (any::<prop::sample::Index>(), any::<prop::sample::Index>()),
+        threads in 0..6usize,
+    ) {
+        let (a, b) = (ends.0.index(entries.len() + 1), ends.1.index(entries.len() + 1));
+        let run = a.min(b)..a.max(b);
+        prop_assert_eq!(
+            evaluate_run(&entries, &model, search, run.clone(), threads),
+            model.naive_run(&entries, run, search)
+        );
+    }
+}
+
+/// Long enough that each of the threads has thousands of entries to evaluate.
+#[test]
+fn a_long_run_split_across_threads_matches_a_naive_filter() {
+    let entries: Vec<Entry> = (0..20_000)
+        .map(|i| Entry {
+            head: Some(Head {
+                second: (i % 6) as u8,
+                level: LEVELS.get(i % 7).copied(),
+                class: CLASSES[i % 3],
+                message: WORDS[i / 3 % 4],
+            }),
+            lines: WORDS[..i % 5 % 3].to_vec(),
+        })
+        .collect();
+    let model = Model {
+        levels: [true, false, true, true, true, true],
+        include: vec!["myco"],
+        exclude: vec!["Client"],
+        time: Some((1, None)),
+        text: Some("beta"),
+    };
+    let run = 3..entries.len() - 2;
+    let expected = model.naive_run(&entries, run.clone(), Some("alpha"));
+    // The pattern of the entries repeats every 420, so matches are all over the run.
+    assert!(expected.entries.len() > 900, "{}", expected.entries.len());
+    assert_eq!(
+        evaluate_run(&entries, &model, Some("alpha"), run, 4),
+        expected
+    );
+}
+
+#[test]
+fn only_a_text_filter_a_class_filter_or_a_search_read_the_entry_bytes() {
+    let job = |filters: Filters, search: Option<&str>| Job {
+        generation: 0,
+        filters: Arc::new(filters),
+        search: search.map(|word| Arc::new(text(word).unwrap())),
+        from: 0,
+    };
+    let index_only = Filters {
+        levels: Levels::only(&[Level::Error]),
+        time: Some(TimeRange {
+            start: at_second(0),
+            end: None,
+        }),
+        ..Filters::default()
+    };
+    let message = Filters {
+        text: text("boom"),
+        ..Filters::default()
+    };
+    let class = Filters {
+        classes: classes(&["com.myco.*"]),
+        ..Filters::default()
+    };
+    let reads = [
+        job(index_only.clone(), None),
+        job(index_only, Some("boom")),
+        job(message, None),
+        job(class, None),
+    ]
+    .map(|job| job.reads_entries());
+    assert_eq!(reads, [false, true, true, true]);
 }
 
 // --- class rules ---
@@ -837,4 +963,28 @@ proptest! {
             classes.passes(class.as_deref());
         }
     }
+}
+
+/// Only the JSON format searches decoded (PRD §9.2): read in another, a line that is
+/// a JSON object is searched as written, so `"hi"` doesn't find `\"hi\"`.
+#[test]
+fn search_outside_the_json_format_matches_escapes_as_written() {
+    let log = r#"{"msg":"say \"hi\""}"#.to_owned() + "\n";
+    let raw = built_in("raw");
+    let indexed = indexed(raw, log.as_bytes());
+    let found = |word: &str| {
+        let search = Matcher::new(word, matcher::Options::default()).unwrap();
+        let index = indexed.read().unwrap();
+        evaluate(
+            &index,
+            reader(raw),
+            &Filters::default(),
+            Some(&search),
+            0..1,
+            1,
+        )
+        .entries
+    };
+    assert_eq!(found(r#""hi""#), Vec::<u32>::new());
+    assert_eq!(found(r#"\"hi\""#), [0]);
 }

@@ -3373,3 +3373,159 @@ fn key_hints_show_remapped_keys() {
         "j/k Move  PgUp/PgDn Page  u/Ctrl-d Half page  g/G Top/Bottom  Q Quit"
     );
 }
+
+// --- JSON lines ---
+
+/// The rows of the JSON lines fixture `name` with its fifth entry selected, and that
+/// entry in the details pane, on a screen tall enough to show all of it.
+fn fifth_json_entry_in_details(name: &str) -> String {
+    let mut app = app_in(built_in("json"), &test_support::json_fixture(name));
+    let mut terminal = drawn(&mut app, 80, 42, Theme::Plain);
+    let keys = [char_key('j'); 4].into_iter().chain([key(KeyCode::Enter)]);
+    for key in keys {
+        app.apply(action(key).unwrap());
+        draw(&mut terminal, &mut app, Theme::Plain);
+    }
+    let lines: Vec<String> = (1..=8).chain(27..=40).map(|y| row(&terminal, y)).collect();
+    lines.join("\n")
+}
+
+/// pino writes levels and times as numbers, and an error's stack one object deep in
+/// `err.stack`: the rest of `err` follows the other fields as dotted keys.
+#[test]
+fn pino_entry_shows_its_columns_in_the_table_and_its_stack_and_fields_in_details() {
+    assert_snapshot!(fifth_json_entry_in_details("pino.log"), @r#"
+     10:30:00.000 INFO  api                      server listening at http://0.0.0.0:
+     10:30:00.412 DEBUG api                      route table built
+     10:30:01.087 INFO  api                      request completed
+     10:30:02.530 WARN  api                      deprecated header "X-Legacy" used
+    ▶10:30:03.114 ERROR api                      Cannot read properties of undefined
+     10:30:03.900 TRACE api                      cache probe
+     10:30:05.001 FATAL api                      out of memory, exiting
+     10:30:06.250 INFO  api                      café menu loaded
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ api                                                                          │
+    │ Cannot read properties of undefined (reading 'id')                           │
+    │ TypeError: Cannot read properties of undefined (reading 'id')                │
+    │     at getUser (/app/src/users.js:42:19)                                     │
+    │     at Layer.handle (/app/node_modules/express/lib/router/layer.js:95:5)     │
+    │     at next (/app/node_modules/express/lib/router/route.js:149:13)           │
+    │ level: 50                                                                    │
+    │ time: 1773484203114                                                          │
+    │ pid: 4121                                                                    │
+    │ hostname: web-1                                                              │
+    │ err.type: TypeError                                                          │
+    │ err.message: Cannot read properties of undefined (reading 'id')              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    "#);
+}
+
+/// The stack trace ends with a line break, which makes no empty line.
+#[test]
+fn logstash_entry_shows_its_columns_in_the_table_and_its_stack_and_fields_in_details() {
+    assert_snapshot!(fifth_json_entry_in_details("logstash-logback.log"), @r#"
+     08:12:01.104 INFO  c.a.o.OrderApplication   Started OrderApplication in 3.2 sec
+     08:12:01.310 DEBUG c.z.h.HikariDataSource   HikariPool-1 - Start completed.
+     08:12:02.020 INFO  c.a.orders.OrderService  Order 42 created
+     08:12:03.481 WARN  c.acme.orders.HttpClient Slow upstream, retry 2
+    ▶08:12:04.775 ERROR c.a.o.PaymentGateway     Payment failed for "Alice"
+     08:12:05.002 INFO  c.a.orders.OrderService  Zamówienie 43 przyjęte
+     08:12:06.450 TRACE com.acme.orders.Cache    Cache probe
+     08:12:07.900 INFO  c.a.o.OrderApplication   Shutting down
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ com.acme.orders.PaymentGateway (http-nio-8080-exec-1)                        │
+    │ Payment failed for "Alice"                                                   │
+    │ java.lang.IllegalStateException: Card declined                               │
+    │     at com.acme.orders.PaymentGateway.charge(PaymentGateway.java:31)         │
+    │     at com.acme.orders.OrderService.create(OrderService.java:97)             │
+    │     at java.base/java.lang.Thread.run(Thread.java:840)                       │
+    │ @timestamp: 2026-03-14T09:12:04.775+01:00                                    │
+    │ @version: 1                                                                  │
+    │ level: ERROR                                                                 │
+    │ level_value: 40000                                                           │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    "#);
+}
+
+/// A JSON log of one INFO entry of the logger `api` per message in `messages`, each
+/// written into the line as it is, a second apart from 09:12:01 UTC.
+fn json_log(messages: &[&str]) -> App {
+    let log: String = messages
+        .iter()
+        .zip(1..)
+        .map(|(message, second)| {
+            format!(
+                r#"{{"time":"2026-03-14T09:12:{second:02}Z","level":"INFO","name":"api","msg":{message}}}"#
+            ) + "\n"
+        })
+        .collect();
+    app_in(built_in("json"), log.as_bytes())
+}
+
+/// A message with escapes and a line break, as JSON writes it.
+const TWO_LINE_MESSAGE: &str = r#""café \"quoted\"\nsecond line""#;
+
+#[test]
+fn json_row_shows_the_first_line_of_the_decoded_message() {
+    let mut app = json_log(&[TWO_LINE_MESSAGE]);
+    assert_eq!(
+        lines_after(&mut app, &[], 1..=1),
+        r#"▶09:12:01.000 INFO  api                      café "quoted""#
+    );
+}
+
+/// The logger is already above the message, so it isn't among the fields.
+#[test]
+fn json_details_show_every_line_of_the_decoded_message_then_the_other_fields() {
+    let mut app = json_log(&[TWO_LINE_MESSAGE]);
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r#"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ api                                                                          │
+    │ café "quoted"                                                                │
+    │ second line                                                                  │
+    │ time: 2026-03-14T09:12:01Z                                                   │
+    │ level: INFO                                                                  │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    "#);
+}
+
+/// The message keeps its line when empty, as in a text format, so the fields don't
+/// read as the message.
+#[test]
+fn json_details_show_an_empty_message_as_an_empty_line() {
+    let mut app = json_log(&[r#""""#]);
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ api                                                                          │
+    │                                                                              │
+    │ time: 2026-03-14T09:12:01Z                                                   │
+    │ level: INFO                                                                  │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn json_message_that_is_not_a_string_is_shown_as_written() {
+    let mut app = json_log(&["42", r#"{"code":7,"text":"a\"b"}"#]);
+    assert_snapshot!(lines_after(&mut app, &[], 1..=2), @r#"
+    ▶09:12:01.000 INFO  api                      42
+     09:12:02.000 INFO  api                      {"code":7,"text":"a\"b"}
+    "#);
+}
+
+/// PRD §9.2: `"quoted"` finds `\"quoted\"` in the file.
+#[test]
+fn search_in_a_json_log_matches_and_highlights_the_decoded_text() {
+    let mut app = json_log(&[r#""user quoted twice""#, r#""user said \"quoted\" here""#]);
+    let terminal = searched_terminal(&mut app, r#""quoted""#, &[]);
+    assert_snapshot!(with_highlights(&terminal, 1..=2), @r#"
+     09:12:01.000 INFO  api                      user quoted twice
+    ▶09:12:02.000 INFO  api                      user said "quoted" here
+                                                           ^^^^^^^^
+    "#);
+}

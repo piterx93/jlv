@@ -24,12 +24,12 @@ use crate::clipboard::{Clipboard, CopyError, entry_text};
 use crate::config::{Colors, Config, Ui};
 use crate::export;
 use crate::filter::{
-    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
-    TimeSpec,
+    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Reader, Rule, TimeFilter,
+    TimeRange, TimeSpec,
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Liveness, Options, Watcher};
-use crate::format::{Anchor, BUILT_IN, Column, Format, Level, detect, strip_ansi};
+use crate::format::{Anchor, BUILT_IN, Column, Format, Level, Mapping, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::keymap::{Keymap, normalized};
@@ -577,8 +577,9 @@ const TAIL_WINDOW: usize = 65_536;
 /// the viewer gives up on the tail and waits for the whole index.
 const TAIL_LIMIT: usize = 4_194_304;
 
-/// How many entries the filter engine evaluates per chunk. It holds the index for a
-/// chunk at a time, and taking in what the followed file appends has to wait for it.
+/// How many entries the filter engine evaluates per chunk, and a chunk per
+/// core at once. It holds the index for a batch at a time, and taking in what the
+/// followed file appends has to wait for it.
 const FILTER_CHUNK: usize = 1024;
 
 /// How long the viewer waits for the filter engine to evaluate the few entries that
@@ -646,14 +647,14 @@ struct Filter {
 }
 
 impl Filter {
-    /// The filter of `index`, read in `format`, whose matches fold as `all`, the
+    /// The filter of `index`, read as `reader` says, whose matches fold as `all`, the
     /// index's fold state, folds them.
-    fn spawn(index: &SharedIndex, format: &'static Format, filters: Filters, all: &Folds) -> Self {
+    fn spawn(index: &SharedIndex, reader: Reader, filters: Filters, all: &Folds) -> Self {
         let options = filter::Options {
             chunk: FILTER_CHUNK,
         };
         Filter {
-            engine: Engine::spawn(Arc::clone(index), format, filters, options),
+            engine: Engine::spawn(Arc::clone(index), reader, filters, options),
             // In the index's mode, only the matches it excepts are exceptions here.
             folds: all.empty_like(),
         }
@@ -1042,6 +1043,7 @@ impl App {
                 .unwrap_or_else(|| Format::by_id("raw").expect("the built-in formats include raw")),
             zone,
             anchor,
+            mapping: Mapping::choose(source::lines(source.bytes())),
         };
         let progress = Progress {
             indexed: 0,
@@ -2371,7 +2373,7 @@ impl App {
             };
             Engine::spawn_search(
                 Arc::clone(&self.index),
-                self.settings.format,
+                self.reader(),
                 self.filters.clone(),
                 search.matcher.clone(),
                 options,
@@ -2592,12 +2594,16 @@ impl App {
         })
     }
 
+    fn reader(&self) -> Reader {
+        Reader::new(self.settings.format, self.settings.mapping)
+    }
+
     /// Starts evaluating the filters over the index, in place of any engine at work.
     fn start_filter(&mut self) {
         self.cancel_jump();
         let filters = self.filters.clone();
-        let format = self.settings.format;
-        self.filter = Some(Filter::spawn(&self.index, format, filters, &self.folds));
+        let reader = self.reader();
+        self.filter = Some(Filter::spawn(&self.index, reader, filters, &self.folds));
     }
 
     /// Indexes the source from the start, the rows opening as `opening` says.

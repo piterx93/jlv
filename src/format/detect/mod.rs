@@ -23,15 +23,7 @@ const MAX_LINES_READ: usize = 2000;
 /// least 60%, ties going to the format that comes first in the table. Otherwise, and
 /// when no line remains, it is `None`.
 pub fn detect<'a>(lines: impl IntoIterator<Item = &'a [u8]>) -> Option<&'static Format> {
-    // `take` stops pulling once it has enough, so the rest of the file is never read.
-    let scored: Vec<Cow<[u8]>> = lines
-        .into_iter()
-        .take(MAX_LINES_READ)
-        .map(strip_ansi)
-        .filter(|line| !is_blank(line))
-        .take(SAMPLE_LINES)
-        .filter(|line| !is_continuation(line))
-        .collect();
+    let scored = sample(lines);
     BUILT_IN
         .iter()
         .filter_map(|format| Some((format, format.entry_parser()?)))
@@ -46,6 +38,19 @@ pub fn detect<'a>(lines: impl IntoIterator<Item = &'a [u8]>) -> Option<&'static 
         // 60% in integers, so that exactly 60% isn't lost to rounding.
         .filter(|&(_, entries)| !scored.is_empty() && entries * 5 >= scored.len() * 3)
         .map(|(format, _)| format)
+}
+
+/// The lines [`detect`] scores; JSON key mapping reads the same ones.
+pub(super) fn sample<'a>(lines: impl IntoIterator<Item = &'a [u8]>) -> Vec<Cow<'a, [u8]>> {
+    // `take` stops pulling once it has enough, so the rest of the file is never read.
+    lines
+        .into_iter()
+        .take(MAX_LINES_READ)
+        .map(strip_ansi)
+        .filter(|line| !is_blank(line))
+        .take(SAMPLE_LINES)
+        .filter(|line| !is_continuation(line))
+        .collect()
 }
 
 fn is_blank(line: &[u8]) -> bool {

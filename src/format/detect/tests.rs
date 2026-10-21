@@ -233,6 +233,29 @@ fn colour_codes_are_stripped_before_matching() {
     assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
+// --- JSON lines ---
+
+const JSON: &str = r#"{"time":"2026-10-07T12:00:00.123Z","level":"INFO","msg":"Order 42 created"}"#;
+
+#[test]
+fn json_lines_after_a_banner_are_recognized() {
+    let banner = ["Starting orders v1.4.2", "Listening on 0.0.0.0:8080"];
+    let lines = [repeat(&banner, 2), repeat(&[JSON], 8)].concat();
+    assert_eq!(detect_lines(&lines), Some(built_in("json")));
+}
+
+#[test]
+fn json_lines_without_a_message_key_are_recognized() {
+    let lines = repeat(&[r#"{"status":200,"path":"/orders"}"#], 5);
+    assert_eq!(detect_lines(&lines), Some(built_in("json")));
+}
+
+#[test]
+fn json_line_after_a_byte_order_mark_is_recognized() {
+    let line = format!("\u{feff}{JSON}");
+    assert_eq!(detect_lines(&[line]), Some(built_in("json")));
+}
+
 // --- properties ---
 
 /// What a line is, by construction.

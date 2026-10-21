@@ -37,6 +37,8 @@ unicode-width = "0.2"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 insta = "1.49"
 proptest = "1"
+# The reference the JSON scanner is checked against; vilog itself never parses JSON whole.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 lto = "thin"
@@ -68,4 +70,8 @@ harness = false
 
 [[bench]]
 name = "nfr"
+harness = false
+
+[[bench]]
+name = "json"
 harness = false
