@@ -30,9 +30,9 @@ pub struct Args {
     #[arg(short, long, value_name = "LEVELS", value_parser = parse_levels)]
     pub level: Option<Levels>,
 
-    /// Initial class filter, e.g. 'com.myco.*,!org.hibernate'
-    #[arg(short, long, value_name = "RULES", value_parser = parse_classes)]
-    pub class: Option<Classes>,
+    /// Initial logger filter, e.g. 'com.myco.*,!org.hibernate'
+    #[arg(short = 'c', long = "logger", alias = "class", value_name = "RULES", value_parser = parse_classes)]
+    pub logger: Option<Classes>,
 
     /// Initial time filter, e.g. 10m or 12:00-12:30
     #[arg(short, long, value_name = "SPEC", value_parser = TimeSpec::parse)]

@@ -30,7 +30,7 @@ fn text(line: &[u8], span: Range<usize>) -> String {
 }
 
 /// What `preset` makes of the fixture `name`. A line that starts an entry shows as
-/// `timestamp | level | thread | class | message`, a run of N lines that don't as
+/// `timestamp | level | thread | logger | message`, a run of N lines that don't as
 /// `+N`. Tabs show as `\t`.
 fn outline(preset: &'static Format, name: &str) -> String {
     let mut out = Vec::new();
@@ -44,8 +44,8 @@ fn outline(preset: &'static Format, name: &str) -> String {
             out.push(format!("+{run}"));
             run = 0;
         }
-        let columns = [head.timestamp, head.level, head.thread, head.class]
-            .map(|span| text(&line, span))
+        let columns = [head.timestamp, head.level, head.thread, head.logger]
+            .map(|span| span.map_or_else(String::new, |span| text(&line, span)))
             .join(" | ");
         let message = text(&line, head.message);
         if message.is_empty() {

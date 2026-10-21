@@ -2,9 +2,9 @@
 
 vilog is a terminal log viewer for application logs. It recognises the usual
 Logback, Log4j2, Spring Boot and WildFly layouts of Java services, splits each
-entry into timestamp, level, class and message columns, folds stack traces, and
+entry into timestamp, level, logger and message columns, folds stack traces, and
 follows the file as it grows, through rotation and truncation. You can filter by
-level, class, time and text, search, bookmark, copy an entry and export what is
+level, logger, time and text, search, bookmark, copy an entry and export what is
 left, all in the terminal and over SSH. It opens multi-gigabyte files without
 reading them into memory.
 
@@ -47,7 +47,7 @@ Options:
                         logback-basic, spring3, spring2, wildfly, wildfly-console, raw]
       --no-follow       Open at the top, don't follow
   -l, --level <LEVELS>  Initial level filter, e.g. WARN,ERROR
-  -c, --class <RULES>   Initial class filter, e.g. 'com.myco.*,!org.hibernate'
+  -c, --logger <RULES>  Initial logger filter, e.g. 'com.myco.*,!org.hibernate'
   -s, --since <SPEC>    Initial time filter, e.g. 10m or 12:00-12:30
       --no-mouse        Disable mouse
       --config <PATH>   Config file path
@@ -58,7 +58,7 @@ Options:
 ```sh
 vilog /opt/wildfly/standalone/log/server.log
 vilog --level WARN,ERROR --since 10m server.log
-vilog --class 'com.mycompany.*' --no-follow app.log
+vilog --logger 'com.mycompany.*' --no-follow app.log
 vilog server.log.2026-10-14.gz
 ```
 
@@ -86,9 +86,9 @@ with a quick key; `x` clears them all.
 - **Level**: `1`–`6` toggle TRACE, DEBUG, INFO, WARN, ERROR and FATAL; `F2` opens
   a panel. `--level` takes a comma-separated list of level names or aliases such
   as `WRN`, `SEVERE` or `CRIT`.
-- **Class**: `com.myco.*` keeps a package and everything below it, `OrderService`
-  keeps classes containing the text, `!` in front excludes. Includes are or-ed,
-  and an exclude always wins. `c` keeps only the selected entry's class, `C` hides
+- **Logger**: `com.myco.*` keeps a package and everything below it, `OrderService`
+  keeps loggers containing the text, `!` in front excludes. Includes are or-ed,
+  and an exclude always wins. `c` keeps only the selected entry's logger, `C` hides
   it; `F6` opens the rules, one per line.
 - **Time**: `10m`, `2h`, `1d` are the last minutes, hours or days; `12:00-12:30`,
   `12:00:15-12:00:45` and `12:00-` are ranges on the date of the last entry;
@@ -130,7 +130,7 @@ exception, `Enter` for the details.
 
 ![Filtering a rotated .gz to 14:00-14:15 and jumping between exceptions](docs/demos/s3-incident-gz.gif)
 
-**Too much noise.** In the class panel, `!org.hibernate` and `!org.jboss` hide
+**Too much noise.** In the logger panel, `!org.hibernate` and `!org.jboss` hide
 those packages; `com.mycompany.*` then keeps only your own code. Or
 `vilog -c '!org.hibernate,!org.jboss' server.log`.
 
@@ -196,8 +196,8 @@ action's name in the `[keys]` section of the config.
 | `F2` | Level filter | `level_panel` |
 | `F4` `&` | Text filter | `text_panel` |
 | `F5` | Time filter | `time_panel` |
-| `F6` | Class filter | `class_panel` |
-| `c` / `C` | Only this class / hide this class | `only_class`, `hide_class` |
+| `F6` | Logger filter | `class_panel` |
+| `c` / `C` | Only this logger / hide this logger | `only_class`, `hide_class` |
 | `x` | Clear all filters | `clear_filters` |
 | `Space` | Fold or unfold entry | `toggle_fold` |
 | `z` / `Z` | Fold all / unfold all | `fold_all`, `unfold_all` |
@@ -248,7 +248,7 @@ line_number = "darkgray"
 poll_interval_ms = 250
 
 [filters]
-# class rules to hide from the start, without the leading !
+# logger rules to hide from the start, without the leading !
 default_class_excludes = []   # e.g. ["org.hibernate.SQL", "org.jboss.*"]
 
 [keys]
@@ -260,7 +260,7 @@ A colour is a name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`
 an index into the 256-colour palette (`"208"`). The table form takes any of `fg`,
 `bg` and `bold`.
 
-`--class` replaces `default_class_excludes` rather than adding to them.
+`--logger` (`--class` still works as its old name) replaces `default_class_excludes` rather than adding to them.
 
 An unknown key, a wrong type or a value vilog can't use stops vilog with a message
 that names the file and points at the line.

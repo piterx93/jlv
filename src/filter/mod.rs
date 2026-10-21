@@ -130,7 +130,7 @@ impl Classes {
                 Some(written) => (&mut classes.exclude, written.trim_start()),
                 None => (&mut classes.include, item),
             };
-            let rule = Rule::parse(written).map_err(|why| format!("class rule '{item}' {why}"))?;
+            let rule = Rule::parse(written).map_err(|why| format!("logger rule '{item}' {why}"))?;
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
@@ -167,10 +167,10 @@ impl Rule {
             Some(package) => (package, Rule::Prefix),
             None => (written, Rule::Substring),
         };
-        if name.contains('*') {
+        if name.chars().all(|c| c == '*') {
+            Err("names no logger")
+        } else if name.contains('*') {
             Err("has a '*' that is not a trailing '.*'")
-        } else if name.is_empty() {
-            Err("names no class")
         } else {
             Ok(rule(name.to_string()))
         }

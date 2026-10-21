@@ -5,7 +5,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::format::strip_ansi;
-use crate::test_support::{EXAMPLES, built_in, text_formats};
+use crate::test_support::{EXAMPLES, built_in, no_thread_or_logger, no_timestamp, text_formats};
 
 /// Spring Boot's default correlation group with a trace and a span: `traceId(32)`,
 /// `spanId(16)`.
@@ -26,7 +26,7 @@ fn parse(preset: &'static Format, line: &[u8]) -> Option<EntryHead> {
     parser(preset).parse(line)
 }
 
-/// The columns `preset` finds in `line` as text: timestamp, level, thread, class,
+/// The columns `preset` finds in `line` as text: timestamp, level, thread, logger,
 /// message.
 fn columns(preset: &'static Format, line: &str) -> [String; 5] {
     let head = parse(preset, line.as_bytes())
@@ -35,10 +35,13 @@ fn columns(preset: &'static Format, line: &str) -> [String; 5] {
         head.timestamp,
         head.level,
         head.thread,
-        head.class,
-        head.message,
+        head.logger,
+        Some(head.message),
     ]
-    .map(|span| String::from_utf8_lossy(&line.as_bytes()[span]).into_owned())
+    .map(|span| {
+        let span = span.expect("the built-in formats have every column");
+        String::from_utf8_lossy(&line.as_bytes()[span]).into_owned()
+    })
 }
 
 /// What goes into an entry's first line, to write it the way each preset does.
@@ -132,10 +135,10 @@ fn entry_line(preset: &'static Format, parts: &Parts) -> (String, EntryHead) {
             line.push(&format!(" {} ", p.dashes));
             let message = line.push(&p.message);
             EntryHead {
-                timestamp,
-                level,
-                thread,
-                class,
+                timestamp: Some(timestamp),
+                level: Some(level),
+                thread: Some(thread),
+                logger: Some(class),
                 message,
             }
         }
@@ -164,10 +167,10 @@ fn entry_line(preset: &'static Format, parts: &Parts) -> (String, EntryHead) {
             line.push(" : ");
             let message = line.push(&p.message);
             EntryHead {
-                timestamp,
-                level,
-                thread,
-                class,
+                timestamp: Some(timestamp),
+                level: Some(level),
+                thread: Some(thread),
+                logger: Some(class),
                 message,
             }
         }
@@ -187,10 +190,10 @@ fn entry_line(preset: &'static Format, parts: &Parts) -> (String, EntryHead) {
             line.push(") ");
             let message = line.push(&p.message);
             EntryHead {
-                timestamp,
-                level,
-                thread,
-                class,
+                timestamp: Some(timestamp),
+                level: Some(level),
+                thread: Some(thread),
+                logger: Some(class),
                 message,
             }
         }
@@ -218,6 +221,57 @@ fn assert_every_preset_parses(parts: &Parts) {
 }
 
 // --- the table ---
+
+const ALL_COLUMNS: [Column; 4] = [
+    Column::Timestamp,
+    Column::Level,
+    Column::Thread,
+    Column::Logger,
+];
+
+/// The columns `format` has, in the order of [`ALL_COLUMNS`].
+fn columns_of(format: &'static Format) -> Vec<Column> {
+    ALL_COLUMNS
+        .into_iter()
+        .filter(|&column| format.has(column))
+        .collect()
+}
+
+#[test]
+fn every_built_in_text_format_has_every_column() {
+    for format in text_formats() {
+        assert_eq!(columns_of(format), ALL_COLUMNS, "{format:?}");
+    }
+}
+
+#[test]
+fn raw_has_no_columns() {
+    assert_eq!(columns_of(built_in("raw")), []);
+}
+
+#[test]
+fn a_format_has_the_columns_its_pattern_has_groups_for() {
+    assert_eq!(
+        columns_of(no_thread_or_logger()),
+        [Column::Timestamp, Column::Level]
+    );
+    assert_eq!(columns_of(no_timestamp()), [Column::Level, Column::Logger]);
+}
+
+#[test]
+fn a_column_the_format_lacks_has_no_span() {
+    let line = "WARNING:app.orders:Payment retry 1/3";
+    assert_eq!(
+        parse(no_timestamp(), line.as_bytes()),
+        Some(EntryHead {
+            timestamp: None,
+            level: Some(0..7),
+            thread: None,
+            logger: Some(8..18),
+            message: 19..line.len(),
+        })
+    );
+}
 
 #[test]
 fn every_format_has_a_name_for_the_header() {
@@ -1054,7 +1108,8 @@ proptest! {
         let i = at.index(bytes.len());
         bytes[i] = byte;
         if let Some(head) = parse(preset, &bytes) {
-            let mut spans = [head.timestamp, head.level, head.thread, head.class, head.message.clone()];
+            let columns = [head.timestamp, head.level, head.thread, head.logger];
+            let mut spans: Vec<_> = columns.into_iter().flatten().chain([head.message.clone()]).collect();
             spans.sort_by_key(|span| span.start);
             prop_assert!(spans.windows(2).all(|pair| pair[0].end <= pair[1].start), "{:?}", spans);
             prop_assert_eq!(spans.last(), Some(&head.message));

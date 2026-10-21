@@ -11,7 +11,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::format::{BUILT_IN, strip_ansi};
-use crate::test_support::{EXAMPLES, built_in};
+use crate::test_support::{EXAMPLES, built_in, no_thread_or_logger, no_timestamp};
 
 fn zone(name: &str) -> TimeZone {
     TimeZone::get(name).unwrap_or_else(|err| panic!("{name}: {err}"))
@@ -242,6 +242,26 @@ fn class_reaching_past_byte_65535_is_left_out() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].class(), None);
     assert_eq!(records[0].level(), Some(Level::Info));
+}
+
+/// PRD §6.1: a format without a timestamp dates nothing.
+#[test]
+fn an_entry_with_a_level_but_no_timestamp_has_its_level_and_no_time() {
+    let log = "WARNING:app.orders:Payment retry 1/3\nINFO:app.orders:Order 42 created\n";
+    let records = index_in(no_timestamp(), log.as_bytes());
+    let read: Vec<_> = records
+        .iter()
+        .map(|record| (record.level(), record.timestamp()))
+        .collect();
+    assert_eq!(read, [(Some(Level::Warn), None), (Some(Level::Info), None)]);
+}
+
+#[test]
+fn an_entry_of_a_format_without_a_logger_has_no_logger_span() {
+    let log = "2026-10-07 12:00:00.123 [INF] Order 42 created\n";
+    let records = index_in(no_thread_or_logger(), log.as_bytes());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].class(), None);
 }
 
 // --- the headless entry ---

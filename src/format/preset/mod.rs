@@ -88,8 +88,10 @@ pub static BUILT_IN: &[Format] = &[
     },
 ];
 
-/// A built-in text format.
-const fn text(
+/// A text format that recognises its entries with `pattern`, which also says which
+/// columns it has. Built-in formats are made with it, and so are the ones a test
+/// defines for itself.
+pub(crate) const fn text(
     id: &'static str,
     name: &'static str,
     pattern: &'static Pattern,
@@ -114,7 +116,26 @@ static SPRING2: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, SPRING2_C
 static WILDFLY: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, WILDFLY_COLUMNS));
 static WILDFLY_CONSOLE: Pattern = Pattern::new(|| EntryPattern::new(TIME, WILDFLY_COLUMNS));
 
+/// A column an entry's first line may have besides its message. A format has the
+/// columns its pattern has a group for; `raw` has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Timestamp,
+    Level,
+    Thread,
+    Logger,
+}
+
 impl Format {
+    /// Whether the format's entries have `column`. The table leaves out the columns
+    /// a format doesn't have.
+    pub fn has(&self, column: Column) -> bool {
+        match &self.kind {
+            Kind::Regex(layout) => layout.pattern.groups.has(column),
+            Kind::Raw => false,
+        }
+    }
+
     /// The built-in format whose [`id`](Self::id) is `id`, e.g. `logback-basic`.
     /// Letter case counts. `None` for any other name.
     pub fn by_id(id: &str) -> Option<&'static Format> {
@@ -201,13 +222,16 @@ impl EntryParser {
         locations: &mut CaptureLocations,
     ) -> Option<EntryHead> {
         let matched = self.pattern.regex.captures_read(locations, line)?;
-        let span = |group| locations.get(group).map(|(start, end)| start..end);
+        let span = |group: Option<usize>| {
+            let (start, end) = locations.get(group?)?;
+            Some(start..end)
+        };
         let groups = &self.pattern.groups;
         Some(EntryHead {
-            timestamp: span(groups.timestamp)?,
-            level: span(groups.level)?,
-            thread: span(groups.thread)?,
-            class: span(groups.class)?,
+            timestamp: span(groups.timestamp),
+            level: span(groups.level),
+            thread: span(groups.thread),
+            logger: span(groups.logger),
             // Matching the message too would cost time proportional to its length on
             // every line, for a span that is known anyway.
             message: matched.end()..line.len(),
@@ -244,11 +268,13 @@ impl EntryParser {
     }
 }
 
-type Pattern = LazyLock<EntryPattern>;
+/// An [`EntryPattern`] compiled the first time it is used, so that a format can be
+/// a `static`.
+pub(crate) type Pattern = LazyLock<EntryPattern>;
 
 /// A text format's entry-start regex and which of its groups holds each column.
 #[derive(Debug)]
-struct EntryPattern {
+pub(crate) struct EntryPattern {
     regex: Regex,
     groups: ColumnGroups,
 }
@@ -256,27 +282,52 @@ struct EntryPattern {
 /// Group indices, so that a match isn't searched for the columns by name.
 #[derive(Debug)]
 struct ColumnGroups {
-    timestamp: usize,
-    level: usize,
-    thread: usize,
-    class: usize,
+    timestamp: Option<usize>,
+    level: Option<usize>,
+    thread: Option<usize>,
+    logger: Option<usize>,
 }
 
-impl EntryPattern {
-    fn new(timestamp: &str, columns: &str) -> EntryPattern {
-        let regex = entry_regex(timestamp, columns);
-        let group = |name| {
-            regex
-                .capture_names()
-                .position(|group| group == Some(name))
-                .expect("the built-in patterns have a group for every column")
-        };
-        let groups = ColumnGroups {
+impl ColumnGroups {
+    fn of(regex: &Regex) -> ColumnGroups {
+        let group = |name| regex.capture_names().position(|group| group == Some(name));
+        ColumnGroups {
             timestamp: group("timestamp"),
             level: group("level"),
             thread: group("thread"),
-            class: group("class"),
-        };
+            logger: group("logger"),
+        }
+    }
+
+    fn has(&self, column: Column) -> bool {
+        match column {
+            Column::Timestamp => self.timestamp.is_some(),
+            Column::Level => self.level.is_some(),
+            Column::Thread => self.thread.is_some(),
+            Column::Logger => self.logger.is_some(),
+        }
+    }
+}
+
+impl EntryPattern {
+    /// The pattern of `regex`, a byte regex that matches an entry's first line from
+    /// its start. Its named groups `timestamp`, `level`, `thread` and `logger` are the
+    /// columns, each of them optional; the message is what follows the match.
+    ///
+    /// # Panics
+    ///
+    /// If `regex` isn't a valid regex.
+    #[cfg(test)]
+    pub(crate) fn from_regex(regex: &str) -> EntryPattern {
+        let regex =
+            Regex::new(regex).unwrap_or_else(|error| panic!("invalid entry regex: {error}"));
+        let groups = ColumnGroups::of(&regex);
+        EntryPattern { regex, groups }
+    }
+
+    fn new(timestamp: &str, columns: &str) -> EntryPattern {
+        let regex = entry_regex(timestamp, columns);
+        let groups = ColumnGroups::of(&regex);
         EntryPattern { regex, groups }
     }
 }
@@ -304,7 +355,7 @@ macro_rules! bracketed_thread {
 const LOGBACK_COLUMNS: &str = concat!(
     r" \[",
     bracketed_thread!(),
-    r"(?P<level>[A-Za-z]+) +(?P<class>\S+) +--?"
+    r"(?P<level>[A-Za-z]+) +(?P<logger>\S+) +--?"
 );
 // %d %5p PID --- [app] [%15.15t] [correlation] %-40.40logger : %m
 // Spring Boot 3.2 added the `[app]` group and, with tracing, the correlation group:
@@ -314,16 +365,16 @@ const LOGBACK_COLUMNS: &str = concat!(
 const SPRING3_COLUMNS: &str = concat!(
     r" +(?P<level>[A-Za-z]+) \d+ --- (?:\[[^\]]*\] )??\[ *",
     bracketed_thread!(),
-    r"(?:\[[0-9a-f ]{32}[- ][0-9a-f ]{16}\] )?(?P<class>\S+) +:"
+    r"(?:\[[0-9a-f ]{32}[- ][0-9a-f ]{16}\] )?(?P<logger>\S+) +:"
 );
 // %d %5p PID --- [%15.15t] %-40.40logger : %m
 const SPRING2_COLUMNS: &str = concat!(
     r" +(?P<level>[A-Za-z]+) \d+ --- \[ *",
     bracketed_thread!(),
-    r"(?P<class>\S+) +:"
+    r"(?P<logger>\S+) +:"
 );
 // %d %-5p [%c] (%t) %s%e. The thread is lazy: it ends at the first `) `.
-const WILDFLY_COLUMNS: &str = r" (?P<level>[A-Za-z]+) +\[(?P<class>.+?)\] \((?P<thread>.+?)\)";
+const WILDFLY_COLUMNS: &str = r" (?P<level>[A-Za-z]+) +\[(?P<logger>.+?)\] \((?P<thread>.+?)\)";
 
 /// An entry starts at column 0 with a timestamp. Its message starts after the space
 /// that ends the match; an empty one may have lost that space to trimming.
@@ -333,13 +384,14 @@ fn entry_regex(timestamp: &str, columns: &str) -> Regex {
 }
 
 /// The columns of an entry's first line, as byte ranges into that line. Padding
-/// around a column (`INFO `, `[           main]`, a class padded to 40) is not part of
-/// it. The message runs to the end of the line and may be empty.
+/// around a column (`INFO `, `[           main]`, a logger padded to 40) is not part
+/// of it. A column the format doesn't have is `None`. The message runs to the end of
+/// the line and may be empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryHead {
-    pub timestamp: Range<usize>,
-    pub level: Range<usize>,
-    pub thread: Range<usize>,
-    pub class: Range<usize>,
+    pub timestamp: Option<Range<usize>>,
+    pub level: Option<Range<usize>>,
+    pub thread: Option<Range<usize>>,
+    pub logger: Option<Range<usize>>,
     pub message: Range<usize>,
 }

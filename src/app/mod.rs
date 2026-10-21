@@ -29,7 +29,7 @@ use crate::filter::{
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Liveness, Options, Watcher};
-use crate::format::{Anchor, BUILT_IN, Format, Level, detect, strip_ansi};
+use crate::format::{Anchor, BUILT_IN, Column, Format, Level, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::keymap::{Keymap, normalized};
@@ -555,8 +555,11 @@ impl Panel {
     }
 }
 
-/// What [`App::notice`] says after `c` or `C` on an entry without a class.
-const NO_CLASS: &str = "the selected entry has no class";
+/// What [`App::notice`] says after `c` or `C` on an entry without a logger.
+const NO_CLASS: &str = "the selected entry has no logger";
+
+/// What [`App::notice`] says after `T` on a format without threads.
+const NO_THREAD_COLUMN: &str = "the format has no thread column";
 
 /// How many columns [`Action::ScrollLeft`] and [`Action::ScrollRight`] move the
 /// message column by.
@@ -2038,6 +2041,9 @@ impl App {
             Action::ToggleFollow => self.follow(),
             Action::ScrollLeft => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
             Action::ScrollRight => self.scroll = self.scroll.saturating_add(SCROLL_STEP),
+            Action::ToggleThread if !self.settings.format.has(Column::Thread) => {
+                self.notice = Some(Cow::Borrowed(NO_THREAD_COLUMN));
+            }
             Action::ToggleThread => self.shows_thread = !self.shows_thread,
             Action::CycleFocus => self.cycle_focus(),
             Action::ToggleHistogram => self.toggle_histogram(),
@@ -2289,9 +2295,10 @@ impl App {
     }
 
     /// What the viewer has to tell about the last key, until the next one: `the
-    /// selected entry has no class` after [`Action::OnlyClass`] or
-    /// [`Action::HideClass`] on an entry without a class (or with no row selected),
-    /// which then change nothing.
+    /// selected entry has no logger` after [`Action::OnlyClass`] or
+    /// [`Action::HideClass`] on an entry without a logger (or with no row selected),
+    /// which then change nothing, and `the format has no thread column` after
+    /// [`Action::ToggleThread`] on a format without threads.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }

@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{Theme, abbreviate, printable, printable_from};
 use crate::app::{App, Search, ShownLine};
-use crate::format::{EntryParser, strip_ansi};
+use crate::format::{Column, EntryParser, strip_ansi};
 use crate::source;
 
 /// The width of the `▶` marker of the selected row.
@@ -22,8 +22,8 @@ const MARKER: usize = 1;
 const MIN_NUMBER_WIDTH: usize = 4;
 const LEVEL_WIDTH: usize = 5;
 const THREAD_WIDTH: usize = 15;
-const MIN_CLASS_WIDTH: usize = 24;
-const MAX_CLASS_WIDTH: usize = 40;
+const MIN_LOGGER_WIDTH: usize = 24;
+const MAX_LOGGER_WIDTH: usize = 40;
 /// The narrowest screen whose timestamps show the date.
 const DATE_FROM_WIDTH: usize = 100;
 /// Timestamp formats and the width of what they print.
@@ -115,21 +115,25 @@ struct Columns {
     message: usize,
 }
 
-/// The columns before the message, under a preset that has them.
+/// The columns before the message, under a preset that has them. A width is `None`
+/// for a column the format doesn't have, or the thread while it is hidden.
 struct Table {
     parser: EntryParser,
     timestamp_format: String,
-    timestamp: usize,
-    /// `None` while the thread column is hidden.
+    timestamp: Option<usize>,
+    level: Option<usize>,
     thread: Option<usize>,
-    class: usize,
+    logger: Option<usize>,
 }
 
 impl Table {
     /// The width of the columns before the message, each with the space after it.
     fn width(&self) -> usize {
-        let thread = self.thread.map_or(0, |thread| thread + 1);
-        self.timestamp + 1 + LEVEL_WIDTH + 1 + thread + self.class + 1
+        [self.timestamp, self.level, self.thread, self.logger]
+            .into_iter()
+            .flatten()
+            .map(|width| width + 1)
+            .sum()
     }
 }
 
@@ -142,12 +146,18 @@ impl Columns {
                 let timestamps = app.timestamps();
                 (timestamps.format.clone(), timestamps.width)
             };
+            let format = app.settings().format;
+            let column = |column, width| format.has(column).then_some(width);
             Table {
                 parser,
                 timestamp_format,
-                timestamp,
-                thread: app.shows_thread().then_some(THREAD_WIDTH),
-                class: (width * 3 / 10).clamp(MIN_CLASS_WIDTH, MAX_CLASS_WIDTH),
+                timestamp: column(Column::Timestamp, timestamp),
+                level: column(Column::Level, LEVEL_WIDTH),
+                thread: column(Column::Thread, THREAD_WIDTH).filter(|_| app.shows_thread()),
+                logger: column(
+                    Column::Logger,
+                    (width * 3 / 10).clamp(MIN_LOGGER_WIDTH, MAX_LOGGER_WIDTH),
+                ),
             }
         });
         let lead = table.as_ref().map_or(0, Table::width);
@@ -201,28 +211,31 @@ impl Columns {
             return row.highlighted(search, &line, 0..line.len());
         };
         let record = shown.record;
-        let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
-            let local = app.settings().zone.to_datetime(timestamp);
-            local.strftime(&table.timestamp_format).to_string()
-        });
-        let level = record
-            .level()
-            .map_or_else(|| text(&line[head.level]), |level| level.name().to_owned());
-        let mut cells = vec![
-            Span::raw(cell(&timestamp, table.timestamp) + " "),
-            Span::styled(
-                cell(&level, LEVEL_WIDTH),
-                theme.paint(app.colors().level(record.level())),
-            ),
-            Span::raw(" "),
-        ];
-        if let Some(width) = table.thread {
-            let thread = text(&line[head.thread]);
-            cells.push(Span::raw(cell_keeping_end(&thread, width) + " "));
+        let mut cells = Vec::new();
+        // A column the format has may still be empty in an entry.
+        let part = |span: Option<Range<usize>>| span.map_or_else(String::new, |s| text(&line[s]));
+        if let Some(width) = table.timestamp {
+            let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
+                let local = app.settings().zone.to_datetime(timestamp);
+                local.strftime(&table.timestamp_format).to_string()
+            });
+            cells.push(Span::raw(cell(&timestamp, width) + " "));
         }
-        let class = text(&line[head.class]);
-        let class = cell(&abbreviate(&class, table.class), table.class);
-        cells.push(Span::raw(class + " "));
+        if let Some(width) = table.level {
+            let level = record
+                .level()
+                .map_or_else(|| part(head.level.clone()), |level| level.name().to_owned());
+            let style = theme.paint(app.colors().level(record.level()));
+            cells.push(Span::styled(cell(&level, width), style));
+            cells.push(Span::raw(" "));
+        }
+        if let Some(width) = table.thread {
+            cells.push(Span::raw(cell_keeping_end(&part(head.thread), width) + " "));
+        }
+        if let Some(width) = table.logger {
+            let logger = part(head.logger);
+            cells.push(Span::raw(cell(&abbreviate(&logger, width), width) + " "));
+        }
         let row = Row::new(cells, text(&line[head.message.clone()]), shown.hidden);
         row.highlighted(search, &line, head.message)
     }

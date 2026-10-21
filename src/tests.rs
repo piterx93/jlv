@@ -91,7 +91,7 @@ fn defaults(file: impl Into<PathBuf>) -> Args {
         format: None,
         no_follow: false,
         level: None,
-        class: None,
+        logger: None,
         since: None,
         no_mouse: false,
         config: None,
@@ -285,7 +285,7 @@ fn initial_with(
 ) -> Option<Filters> {
     let args = Args {
         level: level.map(Levels::only),
-        class: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
+        logger: class.map(|rules| Classes::parse(rules.iter().copied()).unwrap()),
         ..defaults("app.log")
     };
     initial_filters(&args, config)
@@ -435,7 +435,7 @@ fn every_option_is_handed_over() {
             format: Some(built_in("logback-basic")),
             no_follow: true,
             level: Some(Levels::only(&[Level::Warn, Level::Error])),
-            class: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
+            logger: Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
             since: Some(TimeSpec::parse("10m").unwrap()),
             no_mouse: true,
             config: Some(config),

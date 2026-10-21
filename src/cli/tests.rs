@@ -20,7 +20,7 @@ fn defaults(file: &str) -> Args {
         format: None,
         no_follow: false,
         level: None,
-        class: None,
+        logger: None,
         since: None,
         no_mouse: false,
         config: None,
@@ -242,12 +242,13 @@ fn empty_level_list_is_an_error_listing_the_valid_levels() {
     assert!(message.contains(VALID_LEVELS), "{message}");
 }
 
+/// `--class` is the name 1.x and 2.0 had.
 #[test]
-fn short_and_long_class_set_the_initial_class_rules() {
-    for option in ["-c", "--class"] {
+fn short_long_and_old_logger_options_set_the_initial_logger_rules() {
+    for option in ["-c", "--logger", "--class"] {
         let args = parse(&[option, "com.myco.*,!org.hibernate", "app.log"]).unwrap();
         assert_eq!(
-            args.class,
+            args.logger,
             Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap()),
             "{option}"
         );
@@ -255,16 +256,22 @@ fn short_and_long_class_set_the_initial_class_rules() {
 }
 
 #[test]
-fn class_rules_are_split_at_commas_skipping_empty_items() {
+fn help_names_the_logger_option_by_its_long_name() {
+    let help = Args::command().render_help().to_string();
+    assert!(help.contains("-c, --logger <RULES>"), "{help}");
+}
+
+#[test]
+fn logger_rules_are_split_at_commas_skipping_empty_items() {
     let args = parse(&["-c", ",com.myco.*,, !org.hibernate ,", "app.log"]).unwrap();
     assert_eq!(
-        args.class,
+        args.logger,
         Some(Classes::parse(["com.myco.*", "!org.hibernate"]).unwrap())
     );
 }
 
 #[test]
-fn a_class_rule_that_does_not_parse_is_a_usage_error_naming_it() {
+fn a_logger_rule_that_does_not_parse_is_a_usage_error_naming_it() {
     let err = parse(&["-c", "com.myco.*,!", "app.log"]).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ValueValidation, "{err}");
     assert!(err.to_string().contains("'!'"), "{err}");

@@ -139,11 +139,11 @@ impl Record {
     }
 
     /// The class column of the entry's first line, as a byte range into that line
-    /// once ANSI escape codes are stripped ([`EntryHead::class`]). `None` for the
-    /// headless entry, under `Raw`, and when the span reaches past byte 65 535 of the
+    /// once ANSI escape codes are stripped ([`EntryHead::logger`]). `None` for the
+    /// headless entry, under `Raw`, for a format without a logger, and when the span reaches past byte 65 535 of the
     /// line (`end > 65_535`), which is too far into the line to be kept here.
     ///
-    /// [`EntryHead::class`]: crate::format::EntryHead::class
+    /// [`EntryHead::logger`]: crate::format::EntryHead::logger
     pub fn class(&self) -> Option<Range<usize>> {
         (self.class_start < self.class_end)
             .then(|| usize::from(self.class_start)..usize::from(self.class_end))
@@ -362,14 +362,17 @@ fn read_head(
     zone: &TimeZone,
 ) -> (Record, Option<Time>) {
     let mut record = Record::new(offset);
-    record.level = Level::parse(&line[head.level.clone()]);
-    if let (Ok(start), Ok(end)) = (
-        u16::try_from(head.class.start),
-        u16::try_from(head.class.end),
-    ) {
+    record.level = head
+        .level
+        .clone()
+        .and_then(|level| Level::parse(&line[level]));
+    if let Some(logger) = &head.logger
+        && let (Ok(start), Ok(end)) = (u16::try_from(logger.start), u16::try_from(logger.end))
+    {
         (record.class_start, record.class_end) = (start, end);
     }
-    let time = match parser.timestamp(&line[head.timestamp.clone()], zone) {
+    let timestamp = head.timestamp.clone();
+    let time = match timestamp.and_then(|timestamp| parser.timestamp(&line[timestamp], zone)) {
         Some(LogTime::Instant(instant)) => {
             record.timestamp = instant.as_microsecond();
             None

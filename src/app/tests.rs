@@ -24,8 +24,8 @@ use crate::matcher::{self, Matcher};
 use crate::test_support;
 use crate::test_support::{
     INDEX_DEADLINE, LARGE_INDEX_DEADLINE, action, app, app_in, built_in, char_key, ctrl,
-    detected_app, following_app, key, named_app, numbered_log, unindexed_app, wait_for_filter,
-    wait_for_index, wait_for_index_within, wait_for_search,
+    detected_app, following_app, key, named_app, no_thread_or_logger, numbered_log, unindexed_app,
+    wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -1891,7 +1891,7 @@ fn on_an_entry_without_a_class_only_and_hide_class_change_nothing_but_say_so() {
         assert_eq!(app.filters().classes, Classes::default(), "{action:?}");
         assert_eq!(
             app.notice(),
-            Some("the selected entry has no class"),
+            Some("the selected entry has no logger"),
             "{action:?}"
         );
     }
@@ -5210,17 +5210,34 @@ fn f1_does_nothing_in_another_panel() {
     assert!(matches!(app.panel(), Some(Panel::Levels(_))));
 }
 
+// --- thread column ---
+
+/// PRD §7.2: a notice instead of an empty column. `raw` has no columns at all.
+#[test]
+fn toggling_the_thread_column_of_a_format_without_threads_only_says_so() {
+    let log = b"2026-10-07 12:00:00.123 [INF] Order 42 created\n";
+    for format in [no_thread_or_logger(), built_in("raw")] {
+        let app = applied(app_in(format, log), &[Action::ToggleThread]);
+        assert!(!app.shows_thread(), "{format:?}");
+        assert_eq!(
+            app.notice(),
+            Some("the format has no thread column"),
+            "{format:?}"
+        );
+    }
+}
+
 // --- configuration ---
 
-/// A remapped action answers to its new key and no longer to its default `T`.
+/// A remapped action answers to its new key and no longer to its default `w`.
 #[test]
 fn configured_keys_decide_what_keys_do() {
     let mut app = hundred_lines();
-    app.configure(&Config::parse("[keys]\ntoggle_thread = \"v\"\n").unwrap());
+    app.configure(&Config::parse("[keys]\ntoggle_wrap = \"v\"\n").unwrap());
     app.key(char_key('v'));
-    assert!(app.shows_thread());
-    app.key(char_key('T'));
-    assert!(app.shows_thread());
+    assert!(app.wraps());
+    app.key(char_key('w'));
+    assert!(app.wraps());
 }
 
 #[test]

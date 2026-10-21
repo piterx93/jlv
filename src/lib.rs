@@ -289,7 +289,7 @@ pub fn captures_mouse(args: &Args, config: &Config) -> bool {
 /// filter runs.
 pub fn initial_filters(args: &Args, config: &Config) -> Option<Filters> {
     let classes = args
-        .class
+        .logger
         .as_ref()
         .unwrap_or(&config.filters.default_class_excludes);
     if args.level.is_none() && *classes == Classes::default() {

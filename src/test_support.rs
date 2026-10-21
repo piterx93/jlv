@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App};
-use crate::format::{BUILT_IN, Format, Kind};
+use crate::format::{self, BUILT_IN, EntryPattern, Format, Kind, Pattern};
 use crate::keymap::Keymap;
 use crate::source::{self, Source};
 
@@ -33,6 +33,47 @@ pub fn text_formats() -> Vec<&'static Format> {
         .iter()
         .filter(|format| matches!(format.kind, Kind::Regex(_)))
         .collect()
+}
+
+/// A text format with a timestamp and a level but neither thread nor logger, like
+/// Serilog's file sink without an offset:
+/// `2026-10-07 12:00:00.123 [INF] Order 42 created`.
+pub fn no_thread_or_logger() -> &'static Format {
+    static PATTERN: Pattern = Pattern::new(|| {
+        EntryPattern::from_regex(
+            r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(?P<level>[A-Z]+)\] ",
+        )
+    });
+    static FORMAT: Format = format::text(
+        "no-thread-or-logger",
+        "No thread or logger",
+        &PATTERN,
+        true,
+        false,
+    );
+    &FORMAT
+}
+
+/// A text format with a level and a logger but neither timestamp nor thread, like
+/// Python's `logging.basicConfig()`: `WARNING:app.orders:Payment retry 1/3`.
+pub fn no_timestamp() -> &'static Format {
+    static PATTERN: Pattern =
+        Pattern::new(|| EntryPattern::from_regex(r"^(?P<level>[A-Z]+):(?P<logger>[^:]*):"));
+    static FORMAT: Format = format::text("no-timestamp", "No timestamp", &PATTERN, false, false);
+    &FORMAT
+}
+
+/// A text format with a timestamp, a thread and a level but no logger, like
+/// gunicorn's error log with the pid as its thread:
+/// `2026-10-07 12:00:00.123 [1234] [INFO] Booting worker`.
+pub fn no_logger() -> &'static Format {
+    static PATTERN: Pattern = Pattern::new(|| {
+        EntryPattern::from_regex(
+            r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(?P<thread>\d+)\] \[(?P<level>[A-Z]+)\] ",
+        )
+    });
+    static FORMAT: Format = format::text("no-logger", "No logger", &PATTERN, true, false);
+    &FORMAT
 }
 
 /// The example lines of PRD §6.1 by format id, one per built-in format but `raw`, in

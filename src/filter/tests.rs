@@ -731,10 +731,10 @@ fn a_rule_given_twice_counts_once() {
 }
 
 #[test]
-fn a_rule_naming_no_class_is_an_error_naming_it() {
+fn a_rule_naming_no_logger_is_an_error_naming_it() {
     for rule in ["!", "*", ".*", "!*", "!.*"] {
         let error = Classes::parse(["Order", rule]).unwrap_err();
-        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+        assert_eq!(error, format!("logger rule '{rule}' names no logger"));
     }
 }
 
@@ -742,7 +742,10 @@ fn a_rule_naming_no_class_is_an_error_naming_it() {
 fn a_star_anywhere_but_in_a_trailing_dot_star_is_an_error_naming_the_rule() {
     for rule in ["Order*", "com.*.Order", "com.myco.**"] {
         let error = Classes::parse([rule]).unwrap_err();
-        assert!(error.contains(&format!("'{rule}'")), "{rule}: {error}");
+        assert!(
+            error.starts_with(&format!("logger rule '{rule}' ")),
+            "{rule}: {error}"
+        );
     }
 }
 

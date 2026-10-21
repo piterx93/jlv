@@ -23,8 +23,9 @@ use crate::mouse::HitMap;
 use crate::test_support::built_in;
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
-    following_app, hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
-    wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
+    following_app, hide_line_numbers, key, named_app, no_logger, no_thread_or_logger, no_timestamp,
+    numbered_log, row, spike_log, unindexed_app, wait_for_filter, wait_for_index,
+    wait_for_index_within, wait_for_search,
 };
 
 fn draw(terminal: &mut Terminal<TestBackend>, app: &mut App, theme: Theme) {
@@ -308,7 +309,7 @@ fn class_panel_shows_one_rule_per_line_over_the_rows() {
     " 12:00:00.004 [main] INFO  com.example.App - step 4                             "
     " 12:00:00.005 [main] INFO  com.example.App - step 5                             "
     " 12:00:00.006 [main] INFO  com.example.App - step 6                             "
-    " 12:00:00.007 [mai┌ Classes ─────────────────────────────────┐                  "
+    " 12:00:00.007 [mai┌ Loggers ─────────────────────────────────┐                  "
     " 12:00:00.008 [mai│  com.myco.*                              │                  "
     " 12:00:00.009 [mai│ ▶!org.hibernate                          │                  "
     " 12:00:00.010 [mai│                                          │                  "
@@ -530,7 +531,7 @@ fn filter_bar_shows_every_active_filter_under_the_header() {
     wait_for_filter(&mut app);
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "vilog ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                         E:1 W:1 I:1"
-    "Filters: level[W E F]  class[com.myco.* !Sql]  time[last 5m (file)]  text[time] "
+    "Filters: level[W E F]  logger[com.myco.* !Sql]  time[last 5m (file)]  text[time]"
     "▶12:05:00.000 ERROR com.myco.pay.PayClient   Payment timeout                    "
     " 12:10:00.000 WARN  com.myco.pay.PayClient   Retry 2/3 after timeout            "
     "                                                                                "
@@ -651,7 +652,7 @@ fn header_ends_with_the_notice_about_the_last_key() {
     draw(&mut terminal, &mut app, Theme::Styled);
     assert_eq!(
         row(&terminal, 0),
-        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ the selected entry has no class"
+        "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ the selected entry has no logger"
     );
 }
 
@@ -684,7 +685,7 @@ const HEADLESS_FIRST_LOG: &str = concat!(
     "2026-10-07 12:00:04.000 [main] ERROR com.example.App - error\n",
 );
 
-/// The header at `width` columns after `c` on the headless entry, which has no class.
+/// The header at `width` columns after `c` on the headless entry, which has no logger.
 fn header_with_a_notice(width: u16) -> String {
     let mut app = app_in(built_in("logback"), HEADLESS_FIRST_LOG.as_bytes());
     let mut terminal = drawn(&mut app, width, 24, Theme::Styled);
@@ -696,16 +697,16 @@ fn header_with_a_notice(width: u16) -> String {
 #[test]
 fn level_counters_take_the_columns_the_title_leaves_after_a_space() {
     assert_eq!(
-        header_with_a_notice(98),
-        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class E:1 W:1 I:1 D:1 T:1"
+        header_with_a_notice(99),
+        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no logger E:1 W:1 I:1 D:1 T:1"
     );
 }
 
 #[test]
 fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
     assert_eq!(
-        header_with_a_notice(97),
-        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no class"
+        header_with_a_notice(98),
+        "vilog ─ app.log ─ 315 B ─ Logback ─ PAUSED ● ─ the selected entry has no logger"
     );
 }
 
@@ -1248,6 +1249,128 @@ fn wrapped_messages_continue_under_the_message_column_next_to_the_thread() {
                                                                  CDEFGHIJKLMNOPQRSTU
                                                                  VWXYZ
      12:00:00.200 WARN  main            com.example.App          short message
+    ");
+}
+
+// --- formats without some columns ---
+
+/// Entries in [`no_thread_or_logger`], one of them with a message longer than the
+/// screen and one with a stack trace.
+const NO_THREAD_LOG: &str = concat!(
+    "2026-10-07 12:00:00.123 [INF] Order 42 created\n",
+    "2026-10-07 12:00:01.000 [WRN] Payment retry 1/3 for order 42 after the gateway timed out, waiting 2 s before the next attempt\n",
+    "2026-10-07 12:00:02.000 [ERR] Payment failed\n",
+    "System.TimeoutException: The operation has timed out.\n",
+    "   at Shop.Payments.Gateway.Charge()\n",
+);
+
+fn no_thread_table() -> App {
+    app_in(no_thread_or_logger(), NO_THREAD_LOG.as_bytes())
+}
+
+/// Entries in [`no_timestamp`], one with a logger name abbreviated to fit.
+const NO_TIMESTAMP_LOG: &str = concat!(
+    "WARNING:app.orders:Payment retry 1/3\n",
+    "INFO:app.orders.api.handlers.checkout:Order 42 created\n",
+    "ERROR:root:Payment failed\n",
+);
+
+fn no_timestamp_table() -> App {
+    app_in(no_timestamp(), NO_TIMESTAMP_LOG.as_bytes())
+}
+
+/// PRD §7.2: the message takes the width of the columns that aren't there.
+#[test]
+fn a_format_without_thread_and_logger_shows_neither_column() {
+    assert_snapshot!(screen_after(&mut no_thread_table(), &[]), @r#"
+    "vilog ─ app.log ─ 309 B ─ No thread or logger ─ PAUSED ●             E:1 W:1 I:1"
+    "▶12:00:00.123 INFO  Order 42 created                                            "
+    " 12:00:01.000 WARN  Payment retry 1/3 for order 42 after the gateway timed out, "
+    " 12:00:02.000 ERROR Payment failed [+2]                                         "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "                                                                                "
+    "j/k Move  PgUp/PgDn Page  Ctrl-u/d Half page  g/G Top/Bottom  q Quit            "
+    "#);
+}
+
+#[test]
+fn an_entry_with_a_level_but_no_timestamp_shows_no_timestamp_column() {
+    assert_snapshot!(lines_after(&mut no_timestamp_table(), &[], 1..=3), @r"
+    ▶WARN  app.orders               Payment retry 1/3
+     INFO  a.o.a.handlers.checkout  Order 42 created
+     ERROR root                     Payment failed
+    ");
+}
+
+#[test]
+fn capital_t_on_a_format_without_threads_adds_no_column() {
+    assert_eq!(
+        lines_after(&mut no_thread_table(), &[char_key('T')], 1..=3),
+        lines_after(&mut no_thread_table(), &[], 1..=3)
+    );
+}
+
+#[test]
+fn details_pane_of_an_entry_without_logger_and_thread_starts_with_its_message() {
+    let keys = [char_key('j'), char_key('j'), key(KeyCode::Enter)];
+    assert_snapshot!(lines_after(&mut no_thread_table(), &keys, DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ Payment failed                                                               │
+    │ System.TimeoutException: The operation has timed out.                        │
+    │    at Shop.Payments.Gateway.Charge()                                         │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+#[test]
+fn details_pane_of_an_entry_without_a_thread_shows_the_logger_alone() {
+    let keys = [key(KeyCode::Enter)];
+    assert_snapshot!(lines_after(&mut no_timestamp_table(), &keys, DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ app.orders                                                                   │
+    │ Payment retry 1/3                                                            │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
+    ");
+}
+
+/// The thread keeps its parentheses, so that it doesn't read as a logger name.
+#[test]
+fn details_pane_of_an_entry_without_a_logger_shows_the_thread_in_parentheses() {
+    let log = "2026-10-07 12:00:00.123 [1234] [INFO] Booting worker\n";
+    let mut app = app_in(no_logger(), log.as_bytes());
+    assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
+    ┌ Details ─────────────────────────────────────────────────────────────────────┐
+    │ (1234)                                                                       │
+    │ Booting worker                                                               │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
     ");
 }
 
@@ -2280,8 +2403,11 @@ fn any_action() -> impl Strategy<Value = Action> {
     ])
 }
 
+/// The built-in formats and the ones without some columns.
 fn any_preset() -> impl Strategy<Value = &'static Format> {
-    prop::sample::select(BUILT_IN.iter().collect::<Vec<_>>())
+    let mut formats: Vec<_> = BUILT_IN.iter().collect();
+    formats.extend([no_thread_or_logger(), no_timestamp()]);
+    prop::sample::select(formats)
 }
 
 /// Lines that start an entry in some preset mixed with arbitrary bytes.
@@ -3127,9 +3253,9 @@ fn help_overlay_scrolls_a_page_with_page_down() {
     " 12:00:00.004 [ma│ F2            Level filter                 │                 "
     " 12:00:00.005 [ma│ F4 &          Text filter                  │                 "
     " 12:00:00.006 [ma│ F5            Time filter                  │                 "
-    " 12:00:00.007 [ma│ F6            Class filter                 │                 "
-    " 12:00:00.008 [ma│ c             Only this class              │                 "
-    " 12:00:00.009 [ma│ C             Hide this class              │                 "
+    " 12:00:00.007 [ma│ F6            Logger filter                │                 "
+    " 12:00:00.008 [ma│ c             Only this logger             │                 "
+    " 12:00:00.009 [ma│ C             Hide this logger             │                 "
     " 12:00:00.010 [ma│ x             Clear all filters            │                 "
     " 12:00:00.011 [ma│ Space         Fold or unfold entry         │                 "
     " 12:00:00.012 [ma│ z             Fold all                     │                 "
@@ -3158,9 +3284,9 @@ fn help_overlay_scrolled_to_its_end_shows_its_last_lines() {
     assert_snapshot!(screen_after_pressing(&mut hundred_lines(), &keys), @r#"
     "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ●                                       "
     "▶12:00:00.001 [ma┌ Help ──────────────────────────────────────┐                 "
-    " 12:00:00.002 [ma│ F6            Class filter                 │                 "
-    " 12:00:00.003 [ma│ c             Only this class              │                 "
-    " 12:00:00.004 [ma│ C             Hide this class              │                 "
+    " 12:00:00.002 [ma│ F6            Logger filter                │                 "
+    " 12:00:00.003 [ma│ c             Only this logger             │                 "
+    " 12:00:00.004 [ma│ C             Hide this logger             │                 "
     " 12:00:00.005 [ma│ x             Clear all filters            │                 "
     " 12:00:00.006 [ma│ Space         Fold or unfold entry         │                 "
     " 12:00:00.007 [ma│ z             Fold all                     │                 "

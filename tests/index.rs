@@ -83,7 +83,7 @@ fn line_by_line(bytes: &[u8], settings: &Settings) -> Vec<Indexed> {
         .zip(&first_lines)
         .map(|(entry, line)| {
             let head = entry.head.as_ref()?;
-            parser?.timestamp(&line[head.timestamp.clone()], &settings.zone)
+            parser?.timestamp(&line[head.timestamp.clone()?], &settings.zone)
         })
         .collect();
     let timestamps = resolve_timestamps(&times, settings.anchor, &settings.zone);
@@ -103,9 +103,11 @@ fn line_by_line(bytes: &[u8], settings: &Settings) -> Vec<Indexed> {
                 timestamp: timestamp.map(|timestamp| {
                     Timestamp::from_microsecond(timestamp.as_microsecond()).unwrap()
                 }),
-                level: head.and_then(|head| Level::parse(&line[head.level.clone()])),
+                level: head
+                    .and_then(|head| head.level.clone())
+                    .and_then(|level| Level::parse(&line[level])),
                 class: head
-                    .map(|head| head.class.clone())
+                    .and_then(|head| head.logger.clone())
                     .filter(|class| class.end <= 65_535),
                 has_exception: entry.has_exception,
             }

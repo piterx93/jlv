@@ -36,8 +36,8 @@ fn outline(preset: &'static Format, name: &str) -> String {
                 let line = strip_ansi(lines[first]);
                 format!(
                     "{} {}",
-                    text(&line, head.timestamp),
-                    text(&line, head.level)
+                    text(&line, head.timestamp.unwrap()),
+                    text(&line, head.level.unwrap())
                 )
             }
         };

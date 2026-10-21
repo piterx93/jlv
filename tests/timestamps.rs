@@ -30,7 +30,7 @@ fn timestamps(
         .filter_map(|line| {
             let line = strip_ansi(line);
             let head = parser.parse(&line)?;
-            let span = &line[head.timestamp];
+            let span = &line[head.timestamp?];
             let text = String::from_utf8(span.to_vec()).unwrap();
             Some((text, parser.timestamp(span, zone)))
         })
