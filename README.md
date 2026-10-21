@@ -1,12 +1,12 @@
 # vilog
 
 vilog is a terminal log viewer for application logs. It recognises the usual
-Logback, Log4j2, Spring Boot and WildFly layouts of Java services, splits each
-entry into timestamp, level, logger and message columns, folds stack traces, and
-follows the file as it grows, through rotation and truncation. You can filter by
-level, logger, time and text, search, bookmark, copy an entry and export what is
-left, all in the terminal and over SSH. It opens multi-gigabyte files without
-reading them into memory.
+Logback, Log4j2, Spring Boot and WildFly layouts of Java services and JSON
+lines from the common logging libraries, splits each entry into timestamp, level,
+logger and message columns, folds stack traces, and follows the file as it grows,
+through rotation and truncation. You can filter by level, logger, time and text,
+search, bookmark, copy an entry and export what is left, all in the terminal and
+over SSH. It opens multi-gigabyte files without reading them into memory.
 
 vilog was called jlv before 2.0.
 
@@ -44,7 +44,7 @@ Arguments:
 
 Options:
   -f, --format <NAME>   Force a format instead of detecting it [possible values: logback,
-                        logback-basic, spring3, spring2, wildfly, wildfly-console, raw]
+                        logback-basic, spring3, spring2, wildfly, wildfly-console, json, raw]
       --no-follow       Open at the top, don't follow
   -l, --level <LEVELS>  Initial level filter, e.g. WARN,ERROR
   -c, --logger <RULES>  Initial logger filter, e.g. 'com.myco.*,!org.hibernate'
@@ -159,11 +159,75 @@ cycles through the presets, `--format` picks one.
 | `spring2` | `2026-10-07 12:00:00.123  INFO 12345 --- [           main] o.s.b.SpringApplication                  : Started` |
 | `wildfly` | `2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: started` |
 | `wildfly-console` | `12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: starting` |
+| `json` | `{"@timestamp":"2026-10-07T12:00:00.123Z","level":"INFO","logger_name":"com.example.App","message":"Started"}` |
 | `raw` | any line, no columns |
 
 `logback` covers Log4j2's classic pattern too. Either `.` or `,` may separate the
 milliseconds, and ANSI colour codes are stripped before parsing. Lines that don't
-start an entry, such as stack trace lines, belong to the entry above.
+start an entry, such as stack trace lines, belong to the entry above. Besides
+Java traces, vilog recognises Python tracebacks, Go panics and goroutine dumps,
+and .NET stack traces as exceptions, so `]` and `[` stop at them.
+
+A column the format doesn't have, such as the thread in a pino log, isn't drawn
+and the message gets its width. `T` on a format without threads says so
+instead of showing an empty column.
+
+### JSON lines
+
+One JSON object per line, as written by logstash-logback-encoder, ECS loggers,
+zap, slog, pino, bunyan, winston, structlog, python-json-logger, Serilog's compact
+JSON (CLEF), Microsoft's JSON console formatter and Docker's `json-file` driver.
+
+Each column comes from the first of a list of usual keys that the file uses:
+
+| Column | Keys tried, in order |
+|---|---|
+| timestamp | `@timestamp`, `timestamp`, `time`, `ts`, `@t`, `Timestamp`, `asctime` |
+| level | `level`, `log.level`, `levelname`, `severity`, `@l`, `LogLevel` |
+| logger | `logger_name`, `logger`, `log.logger`, `name`, `caller`, `Category`, `SourceContext` |
+| thread | `thread_name`, `thread`, `process.thread.name` |
+| message | `message`, `msg`, `event`, `@m`, `@mt`, `Message`, `log` |
+
+The keys are chosen once per file, from the lines used for detection: a key has
+to be on at least half of them. Serilog's CLEF is the exception: a file with `@t`
+takes its level from `@l` however few lines have it, and a line without `@l` is
+Information. A dotted key like `log.level` matches either that literal key or
+`{"log":{"level":…}}`. A file with no message key still opens as JSON and the
+message column shows the line itself.
+
+The exception isn't chosen per file, since few lines have one. A line's exception
+is the first of `stack_trace`, `error.stack_trace`, `stacktrace`, `exception`,
+`exc_info`, `@x`, `Exception`, `stack` and `err.stack` it has that isn't empty or
+`null`, and `]` and `[` stop at those lines.
+
+Levels may be strings (see the names below) or numbers on the pino and bunyan
+scale, 10 for trace up to 60 for fatal. Timestamps are strings in the usual
+shapes, or epoch numbers in seconds, milliseconds, microseconds or nanoseconds. In
+Docker's `json-file` the message is the `log` field without its trailing newline,
+and the time comes from `time`.
+
+Values are shown decoded, so `\n`, `\"` and `\u00e9` read as what they mean. The
+row shows the first line of the message. The details panel shows the whole
+message, the exception one line per row, and then every other field as
+`key: value` in file order. Search and its highlights cover the whole decoded line,
+keys and other fields included; the text filter covers the decoded message and
+exception and any lines below that aren't JSON. Copy and export keep the original
+line, so what you write out is still JSON. A line that isn't an object belongs to
+the entry above, like a stack trace line.
+
+### Levels
+
+Level names are matched ignoring case and padding, in log lines of every format
+and in `--level`, and the level column shows the canonical name:
+
+| Level | Also read as |
+|---|---|
+| TRACE | `TRCE`, `VRB`, `VERBOSE`, `FINER`, `FINEST` |
+| DEBUG | `DBG`, `DBUG`, `FINE` |
+| INFO | `INF`, `INFORMATION`, `NOTICE`, `CONFIG` |
+| WARN | `WARNING`, `WRN` |
+| ERROR | `ERR`, `FAIL`, `SEVERE` |
+| FATAL | `FTL`, `CRITICAL`, `CRIT`, `PANIC`, `EMERG`, `ALERT` |
 
 Timestamps without an offset are local time. For the time-only formats the date
 comes from the file name if it has one (`server.log.2026-10-06`,
