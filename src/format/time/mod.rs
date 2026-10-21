@@ -39,6 +39,13 @@ pub(super) fn local_instant(span: &[u8], zone: &TimeZone) -> Option<Timestamp> {
 /// before the gap, in a fold the earlier instant. `None` only at the ends of jiff's
 /// range.
 pub(super) fn local_to_instant(date_time: DateTime, zone: &TimeZone) -> Option<Timestamp> {
+    // Just before jiff's first instant, an offset (up to ±25:59:59) trips a debug
+    // assertion in jiff instead of an error, and in release gives an invalid instant.
+    // `DateTime::MIN` plus twice the largest offset is past that for every offset.
+    const FIRST: DateTime = jiff::civil::datetime(-9999, 1, 3, 3, 59, 58, 0);
+    if date_time < FIRST {
+        return None;
+    }
     zone.to_ambiguous_timestamp(date_time).compatible().ok()
 }
 

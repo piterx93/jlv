@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 04ac08481ac718291749cdd9ee9bbab25ab878a15f983beb6ec5670ea1b913da # shrinks to (zone, times) = (TimeZone(TZif("America/New_York")), [Some(TimeOfDay(21:03:56.999999999))]), anchor = Modified(-009999-01-01T00:00:00)
