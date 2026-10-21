@@ -1,7 +1,10 @@
 //! Finding the keys of a JSON line and where their values are, without parsing or
 //! allocating anything (PRD §6.2, §14).
 
+use std::borrow::Cow;
 use std::ops::Range;
+
+use memchr::memchr;
 
 #[cfg(test)]
 mod tests;
@@ -40,6 +43,123 @@ pub fn fields(line: &[u8]) -> Fields<'_> {
 /// The first field of the object on `line` whose key is written exactly as `key`.
 pub fn find<'a>(line: &'a [u8], key: &[u8]) -> Option<Field<'a>> {
     fields(line).find(|field| field.key == key)
+}
+
+/// The text between the quotes of a JSON string with its escapes decoded: `\"`,
+/// `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t` and `\uXXXX` in either case of hex digits,
+/// written in UTF-8, a surrogate pair of `\u` escapes as the one character it encodes.
+/// A lone surrogate becomes U+FFFD. A backslash that starts no escape, such as `\x`,
+/// a `\u` without four hex digits or a backslash at the end, is kept as written, and
+/// so is every other byte, invalid UTF-8 included. Borrows `text` when it has no
+/// backslash.
+pub fn decode(text: &[u8]) -> Cow<'_, [u8]> {
+    if memchr(b'\\', text).is_none() {
+        return Cow::Borrowed(text);
+    }
+    let mut decoded = Vec::with_capacity(text.len());
+    append_decoded(text, &mut decoded);
+    Cow::Owned(decoded)
+}
+
+/// [`decode`] for a caller that decodes text after text: decoded text is written into
+/// `buffer`, which keeps its allocation from one text to the next, and the result
+/// borrows from there. Text without a backslash is returned as is.
+pub fn decode_into<'a>(text: &'a [u8], buffer: &'a mut Vec<u8>) -> &'a [u8] {
+    if memchr(b'\\', text).is_none() {
+        return text;
+    }
+    buffer.clear();
+    append_decoded(text, buffer);
+    buffer
+}
+
+fn append_decoded(text: &[u8], out: &mut Vec<u8>) {
+    let mut rest = text;
+    while let Some(backslash) = memchr(b'\\', rest) {
+        out.extend_from_slice(&rest[..backslash]);
+        rest = append_escape(&rest[backslash + 1..], out);
+    }
+    out.extend_from_slice(rest);
+}
+
+/// Appends what the escape that follows a backslash, `escaped`, stands for and returns
+/// what follows the escape. When it isn't one, the backslash is appended instead and
+/// `escaped` is returned whole.
+fn append_escape<'a>(escaped: &'a [u8], out: &mut Vec<u8>) -> &'a [u8] {
+    let simple = match escaped.first() {
+        Some(b'"') => b'"',
+        Some(b'\\') => b'\\',
+        Some(b'/') => b'/',
+        Some(b'b') => 0x08,
+        Some(b'f') => 0x0c,
+        Some(b'n') => b'\n',
+        Some(b'r') => b'\r',
+        Some(b't') => b'\t',
+        Some(b'u') => return append_unicode_escape(escaped, out),
+        _ => {
+            out.push(b'\\');
+            return escaped;
+        }
+    };
+    out.push(simple);
+    &escaped[1..]
+}
+
+/// [`append_escape`] for `escaped` that starts with the `u` of `\u`.
+fn append_unicode_escape<'a>(escaped: &'a [u8], out: &mut Vec<u8>) -> &'a [u8] {
+    let Some(unit) = hex_unit(&escaped[1..]) else {
+        out.push(b'\\');
+        return escaped;
+    };
+    let after = &escaped[5..];
+    let low = after
+        .strip_prefix(b"\\u")
+        .and_then(hex_unit)
+        .filter(|low| (0xDC00..0xE000).contains(low));
+    let (c, used) = match (unit, low) {
+        (0xD800..0xDC00, Some(low)) => {
+            let pair = 0x10000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
+            (char::from_u32(pair), 6)
+        }
+        _ => (char::from_u32(u32::from(unit)), 0),
+    };
+    let mut utf8 = [0; 4];
+    let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
+    out.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
+    &after[used..]
+}
+
+/// The number the four hex digits that `text` starts with write.
+fn hex_unit(text: &[u8]) -> Option<u16> {
+    let digits = text.get(..4)?;
+    digits.iter().try_fold(0u16, |unit, &digit| {
+        let digit = char::from(digit).to_digit(16)?;
+        Some(unit << 4 | digit as u16)
+    })
+}
+
+impl Field<'_> {
+    /// The value as text: a string decoded, anything else as written. `line` is the
+    /// line the field was read from.
+    pub fn decoded<'a>(&self, line: &'a [u8]) -> Cow<'a, [u8]> {
+        let value = &line[self.value.clone()];
+        if self.string {
+            decode(value)
+        } else {
+            Cow::Borrowed(value)
+        }
+    }
+
+    /// The value as text: a string decoded, written into `buffer` if it has escapes,
+    /// anything else as written. `line` is the line the field was read from.
+    pub fn text<'a>(&self, line: &'a [u8], buffer: &'a mut Vec<u8>) -> &'a [u8] {
+        let value = &line[self.value.clone()];
+        if self.string {
+            decode_into(value, buffer)
+        } else {
+            value
+        }
+    }
 }
 
 /// The fields of one line, see [`fields`].

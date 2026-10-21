@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write;
 
 use proptest::prelude::*;
@@ -200,6 +201,63 @@ fn find_misses_a_key_that_is_absent_or_only_nested() {
     assert_eq!(find(br#"{"x":{"a":1},"b":"a"}"#, b"a"), None);
 }
 
+#[test]
+fn decode_borrows_text_without_a_backslash() {
+    let text = "caf\u{e9} \u{1F600} \"plain\"".as_bytes();
+    assert!(matches!(decode(text), Cow::Borrowed(borrowed) if borrowed == text));
+}
+
+#[test]
+fn decode_replaces_a_lone_surrogate_with_the_replacement_character() {
+    let cases = [
+        (r"a\ud83d", "a\u{FFFD}"),
+        (r"\ude00b", "\u{FFFD}b"),
+        (r"\ud83d\u0041", "\u{FFFD}A"),
+        (r"\ud83d\ud83d\ude00", "\u{FFFD}\u{1F600}"),
+    ];
+    for (text, decoded) in cases {
+        assert_eq!(decode(text.as_bytes()), decoded.as_bytes(), "{text}");
+    }
+}
+
+#[test]
+fn decode_keeps_a_backslash_that_starts_no_escape_as_written() {
+    for text in [r"a\u12G4b", r"a\u12", r"a\xb", r"a\"] {
+        assert_eq!(decode(text.as_bytes()), text.as_bytes(), "{text}");
+    }
+}
+
+/// One piece of a JSON string's text as written between its quotes: a character that
+/// needs no escape, a short escape, or any character as `\u` escapes, a surrogate pair
+/// beyond the Basic Multilingual Plane.
+fn string_piece() -> impl Strategy<Value = String> {
+    let short = [r#"\""#, r"\\", r"\/", r"\b", r"\f", r"\n", r"\r", r"\t"];
+    prop_oneof![
+        prop::sample::select(vec!["a", " ", "/", "é", "😀"]).prop_map(str::to_owned),
+        prop::sample::select(short.to_vec()).prop_map(str::to_owned),
+        (any::<char>(), any::<bool>()).prop_map(|(c, upper)| {
+            let mut units = [0; 2];
+            c.encode_utf16(&mut units)
+                .iter()
+                .map(|unit| match upper {
+                    true => format!(r"\u{unit:04X}"),
+                    false => format!(r"\u{unit:04x}"),
+                })
+                .collect()
+        }),
+    ]
+}
+
+/// Text in which backslashes, `u` and hex digits are common enough to make up escapes,
+/// complete or not, around bytes of any value.
+fn escape_soup() -> impl Strategy<Value = Vec<u8>> {
+    let byte = prop_oneof![
+        prop::sample::select(b"\\u0d8DcCfF4G\"x".to_vec()),
+        any::<u8>(),
+    ];
+    prop::collection::vec(byte, 0..64)
+}
+
 proptest! {
     #[test]
     fn fields_agree_with_serde_json((line, written) in object_line()) {
@@ -238,6 +296,22 @@ proptest! {
         for field in fields(&line) {
             prop_assert!(field.value.start <= field.value.end);
             prop_assert!(field.value.end <= line.len());
+        }
+    }
+
+    #[test]
+    fn decode_agrees_with_serde_json(pieces in prop::collection::vec(string_piece(), 0..12)) {
+        let text = pieces.concat();
+        let text = text.as_bytes();
+        let expected: String = serde_json::from_slice(&quoted(text)).expect("a JSON string");
+        prop_assert_eq!(decode(text), expected.as_bytes());
+    }
+
+    #[test]
+    fn decode_never_panics_and_keeps_utf8_text_utf8(text in escape_soup()) {
+        let decoded = decode(&text);
+        if std::str::from_utf8(&text).is_ok() {
+            prop_assert!(std::str::from_utf8(&decoded).is_ok(), "{}", decoded.escape_ascii());
         }
     }
 }

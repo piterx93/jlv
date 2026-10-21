@@ -24,8 +24,8 @@ use crate::clipboard::{Clipboard, CopyError, entry_text};
 use crate::config::{Colors, Config, Ui};
 use crate::export;
 use crate::filter::{
-    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Rule, TimeFilter, TimeRange,
-    TimeSpec,
+    self, Base, Classes, Engine, Filtered, Filters, Indexed, Levels, Reader, Rule, TimeFilter,
+    TimeRange, TimeSpec,
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Liveness, Options, Watcher};
@@ -647,14 +647,14 @@ struct Filter {
 }
 
 impl Filter {
-    /// The filter of `index`, read in `format`, whose matches fold as `all`, the
+    /// The filter of `index`, read as `reader` says, whose matches fold as `all`, the
     /// index's fold state, folds them.
-    fn spawn(index: &SharedIndex, format: &'static Format, filters: Filters, all: &Folds) -> Self {
+    fn spawn(index: &SharedIndex, reader: Reader, filters: Filters, all: &Folds) -> Self {
         let options = filter::Options {
             chunk: FILTER_CHUNK,
         };
         Filter {
-            engine: Engine::spawn(Arc::clone(index), format, filters, options),
+            engine: Engine::spawn(Arc::clone(index), reader, filters, options),
             // In the index's mode, only the matches it excepts are exceptions here.
             folds: all.empty_like(),
         }
@@ -2373,7 +2373,7 @@ impl App {
             };
             Engine::spawn_search(
                 Arc::clone(&self.index),
-                self.settings.format,
+                self.reader(),
                 self.filters.clone(),
                 search.matcher.clone(),
                 options,
@@ -2594,12 +2594,16 @@ impl App {
         })
     }
 
+    fn reader(&self) -> Reader {
+        Reader::new(self.settings.format, self.settings.mapping)
+    }
+
     /// Starts evaluating the filters over the index, in place of any engine at work.
     fn start_filter(&mut self) {
         self.cancel_jump();
         let filters = self.filters.clone();
-        let format = self.settings.format;
-        self.filter = Some(Filter::spawn(&self.index, format, filters, &self.folds));
+        let reader = self.reader();
+        self.filter = Some(Filter::spawn(&self.index, reader, filters, &self.folds));
     }
 
     /// Indexes the source from the start, the rows opening as `opening` says.

@@ -5344,3 +5344,24 @@ fn cycling_into_json_reads_the_keys_the_file_uses() {
     assert_eq!(app.settings().format, built_in("json"));
     assert_eq!(app.level_counts(), PINO_LEVEL_COUNTS);
 }
+
+#[test]
+fn text_filter_on_a_json_log_matches_the_decoded_message() {
+    let app = filtered(json_app("pino.log"), text_filter(r#""X-Legacy""#));
+    assert_eq!(row_numbers(&app), [4]);
+}
+
+/// The exception's lines are the entry's stack trace, which the text filter covers.
+#[test]
+fn text_filter_on_a_json_log_matches_the_decoded_exception() {
+    let filter = text_filter("\tat com.acme.orders.OrderService.create");
+    let app = filtered(json_app("logstash-logback.log"), filter);
+    assert_eq!(row_numbers(&app), [5]);
+}
+
+/// As in a text format, the text filter reads the message, not the other columns.
+#[test]
+fn text_filter_on_a_json_log_leaves_out_the_other_fields() {
+    let app = filtered(json_app("pino.log"), text_filter("web-1"));
+    assert_eq!(row_numbers(&app), Vec::<u64>::new());
+}

@@ -2,6 +2,7 @@
 //! columns of its preset, or whole under `Raw`, and the continuation lines of the
 //! unfolded entries.
 
+use std::borrow::Cow;
 use std::iter;
 use std::ops::Range;
 
@@ -11,9 +12,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{Theme, abbreviate, printable, printable_from};
+use super::{Theme, abbreviate, json, printable, printable_from};
 use crate::app::{App, Search, ShownLine};
-use crate::format::{Column, EntryParser, strip_ansi};
+use crate::format::{Column, EntryParser, Kind, Mapping, strip_ansi};
 use crate::source;
 
 /// The width of the `▶` marker of the selected row.
@@ -119,6 +120,8 @@ struct Columns {
 /// for a column the format doesn't have, or the thread while it is hidden.
 struct Table {
     parser: EntryParser,
+    /// The keys of the columns, for a JSON lines file.
+    json: Option<Mapping>,
     timestamp_format: String,
     timestamp: Option<usize>,
     level: Option<usize>,
@@ -150,6 +153,7 @@ impl Columns {
             let column = |column, width| format.has(column).then_some(width);
             Table {
                 parser,
+                json: matches!(format.kind, Kind::Json).then_some(app.settings().mapping),
                 timestamp_format,
                 timestamp: column(Column::Timestamp, timestamp),
                 level: column(Column::Level, LEVEL_WIDTH),
@@ -203,8 +207,8 @@ impl Columns {
             return row.highlighted(search, shown.line, 0..shown.line.len());
         };
         let line = strip_ansi(shown.line);
-        let head = shown.first.then(|| table.parser.parse(&line)).flatten();
-        let Some(head) = head else {
+        let parts = shown.first.then(|| table.parts(&line)).flatten();
+        let Some(parts) = parts else {
             // Continuation lines and the headless entry have nothing but a message.
             let blank = Span::raw(" ".repeat(self.lead));
             let row = Row::new(vec![blank], text(&line), shown.hidden);
@@ -212,8 +216,6 @@ impl Columns {
         };
         let record = shown.record;
         let mut cells = Vec::new();
-        // A column the format has may still be empty in an entry.
-        let part = |span: Option<Range<usize>>| span.map_or_else(String::new, |s| text(&line[s]));
         if let Some(width) = table.timestamp {
             let timestamp = record.timestamp().map_or_else(String::new, |timestamp| {
                 let local = app.settings().zone.to_datetime(timestamp);
@@ -224,20 +226,62 @@ impl Columns {
         if let Some(width) = table.level {
             let level = record
                 .level()
-                .map_or_else(|| part(head.level.clone()), |level| level.name().to_owned());
+                .map_or(parts.level, |level| level.name().to_owned());
             let style = theme.paint(app.colors().level(record.level()));
             cells.push(Span::styled(cell(&level, width), style));
             cells.push(Span::raw(" "));
         }
         if let Some(width) = table.thread {
-            cells.push(Span::raw(cell_keeping_end(&part(head.thread), width) + " "));
+            cells.push(Span::raw(cell_keeping_end(&parts.thread, width) + " "));
         }
         if let Some(width) = table.logger {
-            let logger = part(head.logger);
-            cells.push(Span::raw(cell(&abbreviate(&logger, width), width) + " "));
+            cells.push(Span::raw(
+                cell(&abbreviate(&parts.logger, width), width) + " ",
+            ));
         }
-        let row = Row::new(cells, text(&line[head.message.clone()]), shown.hidden);
-        row.highlighted(search, &line, head.message)
+        let row = Row::new(
+            cells,
+            text(&parts.source[parts.message.clone()]),
+            shown.hidden,
+        );
+        row.highlighted(search, &parts.source, parts.message)
+    }
+}
+
+/// The columns of a first line that the table shows besides the timestamp, and the
+/// message in `source[message]`.
+struct Parts<'a> {
+    level: String,
+    thread: String,
+    logger: String,
+    source: Cow<'a, [u8]>,
+    message: Range<usize>,
+}
+
+impl Table {
+    /// The parts of `line` if it starts an entry, else `None`. A column the format has
+    /// may still be empty in an entry.
+    fn parts<'a>(&self, line: &'a [u8]) -> Option<Parts<'a>> {
+        if let Some(mapping) = &self.json {
+            let columns = mapping.text(line)?;
+            let message = json::row_message(line, &columns);
+            return Some(Parts {
+                level: String::new(),
+                thread: json::column(line, columns.thread.as_ref()),
+                logger: json::column(line, columns.logger.as_ref()),
+                message: 0..message.len(),
+                source: message,
+            });
+        }
+        let head = self.parser.parse(line)?;
+        let part = |span: Option<Range<usize>>| span.map_or_else(String::new, |s| text(&line[s]));
+        Some(Parts {
+            level: part(head.level),
+            thread: part(head.thread),
+            logger: part(head.logger),
+            source: Cow::Borrowed(line),
+            message: head.message,
+        })
     }
 }
 

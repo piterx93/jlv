@@ -65,11 +65,16 @@ fn finish(engine: &mut Engine, total: usize, mut check: impl FnMut(&Filtered)) -
     }
 }
 
+/// How the engine reads `format`, with no JSON keys.
+fn reader(format: &'static Format) -> Reader {
+    Reader::new(format, Mapping::default())
+}
+
 /// What `filters` find in `log`, once all of it is evaluated.
 fn filter(preset: &'static Format, log: &str, filters: Filters) -> Filtered {
     let indexed = indexed(preset, log.as_bytes());
     let total = indexed.read().unwrap().records.len();
-    let mut engine = Engine::spawn(indexed, preset, filters, Options { chunk: 2 });
+    let mut engine = Engine::spawn(indexed, reader(preset), filters, Options { chunk: 2 });
     finish(&mut engine, total, |_| {})
 }
 
@@ -226,7 +231,7 @@ fn continuation_lines_appended_to_the_last_entry_are_matched() {
     let indexed = indexed(built_in("logback"), log.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&indexed),
-        built_in("logback"),
+        reader(built_in("logback")),
         filters,
         Options { chunk: 1 },
     );
@@ -250,7 +255,7 @@ fn results_of_entries_read_again_are_never_published_stale() {
     let shared = indexed(built_in("logback"), before.as_bytes());
     let mut engine = Engine::spawn(
         Arc::clone(&shared),
-        built_in("logback"),
+        reader(built_in("logback")),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -290,7 +295,7 @@ fn new_filters_from_an_entry_on_keep_the_results_before_it() {
     .concat();
     let mut engine = Engine::spawn(
         indexed(built_in("logback"), log.as_bytes()),
-        built_in("logback"),
+        reader(built_in("logback")),
         Filters {
             text: text("boom"),
             ..Filters::default()
@@ -547,7 +552,7 @@ proptest! {
         let indexed = indexed(built_in("logback"), render(&entries).as_bytes());
         let mut engine = Engine::spawn(
             indexed,
-            built_in("logback"),
+            reader(built_in("logback")),
             first.filters(),
             Options { chunk },
         );
@@ -575,7 +580,7 @@ proptest! {
         let indexed = indexed(built_in("logback"), &log.as_bytes()[..cut]);
         let mut engine = Engine::spawn(
             Arc::clone(&indexed),
-            built_in("logback"),
+            reader(built_in("logback")),
             model.filters(),
             Options { chunk },
         );
@@ -602,7 +607,7 @@ fn evaluate_run(
     let search = search.map(|word| Matcher::new(word, matcher::Options::default()).unwrap());
     evaluate(
         &indexed.read().unwrap(),
-        built_in("logback"),
+        reader(built_in("logback")),
         &model.filters(),
         search.as_ref(),
         run,
@@ -958,4 +963,28 @@ proptest! {
             classes.passes(class.as_deref());
         }
     }
+}
+
+/// Only the JSON format searches decoded (PRD §9.2): read in another, a line that is
+/// a JSON object is searched as written, so `"hi"` doesn't find `\"hi\"`.
+#[test]
+fn search_outside_the_json_format_matches_escapes_as_written() {
+    let log = r#"{"msg":"say \"hi\""}"#.to_owned() + "\n";
+    let raw = built_in("raw");
+    let indexed = indexed(raw, log.as_bytes());
+    let found = |word: &str| {
+        let search = Matcher::new(word, matcher::Options::default()).unwrap();
+        let index = indexed.read().unwrap();
+        evaluate(
+            &index,
+            reader(raw),
+            &Filters::default(),
+            Some(&search),
+            0..1,
+            1,
+        )
+        .entries
+    };
+    assert_eq!(found(r#""hi""#), Vec::<u32>::new());
+    assert_eq!(found(r#"\"hi\""#), [0]);
 }

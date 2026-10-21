@@ -25,7 +25,9 @@ use jiff::Timestamp;
 use memchr::memmem;
 use regex::bytes::CaptureLocations;
 
-use crate::format::{self, EntryParser, Format, Level, strip_ansi_into};
+use crate::format::{
+    self, EntryParser, Format, Kind, Level, Mapping, decoded_line, json::Field, strip_ansi_into,
+};
 use crate::index::Record;
 use crate::matcher::Matcher;
 use crate::source;
@@ -255,23 +257,22 @@ struct Evaluated {
 }
 
 /// Evaluates `filters`, and `search` if given, over the entries `entries` of
-/// `indexed`, read in `format`, as an [`Engine`] does: the run is split into parts
+/// `indexed`, read as `reader` says, as an [`Engine`] does: the run is split into parts
 /// evaluated on up to `threads` threads at once (0 counts as 1). The result is the
 /// same for any number of threads.
 fn evaluate<B: AsRef<[u8]> + Sync>(
     indexed: &Indexed<B>,
-    format: &'static Format,
+    reader: Reader,
     filters: &Filters,
     search: Option<&Matcher>,
     entries: Range<usize>,
     threads: usize,
 ) -> Evaluated {
     let check = Check { filters, search };
-    let parser = format.entry_parser();
     // Borrowed apart because `Indexed` as a whole would need `B: Send` to cross threads.
     let (records, bytes) = (&indexed.records[..], indexed.bytes.as_ref().as_ref());
     let run = |part: Range<usize>| {
-        let mut scratch = Scratch::new(parser);
+        let mut scratch = Scratch::new(reader);
         check.run(records, bytes, part, &mut scratch)
     };
     let part_len = entries.len().div_ceil(threads.max(1)).max(1);
@@ -309,6 +310,20 @@ fn evaluate<B: AsRef<[u8]> + Sync>(
     })
 }
 
+/// How a file's entries are read: its format and, for JSON lines, the keys its
+/// columns are in.
+#[derive(Debug, Clone, Copy)]
+pub struct Reader {
+    format: &'static Format,
+    mapping: Mapping,
+}
+
+impl Reader {
+    pub fn new(format: &'static Format, mapping: Mapping) -> Reader {
+        Reader { format, mapping }
+    }
+}
+
 /// Evaluates the filters over an index on a background thread. Dropping it stops
 /// the thread.
 #[derive(Debug)]
@@ -327,24 +342,25 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Starts evaluating `filters` over the entries of `indexed`, read in `format`.
+    /// Starts evaluating `filters` over the entries of `indexed`, read as `reader`
+    /// says.
     pub fn spawn<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        format: &'static Format,
+        reader: Reader,
         filters: Filters,
         options: Options,
     ) -> Engine
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
-        Self::spawn_with(indexed, format, filters, None, options)
+        Self::spawn_with(indexed, reader, filters, None, options)
     }
 
     /// Like [`spawn`](Self::spawn), but an entry passes only if one of its lines, with
     /// ANSI escape codes stripped, also matches `search`.
     pub fn spawn_search<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        format: &'static Format,
+        reader: Reader,
         filters: Filters,
         search: Matcher,
         options: Options,
@@ -352,12 +368,12 @@ impl Engine {
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
-        Self::spawn_with(indexed, format, filters, Some(Arc::new(search)), options)
+        Self::spawn_with(indexed, reader, filters, Some(Arc::new(search)), options)
     }
 
     fn spawn_with<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        format: &'static Format,
+        reader: Reader,
         filters: Filters,
         search: Option<Arc<Matcher>>,
         options: Options,
@@ -370,7 +386,7 @@ impl Engine {
         let (update_sender, updates) = mpsc::channel();
         let worker = Worker {
             indexed,
-            format,
+            reader,
             threads,
             chunk: options.chunk.max(1),
             jobs: job_receiver,
@@ -511,7 +527,7 @@ struct Worker<B> {
     indexed: Arc<RwLock<Indexed<B>>>,
     /// Entries per chunk, which one thread evaluates.
     chunk: usize,
-    format: &'static Format,
+    reader: Reader,
     /// The most threads a batch of a chunk each is evaluated on.
     threads: usize,
     jobs: Receiver<Job>,
@@ -552,7 +568,7 @@ impl<B: AsRef<[u8]> + Sync> Worker<B> {
             };
             let found = evaluate(
                 &indexed,
-                self.format,
+                self.reader,
                 &job.filters,
                 job.search.as_deref(),
                 batch.clone(),
@@ -588,17 +604,32 @@ impl<B: AsRef<[u8]> + Sync> Worker<B> {
 }
 
 /// What the thread reuses from one entry to the next: room to strip escape codes
-/// into, and to find the columns of a first line in.
+/// and to decode JSON strings into, and to find the columns of a first line in.
 struct Scratch {
     buffer: Vec<u8>,
-    parser: Option<(EntryParser, CaptureLocations)>,
+    decoded: Vec<u8>,
+    reading: Reading,
+}
+
+/// How the first line of an entry yields its message.
+enum Reading {
+    Text(EntryParser, CaptureLocations),
+    Json(Mapping),
+    /// The whole line is the message.
+    Raw,
 }
 
 impl Scratch {
-    fn new(parser: Option<EntryParser>) -> Scratch {
+    fn new(reader: Reader) -> Scratch {
+        let reading = match (&reader.format.kind, reader.format.entry_parser()) {
+            (Kind::Json, _) => Reading::Json(reader.mapping),
+            (_, Some(parser)) => Reading::Text(parser, parser.locations()),
+            (_, None) => Reading::Raw,
+        };
         Scratch {
             buffer: Vec::new(),
-            parser: parser.map(|parser| (parser, parser.locations())),
+            decoded: Vec::new(),
+            reading,
         }
     }
 }
@@ -638,9 +669,19 @@ impl Check<'_> {
 
     /// Whether some line of `entry` matches the search, always true without one.
     fn finds(&self, entry: &[u8], scratch: &mut Scratch) -> bool {
-        self.search.is_none_or(|search| {
-            source::lines(entry)
-                .any(|line| search.is_match(strip_ansi_into(line, &mut scratch.buffer)))
+        let Some(search) = self.search else {
+            return true;
+        };
+        let json = matches!(scratch.reading, Reading::Json(_));
+        source::lines(entry).enumerate().any(|(i, line)| {
+            let line = strip_ansi_into(line, &mut scratch.buffer);
+            // Only a JSON entry's first line has strings to decode.
+            let line = if json && i == 0 {
+                decoded_line(line, &mut scratch.decoded)
+            } else {
+                line
+            };
+            search.is_match(line)
         })
     }
 
@@ -666,11 +707,28 @@ impl Check<'_> {
         let Some(text) = &filters.text else {
             return true;
         };
-        let head = match &mut scratch.parser {
-            Some((parser, locations)) => parser.parse_with(first, locations),
-            None => None,
+        let in_first = match &mut scratch.reading {
+            Reading::Text(parser, locations) => {
+                let head = parser.parse_with(first, locations);
+                text.is_match(head.map_or(first, |head| &first[head.message]))
+            }
+            Reading::Json(mapping) => json_matches(text, mapping, first, &mut scratch.decoded),
+            Reading::Raw => text.is_match(first),
         };
-        let message = head.map_or(first, |head| &first[head.message]);
-        text.is_match(message) || lines.any(|line| text.is_match(&format::strip_ansi(line)))
+        in_first || lines.any(|line| text.is_match(&format::strip_ansi(line)))
     }
+}
+
+/// Whether `text` matches the decoded message or exception of the JSON line `first`.
+/// A line without a message field has the whole line as its message.
+fn json_matches(text: &Matcher, mapping: &Mapping, first: &[u8], decoded: &mut Vec<u8>) -> bool {
+    let Some(columns) = mapping.text(first) else {
+        return text.is_match(first);
+    };
+    let mut matches = |field: &Field| text.is_match(field.text(first, decoded));
+    let in_message = match &columns.message {
+        Some(message) => matches(message),
+        None => text.is_match(first),
+    };
+    in_message || columns.exception.as_ref().is_some_and(matches)
 }

@@ -4,7 +4,7 @@
 use super::detect::sample;
 use super::json::{self, Field};
 
-pub use read::JsonColumns;
+pub use read::{JsonColumns, JsonText, Other};
 
 mod read;
 #[cfg(test)]
@@ -52,6 +52,16 @@ pub(super) fn object(line: &[u8]) -> Option<usize> {
         .take_while(|byte| matches!(byte, b' ' | b'\t'))
         .count();
     (line.get(bom + blanks) == Some(&b'{')).then_some(bom + blanks)
+}
+
+/// `line` as search reads it: a JSON object line with its string escapes decoded, into
+/// `buffer` if it has any. Any other line is returned as is.
+pub fn decoded_line<'a>(line: &'a [u8], buffer: &'a mut Vec<u8>) -> &'a [u8] {
+    if object(line).is_some() {
+        json::decode_into(line, buffer)
+    } else {
+        line
+    }
 }
 
 /// The field `key` names on the object `line`: the key written literally, else, for
