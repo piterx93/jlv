@@ -10,7 +10,7 @@ use jiff::tz::TimeZone;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vilog::app::App;
 use vilog::filter::{Filters, Levels};
-use vilog::format::{Level, Preset};
+use vilog::format::{Format, Level};
 use vilog::source;
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -30,7 +30,7 @@ fn export_writes_the_filtered_entries_as_in_the_file_without_escapes() {
     let mut app = App::new(
         &path,
         source::open(&path).unwrap(),
-        Some(Preset::Logback),
+        Format::by_id("logback"),
         TimeZone::UTC,
         "2026-10-08T12:00:00Z".parse().unwrap(),
         false,

@@ -3,7 +3,8 @@ use std::iter;
 use proptest::prelude::*;
 
 use super::*;
-use crate::test_support::EXAMPLES;
+use crate::format::BUILT_IN;
+use crate::test_support::{EXAMPLES, built_in};
 
 const LOGBACK: &str = EXAMPLES[0].1;
 const WILDFLY: &str = EXAMPLES[4].1;
@@ -27,7 +28,7 @@ const STACK_TRACE: [&str; 5] = [
     "\t... 12 more",
 ];
 
-fn detect_lines<S: AsRef<str>>(lines: &[S]) -> Option<Preset> {
+fn detect_lines<S: AsRef<str>>(lines: &[S]) -> Option<&'static Format> {
     detect(lines.iter().map(|line| line.as_ref().as_bytes()))
 }
 
@@ -70,15 +71,15 @@ fn then_fail<'a>(lines: &'a [String]) -> impl Iterator<Item = &'a [u8]> {
 
 #[test]
 fn recognizes_each_preset_from_its_example_line() {
-    for (preset, line) in EXAMPLES {
-        assert_eq!(detect_lines(&[line]), Some(preset), "{line}");
+    for (id, line) in EXAMPLES {
+        assert_eq!(detect_lines(&[line]), Some(built_in(id)), "{line}");
     }
 }
 
 #[test]
 fn preset_matching_most_lines_wins() {
     let lines = [repeat(&[LOGBACK], 35), repeat(&[WILDFLY], 65)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Wildfly));
+    assert_eq!(detect_lines(&lines), Some(built_in("wildfly")));
 }
 
 #[test]
@@ -93,11 +94,11 @@ fn mixed_presets_without_a_majority_are_not_recognized() {
 fn exactly_sixty_percent_is_recognized() {
     assert_eq!(
         detect_lines(&logback_then_noise(3, 2)),
-        Some(Preset::Logback)
+        Some(built_in("logback"))
     );
     assert_eq!(
         detect_lines(&logback_then_noise(60, 40)),
-        Some(Preset::Logback)
+        Some(built_in("logback"))
     );
 }
 
@@ -130,14 +131,14 @@ fn file_of_only_stack_trace_lines_is_not_recognized() {
 fn continuation_lines_are_left_out_of_the_score() {
     // 2 of 102 lines are entries, but 100 are a stack trace.
     let lines = [logback(2), repeat(&STACK_TRACE, 100)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
 fn lines_starting_with_a_space_or_a_tab_are_continuations() {
     let wrapped = ["   wrapped message text", "\twrapped message text"];
     let lines = [logback(2), repeat(&wrapped, 20)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
@@ -148,14 +149,14 @@ fn exception_lines_are_continuations_without_leading_whitespace() {
         "com.example.PaymentError",
     ];
     let lines = [logback(2), repeat(&exceptions, 20)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
 fn continuation_check_looks_at_the_line_without_colour_codes() {
     let frame = "\x1b[31m\tat com.example.OrderService.place(OrderService.java:88)\x1b[0m";
     let lines = [logback(2), repeat(&[frame], 20)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 // --- the sample ---
@@ -165,7 +166,7 @@ fn sample_is_the_first_200_lines() {
     // 120 of the first 200 lines are entries: 60%. With one line more or less in the
     // sample it would be under.
     let lines = [noise(80), logback(120), noise(1000)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
@@ -183,31 +184,31 @@ fn continuation_lines_count_toward_the_sample() {
 #[test]
 fn empty_lines_do_not_count_toward_the_sample() {
     let lines = [repeat(&[""], 300), logback(5)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
 fn lines_of_only_spaces_and_tabs_do_not_count_toward_the_sample() {
     let lines = [repeat(&[" ", "\t", "  \t  "], 300), logback(5)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
 fn lines_of_only_colour_codes_do_not_count_toward_the_sample() {
     let lines = [repeat(&["\x1b[0m", "\x1b[32m  \x1b[0m"], 300), logback(5)].concat();
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 #[test]
 fn reads_no_line_past_the_sample() {
     let lines = logback(200);
-    assert_eq!(detect(then_fail(&lines)), Some(Preset::Logback));
+    assert_eq!(detect(then_fail(&lines)), Some(built_in("logback")));
 }
 
 #[test]
 fn reads_past_blank_lines_up_to_the_200th_other_line() {
     let lines = [repeat(&[""], 50), noise(80), logback(120)].concat();
-    assert_eq!(detect(then_fail(&lines)), Some(Preset::Logback));
+    assert_eq!(detect(then_fail(&lines)), Some(built_in("logback")));
 }
 
 #[test]
@@ -219,7 +220,7 @@ fn reads_at_most_2000_lines() {
 #[test]
 fn line_2000_is_still_read() {
     let lines = [repeat(&[""], 1999), logback(1)].concat();
-    assert_eq!(detect(then_fail(&lines)), Some(Preset::Logback));
+    assert_eq!(detect(then_fail(&lines)), Some(built_in("logback")));
 }
 
 // --- ANSI colours ---
@@ -229,7 +230,7 @@ fn colour_codes_are_stripped_before_matching() {
     let coloured = "\x1b[2m2026-10-07 12:00:00.123\x1b[0m [main] \x1b[32mINFO \x1b[0m \
                     com.example.App - Started";
     let lines = repeat(&[coloured], 10);
-    assert_eq!(detect_lines(&lines), Some(Preset::Logback));
+    assert_eq!(detect_lines(&lines), Some(built_in("logback")));
 }
 
 // --- properties ---
@@ -237,7 +238,8 @@ fn colour_codes_are_stripped_before_matching() {
 /// What a line is, by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Entry(Preset),
+    /// An entry line of the format with this id.
+    Entry(&'static str),
     Noise,
     Continuation,
     Blank,
@@ -256,7 +258,7 @@ fn entry_line() -> impl Strategy<Value = (Kind, String)> {
     )
 }
 
-fn entry_line_of(preset: Preset) -> (Kind, String) {
+fn entry_line_of(preset: &'static str) -> (Kind, String) {
     let (_, line) = EXAMPLES
         .into_iter()
         .find(|&(own, _)| own == preset)
@@ -279,7 +281,7 @@ fn blank_line() -> impl Strategy<Value = (Kind, String)> {
 }
 
 /// Any kind of line, mostly ones of `dominant` so that its score lands near 60%.
-fn line_around(dominant: Preset) -> impl Strategy<Value = (Kind, String)> {
+fn line_around(dominant: &'static str) -> impl Strategy<Value = (Kind, String)> {
     prop_oneof![
         6 => Just(entry_line_of(dominant)),
         1 => entry_line(),
@@ -289,7 +291,7 @@ fn line_around(dominant: Preset) -> impl Strategy<Value = (Kind, String)> {
     ]
 }
 
-fn structured_preset() -> impl Strategy<Value = Preset> {
+fn structured_preset() -> impl Strategy<Value = &'static str> {
     prop::sample::select(EXAMPLES.map(|(preset, _)| preset).to_vec())
 }
 
@@ -307,25 +309,24 @@ fn texts(lines: &[(Kind, String)]) -> Vec<&str> {
     lines.iter().map(|(_, line)| line.as_str()).collect()
 }
 
-/// The detection worked out by hand from what each line is, for logs whose sample is
-/// the whole log.
-fn expected(lines: &[(Kind, String)]) -> Option<Preset> {
+/// The id of the format detection should find, worked out by hand from what each line
+/// is, for logs whose sample is the whole log. Formats are tried in table order.
+fn expected(lines: &[(Kind, String)]) -> Option<&'static str> {
     let scored = lines
         .iter()
         .filter(|(kind, _)| matches!(kind, Kind::Entry(_) | Kind::Noise))
         .count();
-    let best = EXAMPLES
-        .map(|(preset, _)| preset)
-        .into_iter()
-        .map(|preset| {
+    let best = BUILT_IN
+        .iter()
+        .map(|format| {
             let entries = lines
                 .iter()
-                .filter(|(kind, _)| *kind == Kind::Entry(preset))
+                .filter(|(kind, _)| *kind == Kind::Entry(format.id))
                 .count();
-            (preset, entries)
+            (format.id, entries)
         })
         .find(|&(_, entries)| scored > 0 && entries * 5 >= scored * 3);
-    best.map(|(preset, _)| preset)
+    best.map(|(id, _)| id)
 }
 
 /// `lines` with `inserted` put in at the given positions, each taken modulo the length
@@ -351,7 +352,7 @@ proptest! {
 
     #[test]
     fn agrees_with_counting_by_hand(lines in log(200)) {
-        prop_assert_eq!(detect_lines(&texts(&lines)), expected(&lines));
+        prop_assert_eq!(detect_lines(&texts(&lines)).map(|format| format.id), expected(&lines));
     }
 
     #[test]

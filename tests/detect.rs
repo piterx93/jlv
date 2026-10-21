@@ -1,6 +1,6 @@
 //! Format detection on the fixture logs in `tests/fixtures`, one per preset.
 
-use vilog::format::{Preset, detect};
+use vilog::format::{Format, detect};
 
 mod common;
 
@@ -8,7 +8,7 @@ use common::{fixture, fixtures, lines};
 
 /// What detection makes of a file with these bytes, split into lines as the viewer
 /// splits them.
-fn detect_bytes(bytes: &[u8]) -> Option<Preset> {
+fn detect_bytes(bytes: &[u8]) -> Option<&'static Format> {
     detect(lines(bytes))
 }
 

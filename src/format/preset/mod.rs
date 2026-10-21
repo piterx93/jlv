@@ -1,10 +1,12 @@
-//! The log layouts vilog knows and how to recognise the first line of an entry in each.
+//! The log formats vilog knows, as data, and how to recognise the first line of an
+//! entry in each.
 
 use std::fmt;
 use std::ops::Range;
 use std::sync::LazyLock;
 
 use clap::ValueEnum;
+use clap::builder::PossibleValue;
 use jiff::tz::TimeZone;
 use regex::bytes::{CaptureLocations, Regex};
 
@@ -13,95 +15,162 @@ use crate::format::{LogTime, time};
 #[cfg(test)]
 mod tests;
 
-/// A built-in log format. On the command line (`--format`) the names are the variant
-/// names in kebab case: `logback`, `logback-basic`, …, `raw`.
-///
-/// - `Logback`, Logback / Log4j2 classic:
-///   `2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started`
-/// - `LogbackBasic`, Logback's BasicConfigurator, time only:
-///   `12:00:00.123 [main] INFO  com.example.App -- Started`
-/// - `Spring3`, Spring Boot 3, the `[app]` group is optional:
-///   `2026-10-07T12:00:00.123+02:00  INFO 12345 --- [app] [           main] o.s.b.SpringApplication                  : Started`
-/// - `Spring2`, Spring Boot 2:
-///   `2026-10-07 12:00:00.123  INFO 12345 --- [           main] o.s.b.SpringApplication                  : Started`
-/// - `Wildfly`, WildFly `server.log`:
-///   `2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: started`
-/// - `WildflyConsole`, WildFly on the console, time only and often coloured:
-///   `12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: starting`
-/// - `Raw`, no structure: every line is an entry of its own.
-//
-// No doc comments on the variants: clap would turn them into help for each value and
-// change the `--format` help and error texts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
-pub enum Preset {
-    Logback,
-    LogbackBasic,
-    Spring3,
-    Spring2,
-    Wildfly,
-    WildflyConsole,
+/// A log format: how to find where an entry starts and what its first line holds.
+/// Built-in formats live in [`BUILT_IN`] for the whole run, so a format is passed
+/// around as `&'static Format`.
+pub struct Format {
+    /// The name `--format` takes: `logback`, `logback-basic`, …, `raw`.
+    pub id: &'static str,
+    /// The name the header shows: `Logback`, `Logback basic`, …, `Raw`.
+    pub name: &'static str,
+    pub kind: Kind,
+}
+
+/// How a format reads a line.
+#[derive(Debug)]
+pub enum Kind {
+    /// A regex over the start of a line finds an entry's first line and its columns.
+    Regex(Layout),
+    /// No structure: every line is an entry of its own.
     Raw,
 }
 
-/// The preset's name as the header shows it: `Logback`, `Logback basic`,
-/// `Spring Boot 3`, `Spring Boot 2`, `WildFly`, `WildFly console` and `Raw`.
-impl fmt::Display for Preset {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Preset::Logback => "Logback",
-            Preset::LogbackBasic => "Logback basic",
-            Preset::Spring3 => "Spring Boot 3",
-            Preset::Spring2 => "Spring Boot 2",
-            Preset::Wildfly => "WildFly",
-            Preset::WildflyConsole => "WildFly console",
-            Preset::Raw => "Raw",
-        })
-    }
+/// A text format's entry-start regex and what its timestamps hold.
+#[derive(Debug)]
+pub struct Layout {
+    pattern: &'static Pattern,
+    /// Whether the timestamp has a date. Without one it is only a time of day.
+    has_date: bool,
+    /// Whether the timestamp ends in an offset.
+    has_offset: bool,
 }
 
-impl Preset {
-    /// Every preset in a fixed order: within a family the one with a date comes before
-    /// the time-only one, and `Raw` comes last. Detection breaks ties in this order.
-    pub const ALL: [Preset; 7] = [
-        Preset::Logback,
-        Preset::LogbackBasic,
-        Preset::Spring3,
-        Preset::Spring2,
-        Preset::Wildfly,
-        Preset::WildflyConsole,
-        Preset::Raw,
-    ];
+/// The built-in formats in a fixed order: within a family the one with a date comes
+/// before the time-only one, and `raw` comes last. Detection breaks ties in this
+/// order and `P` steps through it.
+///
+/// - `logback`, Logback / Log4j2 classic:
+///   `2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started`
+/// - `logback-basic`, Logback's BasicConfigurator, time only:
+///   `12:00:00.123 [main] INFO  com.example.App -- Started`
+/// - `spring3`, Spring Boot 3, the `[app]` group is optional:
+///   `2026-10-07T12:00:00.123+02:00  INFO 12345 --- [app] [           main] o.s.b.SpringApplication                  : Started`
+/// - `spring2`, Spring Boot 2:
+///   `2026-10-07 12:00:00.123  INFO 12345 --- [           main] o.s.b.SpringApplication                  : Started`
+/// - `wildfly`, WildFly `server.log`:
+///   `2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: started`
+/// - `wildfly-console`, WildFly on the console, time only and often coloured:
+///   `12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: starting`
+/// - `raw`, no structure: every line is an entry of its own.
+pub static BUILT_IN: &[Format] = &[
+    text("logback", "Logback", &LOGBACK, true, false),
+    text(
+        "logback-basic",
+        "Logback basic",
+        &LOGBACK_BASIC,
+        false,
+        false,
+    ),
+    text("spring3", "Spring Boot 3", &SPRING3, true, true),
+    text("spring2", "Spring Boot 2", &SPRING2, true, false),
+    text("wildfly", "WildFly", &WILDFLY, true, false),
+    text(
+        "wildfly-console",
+        "WildFly console",
+        &WILDFLY_CONSOLE,
+        false,
+        false,
+    ),
+    Format {
+        id: "raw",
+        name: "Raw",
+        kind: Kind::Raw,
+    },
+];
 
-    /// What recognises this preset's entry-start lines. `Raw` has none: it doesn't
-    /// group lines, so whoever reads a file under `Raw` treats every line as an entry.
-    pub fn entry_parser(self) -> Option<EntryParser> {
-        static LOGBACK: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, LOGBACK_COLUMNS));
-        static LOGBACK_BASIC: Pattern = Pattern::new(|| EntryPattern::new(TIME, LOGBACK_COLUMNS));
-        static SPRING3: Pattern =
-            Pattern::new(|| EntryPattern::new(ISO_DATE_TIME, SPRING3_COLUMNS));
-        static SPRING2: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, SPRING2_COLUMNS));
-        static WILDFLY: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, WILDFLY_COLUMNS));
-        static WILDFLY_CONSOLE: Pattern = Pattern::new(|| EntryPattern::new(TIME, WILDFLY_COLUMNS));
-        let pattern: &'static EntryPattern = match self {
-            Preset::Logback => &LOGBACK,
-            Preset::LogbackBasic => &LOGBACK_BASIC,
-            Preset::Spring3 => &SPRING3,
-            Preset::Spring2 => &SPRING2,
-            Preset::Wildfly => &WILDFLY,
-            Preset::WildflyConsole => &WILDFLY_CONSOLE,
-            Preset::Raw => return None,
-        };
-        Some(EntryParser {
-            preset: self,
+/// A built-in text format.
+const fn text(
+    id: &'static str,
+    name: &'static str,
+    pattern: &'static Pattern,
+    has_date: bool,
+    has_offset: bool,
+) -> Format {
+    Format {
+        id,
+        name,
+        kind: Kind::Regex(Layout {
             pattern,
-        })
+            has_date,
+            has_offset,
+        }),
     }
 }
 
-/// Recognises the first line of an entry in one preset and finds its columns.
+static LOGBACK: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, LOGBACK_COLUMNS));
+static LOGBACK_BASIC: Pattern = Pattern::new(|| EntryPattern::new(TIME, LOGBACK_COLUMNS));
+static SPRING3: Pattern = Pattern::new(|| EntryPattern::new(ISO_DATE_TIME, SPRING3_COLUMNS));
+static SPRING2: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, SPRING2_COLUMNS));
+static WILDFLY: Pattern = Pattern::new(|| EntryPattern::new(DATE_TIME, WILDFLY_COLUMNS));
+static WILDFLY_CONSOLE: Pattern = Pattern::new(|| EntryPattern::new(TIME, WILDFLY_COLUMNS));
+
+impl Format {
+    /// The built-in format whose [`id`](Self::id) is `id`, e.g. `logback-basic`.
+    /// Letter case counts. `None` for any other name.
+    pub fn by_id(id: &str) -> Option<&'static Format> {
+        BUILT_IN.iter().find(|format| format.id == id)
+    }
+
+    /// What recognises this format's entry-start lines. `raw` has none: it doesn't
+    /// group lines, so whoever reads a file under `raw` treats every line as an entry.
+    pub fn entry_parser(&'static self) -> Option<EntryParser> {
+        match &self.kind {
+            Kind::Regex(layout) => Some(EntryParser {
+                layout,
+                pattern: layout.pattern,
+            }),
+            Kind::Raw => None,
+        }
+    }
+}
+
+/// Formats are the same when their ids are.
+impl PartialEq for Format {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Format {}
+
+/// Only the id, so that a format in a test failure doesn't show its whole regex.
+impl fmt::Debug for Format {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Format").field(&self.id).finish()
+    }
+}
+
+/// `--format` takes the ids of [`BUILT_IN`], in table order. Any other value is an
+/// invalid value, and the error lists the valid ones.
+impl ValueEnum for &'static Format {
+    fn value_variants<'a>() -> &'a [Self] {
+        // `&'static Format` is a pointer to the table's own elements, so a slice of
+        // them is built once.
+        static VARIANTS: LazyLock<Vec<&'static Format>> =
+            LazyLock::new(|| BUILT_IN.iter().collect());
+        &VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(self.id))
+    }
+}
+
+/// Recognises the first line of an entry in one format and finds its columns.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryParser {
-    preset: Preset,
+    layout: &'static Layout,
+    // Forced once here, so that `parse` doesn't go through the LazyLock on every line.
     pattern: &'static EntryPattern,
 }
 
@@ -124,7 +193,7 @@ impl EntryParser {
 
     /// [`parse`](Self::parse) in `locations`, which [`locations`](Self::locations)
     /// gave and which are reused from line to line. Fresh ones cost an allocation and
-    /// an update of a reference count that every thread parsing with this preset
+    /// an update of a reference count that every thread parsing with this format
     /// shares, which keeps parsing on many threads at once from getting any faster.
     pub(crate) fn parse_with(
         self,
@@ -145,14 +214,14 @@ impl EntryParser {
         })
     }
 
-    /// Whether the timestamp has a date. Without one (`LogbackBasic`,
-    /// `WildflyConsole`) it is only a time of day.
+    /// Whether the timestamp has a date. Without one (`logback-basic`,
+    /// `wildfly-console`) it is only a time of day.
     pub fn has_date(self) -> bool {
-        !matches!(self.preset, Preset::LogbackBasic | Preset::WildflyConsole)
+        self.layout.has_date
     }
 
     /// What the timestamp span `span` (the bytes of [`EntryHead::timestamp`]) says:
-    /// an instant if this preset writes a date, else a time of day. The fraction of a
+    /// an instant if this format writes a date, else a time of day. The fraction of a
     /// second follows a `.` or a `,` and has 1 to 9 digits. A timestamp without an
     /// offset is local time in `zone`; one that falls into a gap or a fold of `zone`
     /// is resolved the way jiff's `compatible` disambiguation does. `None` if `span`
@@ -171,13 +240,13 @@ impl EntryParser {
     /// Whether the timestamp ends in an offset. Only Spring Boot 3 writes one, in
     /// ISO 8601 with a `T` before the time.
     fn has_offset(self) -> bool {
-        self.preset == Preset::Spring3
+        self.layout.has_offset
     }
 }
 
 type Pattern = LazyLock<EntryPattern>;
 
-/// A preset's entry-start regex and which of its groups holds each column.
+/// A text format's entry-start regex and which of its groups holds each column.
 #[derive(Debug)]
 struct EntryPattern {
     regex: Regex,

@@ -135,7 +135,7 @@ impl Table {
 
 impl Columns {
     fn new(app: &App, width: usize) -> Self {
-        let table = app.settings().preset.entry_parser().map(|parser| {
+        let table = app.settings().format.entry_parser().map(|parser| {
             let (timestamp_format, timestamp) = if width < DATE_FROM_WIDTH {
                 (TIME.0.to_owned(), TIME.1)
             } else {

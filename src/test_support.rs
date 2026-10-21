@@ -18,34 +18,48 @@ use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App};
-use crate::format::Preset;
+use crate::format::{BUILT_IN, Format, Kind};
 use crate::keymap::Keymap;
 use crate::source::{self, Source};
 
-/// The example lines of PRD §6.1, one per preset but `Raw`.
-pub const EXAMPLES: [(Preset, &str); 6] = [
+/// The built-in format `id` names.
+pub fn built_in(id: &str) -> &'static Format {
+    Format::by_id(id).unwrap_or_else(|| panic!("no built-in format {id}"))
+}
+
+/// Every built-in text format, in table order.
+pub fn text_formats() -> Vec<&'static Format> {
+    BUILT_IN
+        .iter()
+        .filter(|format| matches!(format.kind, Kind::Regex(_)))
+        .collect()
+}
+
+/// The example lines of PRD §6.1 by format id, one per built-in format but `raw`, in
+/// table order.
+pub const EXAMPLES: [(&str, &str); 6] = [
     (
-        Preset::Logback,
+        "logback",
         "2026-10-07 12:00:00.123 [http-nio-8080-exec-3] INFO  com.example.OrderService - Order 42 created",
     ),
     (
-        Preset::LogbackBasic,
+        "logback-basic",
         "12:00:00.123 [main] INFO  com.example.App -- Started",
     ),
     (
-        Preset::Spring3,
+        "spring3",
         "2026-10-07T12:00:00.123+02:00  INFO 12345 --- [myapp] [           main] o.s.b.SpringApplication                  : Started App in 2.1s",
     ),
     (
-        Preset::Spring2,
+        "spring2",
         "2026-10-07 12:00:00.123  INFO 12345 --- [           main] o.s.b.SpringApplication                  : Started App",
     ),
     (
-        Preset::Wildfly,
+        "wildfly",
         "2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: WildFly Full 33.0.0.Final started",
     ),
     (
-        Preset::WildflyConsole,
+        "wildfly-console",
         "12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: ...",
     ),
 ];
@@ -67,13 +81,13 @@ pub fn gzip(bytes: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-/// A viewer in `Raw` over the gzip file `/var/log/app.log.gz` holding `gzip`, opened
+/// A viewer in `raw` over the gzip file `/var/log/app.log.gz` holding `gzip`, opened
 /// as vilog opens a file by default, at the end. It hasn't taken in any entries yet.
 pub fn gzip_app(gzip: &[u8]) -> App {
     App::new(
         Path::new("/var/log/app.log.gz"),
         source(gzip),
-        Some(Preset::Raw),
+        Some(built_in("raw")),
         zone(),
         mtime(),
         true,
@@ -90,19 +104,19 @@ pub fn mtime() -> Timestamp {
     "2026-10-08T12:00:00Z".parse().unwrap()
 }
 
-/// A viewer over `content` in `Raw`, opened at the top as `/var/log/app.log`, with
+/// A viewer over `content` in `raw`, opened at the top as `/var/log/app.log`, with
 /// the whole file indexed.
 pub fn app(content: &[u8]) -> App {
     named_app("/var/log/app.log", content)
 }
 
-/// A viewer over `content` in `Raw`, opened at the top as `path`, with the whole
+/// A viewer over `content` in `raw`, opened at the top as `path`, with the whole
 /// file indexed.
 pub fn named_app(path: impl AsRef<Path>, content: &[u8]) -> App {
     let mut app = App::new(
         path.as_ref(),
         source(content),
-        Some(Preset::Raw),
+        Some(built_in("raw")),
         zone(),
         mtime(),
         false,
@@ -111,7 +125,7 @@ pub fn named_app(path: impl AsRef<Path>, content: &[u8]) -> App {
     app
 }
 
-/// A viewer over `content` in the preset detected from it, opened at the top as
+/// A viewer over `content` in the format detected from it, opened at the top as
 /// `/var/log/app.log`, with the whole file indexed.
 pub fn detected_app(content: &[u8]) -> App {
     let mut app = opened(None, content, false);
@@ -119,27 +133,27 @@ pub fn detected_app(content: &[u8]) -> App {
     app
 }
 
-/// A viewer over `content` in `preset`, opened at the top as `/var/log/app.log`,
+/// A viewer over `content` in `format`, opened at the top as `/var/log/app.log`,
 /// with the whole file indexed.
-pub fn app_in(preset: Preset, content: &[u8]) -> App {
-    let mut app = unindexed_app(preset, content);
+pub fn app_in(format: &'static Format, content: &[u8]) -> App {
+    let mut app = unindexed_app(format, content);
     wait_for_index(&mut app);
     app
 }
 
-/// A viewer over `content` in `preset`, opened at the top as `/var/log/app.log`,
+/// A viewer over `content` in `format`, opened at the top as `/var/log/app.log`,
 /// that hasn't taken in any entries yet.
-pub fn unindexed_app(preset: Preset, content: &[u8]) -> App {
-    opened(Some(preset), content, false)
+pub fn unindexed_app(format: &'static Format, content: &[u8]) -> App {
+    opened(Some(format), content, false)
 }
 
-/// A viewer over `content` in `preset`, opened at the end as `/var/log/app.log` to
+/// A viewer over `content` in `format`, opened at the end as `/var/log/app.log` to
 /// follow it, that hasn't taken in any entries yet.
-pub fn following_app(preset: Preset, content: &[u8]) -> App {
-    opened(Some(preset), content, true)
+pub fn following_app(format: &'static Format, content: &[u8]) -> App {
+    opened(Some(format), content, true)
 }
 
-fn opened(format: Option<Preset>, content: &[u8], follow: bool) -> App {
+fn opened(format: Option<&'static Format>, content: &[u8], follow: bool) -> App {
     App::new(
         Path::new("/var/log/app.log"),
         source(content),

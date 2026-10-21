@@ -55,7 +55,7 @@ fn entry_lines(app: &App) -> Vec<String> {
 
 fn entry_head(app: &App, entry: &[u8]) -> Vec<String> {
     let mut lines = source::lines(entry);
-    let Some(parser) = app.settings().preset.entry_parser() else {
+    let Some(parser) = app.settings().format.entry_parser() else {
         return lines.map(text).collect();
     };
     let mut shown = Vec::new();

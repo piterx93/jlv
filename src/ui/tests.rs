@@ -17,9 +17,10 @@ use super::*;
 use crate::app::{Action, FileChange};
 use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, TimeFilter, TimeSpec};
-use crate::format::Preset;
+use crate::format::{BUILT_IN, Format};
 use crate::matcher::{self, Matcher};
 use crate::mouse::HitMap;
+use crate::test_support::built_in;
 use crate::test_support::{
     self, EXAMPLES, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
     following_app, hide_line_numbers, key, named_app, numbered_log, row, spike_log, unindexed_app,
@@ -459,7 +460,7 @@ const FILTER_LOG: &str = concat!(
 
 #[test]
 fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_bar() {
-    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), FILTER_LOG.as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "vilog ─ app.log ─ 565 B ─ Logback ─ PAUSED ●                     E:2 W:3 I:1 D:1"
     "▶12:04:00.000 WARN  com.myco.pay.PayClient   Retry 1/3 after timeout            "
@@ -492,7 +493,7 @@ fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_ba
 /// the other filters hide.
 #[test]
 fn filter_bar_shows_every_active_filter_under_the_header() {
-    let mut app = app_in(Preset::Logback, FILTER_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), FILTER_LOG.as_bytes());
     app.set_filters(Filters {
         levels: Levels::only(&[Level::Warn, Level::Error, Level::Fatal]),
         classes: Classes::parse(["com.myco.*", "!Sql"]).unwrap(),
@@ -662,7 +663,7 @@ const HEADLESS_FIRST_LOG: &str = concat!(
 
 /// The header at `width` columns after `c` on the headless entry, which has no class.
 fn header_with_a_notice(width: u16) -> String {
-    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), HEADLESS_FIRST_LOG.as_bytes());
     let mut terminal = drawn(&mut app, width, 24, Theme::Styled);
     app.key(char_key('c'));
     draw(&mut terminal, &mut app, Theme::Styled);
@@ -687,7 +688,7 @@ fn level_counters_that_do_not_fit_after_the_title_are_left_out() {
 
 #[test]
 fn header_shows_the_indexing_progress_until_the_index_is_complete() {
-    let mut app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
+    let mut app = unindexed_app(built_in("raw"), numbered_log(100).as_bytes());
     assert_snapshot!(screen_after(&mut app, &[]), @r#"
     "vilog ─ app.log ─ 5.1 KB ─ Raw ─ PAUSED ● ─ indexing 0%                         "
     "                                                                                "
@@ -719,7 +720,7 @@ fn header_shows_the_indexing_progress_until_the_index_is_complete() {
 #[test]
 fn header_names_the_preset_the_file_is_read_in() {
     let mut app = app_in(
-        Preset::Logback,
+        built_in("logback"),
         b"2026-10-07 12:00:00.123 [main] INFO  com.example.App - Started\n",
     );
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
@@ -731,7 +732,7 @@ fn header_names_the_preset_the_file_is_read_in() {
 
 #[test]
 fn empty_file_shows_no_indexing_progress() {
-    let mut app = unindexed_app(Preset::Raw, b"");
+    let mut app = unindexed_app(built_in("raw"), b"");
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
     assert_eq!(row(&terminal, 0), "vilog ─ app.log ─ 0 B ─ Raw ─ PAUSED ●");
 }
@@ -867,7 +868,7 @@ const TABLE_LOG: &str = concat!(
 );
 
 fn table() -> App {
-    app_in(Preset::Logback, TABLE_LOG.as_bytes())
+    app_in(built_in("logback"), TABLE_LOG.as_bytes())
 }
 
 /// The buffer's debug view lists every change of style; a single entry at 0,0 means
@@ -986,7 +987,7 @@ fn class_column_grows_to_at_most_40_columns() {
 #[test]
 fn level_column_names_the_level_however_the_line_spells_it() {
     let mut app = app_in(
-        Preset::Logback,
+        built_in("logback"),
         b"2026-10-07 12:00:00.100 [main] warning com.example.App - Retry\n",
     );
     let terminal = drawn(&mut app, 80, 24, Theme::Styled);
@@ -1075,7 +1076,7 @@ const LONG_MESSAGE_LOG: &str = concat!(
 );
 
 fn long_messages() -> App {
-    app_in(Preset::Logback, LONG_MESSAGE_LOG.as_bytes())
+    app_in(built_in("logback"), LONG_MESSAGE_LOG.as_bytes())
 }
 
 #[test]
@@ -1142,7 +1143,7 @@ fn two_line_entries() -> App {
             )
         })
         .collect();
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 /// The first 13 columns of screen lines `lines` after `w` and then `j` `downs` times.
@@ -1184,7 +1185,7 @@ fn mixed_height_entries(two_lines_first: bool) -> App {
             )
         })
         .collect();
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 /// The first 13 columns of screen lines `lines` after pressing `keys`.
@@ -1282,7 +1283,7 @@ fn entries_with_frames(frames: &[usize]) -> App {
             format!("2026-10-07 12:00:00.{i:03} [main] INFO  com.example.App - step {i}\n{frames}")
         })
         .collect();
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 fn traces() -> App {
@@ -1562,7 +1563,7 @@ fn control_characters_in_the_file_name_are_replaced() {
 /// A viewer opened at the end of `numbered_log(3)`, on the 22 lines an 80×24
 /// screen has for rows, with the whole file indexed.
 fn three_lines_followed() -> App {
-    let mut app = following_app(Preset::Raw, numbered_log(3).as_bytes());
+    let mut app = following_app(built_in("raw"), numbered_log(3).as_bytes());
     app.resize(22);
     wait_for_index(&mut app);
     app
@@ -2191,7 +2192,7 @@ fn seven_digit_line_numbers_take_their_width_from_the_message_column() {
         entry(3, "done"),
     ]
     .concat();
-    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    let mut app = unindexed_app(built_in("logback"), log.as_bytes());
     wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
     assert_snapshot!(numbered(&mut app, 80, &[], 1..=3), @r#"
     "      1 ▶12:00:00.001 INFO  com.example.App          the first message [+999998]"
@@ -2215,7 +2216,7 @@ fn gutter_widens_when_the_file_reaches_10000_lines() {
 /// numbers aren't known yet.
 #[test]
 fn rows_read_from_the_end_of_the_file_have_blank_line_numbers() {
-    let mut app = following_app(Preset::Raw, numbered_log(30).as_bytes());
+    let mut app = following_app(built_in("raw"), numbered_log(30).as_bytes());
     assert_snapshot!(numbered(&mut app, 80, &[], 21..=22), @r#"
     "      12:00:00.029 [main] INFO  com.example.App - step 29"
     "     ▶12:00:00.030 [main] INFO  com.example.App - step 30"
@@ -2256,8 +2257,8 @@ fn any_action() -> impl Strategy<Value = Action> {
     ])
 }
 
-fn any_preset() -> impl Strategy<Value = Preset> {
-    prop::sample::select(Preset::ALL.to_vec())
+fn any_preset() -> impl Strategy<Value = &'static Format> {
+    prop::sample::select(BUILT_IN.iter().collect::<Vec<_>>())
 }
 
 /// Lines that start an entry in some preset mixed with arbitrary bytes.
@@ -2493,7 +2494,7 @@ const COLUMNS_LOG: &str = concat!(
 /// match is highlighted on both screen lines.
 #[test]
 fn highlights_stay_in_the_message_column_and_follow_tabs_and_wrapping() {
-    let mut app = app_in(Preset::Logback, COLUMNS_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), COLUMNS_LOG.as_bytes());
     let terminal = searched_terminal(&mut app, "App - step|done", &[char_key('w')]);
     assert_snapshot!(with_highlights(&terminal, 1..=4), @r"
      12:00:00.001 INFO  com.example.App          step 1
@@ -2550,7 +2551,7 @@ fn long_trace() -> App {
         "2026-10-07 12:00:00.000 [main] ERROR com.example.App - Failed\n\
          java.lang.IllegalStateException: boom\n{trace}"
     );
-    app_in(Preset::Logback, log.as_bytes())
+    app_in(built_in("logback"), log.as_bytes())
 }
 
 /// The screen lines of the details pane at 80×24.
@@ -2664,7 +2665,7 @@ fn details_pane_leaves_the_rows_above_it() {
 
 #[test]
 fn details_pane_shows_the_headless_entry_as_it_is() {
-    let mut app = app_in(Preset::Logback, HEADLESS_FIRST_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), HEADLESS_FIRST_LOG.as_bytes());
     assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
     ┌ Details ─────────────────────────────────────────────────────────────────────┐
     │ starting up                                                                  │
@@ -2697,7 +2698,7 @@ fn details_pane_wraps_a_long_message_at_its_inner_width() {
         "2026-10-07 12:00:00.000 [main] INFO  com.example.App - {}\n",
         "0123456789".repeat(10)
     );
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     assert_snapshot!(lines_after(&mut app, &[key(KeyCode::Enter)], DETAILS_LINES), @r"
     ┌ Details ─────────────────────────────────────────────────────────────────────┐
     │ com.example.App (main)                                                       │
@@ -2717,7 +2718,7 @@ fn details_pane_shows_the_lines_appended_to_its_entry() {
         "java.lang.IllegalStateException: boom\n",
         "\tat com.example.App.main(App.java:10)\n",
     );
-    let mut app = following_app(Preset::Logback, log.as_bytes());
+    let mut app = following_app(built_in("logback"), log.as_bytes());
     wait_for_index(&mut app);
     let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter)]);
     let longer = format!("{log}\tat java.lang.Thread.run(Thread.java:1583)\n");
@@ -2752,7 +2753,7 @@ fn last_details_line(len: usize) -> String {
         "x".repeat(rest - 5)
     );
     assert_eq!(log.len(), len);
-    let mut app = unindexed_app(Preset::Logback, log.as_bytes());
+    let mut app = unindexed_app(built_in("logback"), log.as_bytes());
     wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
     let mut terminal = terminal_after(&mut app, &[key(KeyCode::Enter), key(KeyCode::Tab)]);
     loop {
@@ -2781,7 +2782,7 @@ fn details_pane_shows_an_entry_as_long_as_its_cap_whole() {
 // --- histogram ---
 
 fn spike() -> App {
-    app_in(Preset::Logback, spike_log().as_bytes())
+    app_in(built_in("logback"), spike_log().as_bytes())
 }
 
 /// The keys that show the histogram, focus it and select its third bucket.
@@ -2809,7 +2810,7 @@ fn histogram_without_warnings_or_errors_is_blank_but_for_its_scale() {
         "2026-10-07 12:00:01.000 [main] INFO  com.example.App - Working\n",
         "2026-10-07 12:00:02.000 [main] INFO  com.example.App - Done\n",
     );
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     assert_snapshot!(lines_after(&mut app, &[char_key('H')], 1..=2), @r"
                                                                             max 0/1s
     ▶12:00:00.123 INFO  com.example.App          Started
@@ -2861,7 +2862,7 @@ fn logback_log(entries: impl IntoIterator<Item = (&'static str, &'static str)>) 
 
 /// A Logback viewer over one entry per `(timestamp, level)`.
 fn logback(entries: impl IntoIterator<Item = (&'static str, &'static str)>) -> App {
-    app_in(Preset::Logback, logback_log(entries).as_bytes())
+    app_in(built_in("logback"), logback_log(entries).as_bytes())
 }
 
 /// Three days in 6 h buckets: 3 warnings on the 7th from 12:00, 6 on the 8th from
@@ -2885,7 +2886,7 @@ fn spike_between(first: &'static str, at: &'static str, n: usize, last: &'static
         .chain(errors)
         .chain([(last, "INFO")]);
     // A six-digit spike is some 6 MB of log.
-    let mut app = unindexed_app(Preset::Logback, logback_log(entries).as_bytes());
+    let mut app = unindexed_app(built_in("logback"), logback_log(entries).as_bytes());
     wait_for_index_within(&mut app, LARGE_INDEX_DEADLINE);
     app
 }
@@ -2978,7 +2979,7 @@ fn histogram_label_column_widens_when_new_entries_need_it() {
         ("2026-10-07 00:00:00", "INFO"),
         ("2026-10-09 08:00:00", "INFO"),
     ]);
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     let mut terminal = terminal_after(&mut app, &[char_key('H')]);
     let errors = std::iter::repeat_n(("2026-10-07 12:00:00", "ERROR"), 12_345);
     let grown = format!("{log}{}", logback_log(errors));

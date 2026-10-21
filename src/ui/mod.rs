@@ -241,7 +241,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: Theme) {
         "vilog ─ {} ─ {} ─ {}{status} ",
         printable(app.file_name()),
         human_size(app.size()),
-        app.settings().preset,
+        app.settings().format.name,
     );
     let after_dot = format!("{after_dot}{notice}{indexing}{matches}{key_notice}");
     let bar = Style::new().reversed();

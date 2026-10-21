@@ -1,4 +1,4 @@
-//! Understanding log lines: the format presets and detecting which one a file is in,
+//! Understanding log lines: the formats and detecting which one a file is in,
 //! severity levels, removing terminal escape codes before a line is parsed,
 //! grouping lines into entries, reading their timestamps and dating them.
 
@@ -16,7 +16,7 @@ pub(crate) use dates::DatesForward;
 pub use dates::{Anchor, DatesBackward, midnights_between, resolve_timestamps};
 pub use detect::detect;
 pub use entry::{Entry, EntryGrouper, is_exception_line};
-pub use preset::{EntryHead, EntryParser, Preset};
+pub use preset::{BUILT_IN, EntryHead, EntryParser, Format, Kind, Layout};
 pub use time::LogTime;
 
 #[cfg(test)]

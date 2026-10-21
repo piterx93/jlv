@@ -6,11 +6,11 @@ use std::path::Path;
 use jiff::Timestamp;
 use jiff::civil::{DateTime, Time};
 use jiff::tz::TimeZone;
-use vilog::format::{Anchor, LogTime, Preset, resolve_timestamps, strip_ansi};
+use vilog::format::{Anchor, Format, LogTime, resolve_timestamps, strip_ansi};
 
 mod common;
 
-use common::{fixture, fixtures, lines};
+use common::{built_in, fixture, fixtures, lines};
 
 fn zone(name: &str) -> TimeZone {
     TimeZone::get(name).unwrap_or_else(|err| panic!("{name}: {err}"))
@@ -18,7 +18,11 @@ fn zone(name: &str) -> TimeZone {
 
 /// Every entry's timestamp span in the fixture `name` and what `preset` reads from it
 /// in `zone`.
-fn timestamps(preset: Preset, name: &str, zone: &TimeZone) -> Vec<(String, Option<LogTime>)> {
+fn timestamps(
+    preset: &'static Format,
+    name: &str,
+    zone: &TimeZone,
+) -> Vec<(String, Option<LogTime>)> {
     let parser = preset.entry_parser().unwrap();
     let bytes = fixture(name);
     lines(&bytes)
@@ -97,10 +101,10 @@ fn every_fixture_timestamp_reads_as_the_time_it_shows() {
 
 #[test]
 fn the_spring3_fixture_reads_the_same_in_any_zone() {
-    let in_warsaw = timestamps(Preset::Spring3, "spring3.log", &zone("Europe/Warsaw"));
+    let in_warsaw = timestamps(built_in("spring3"), "spring3.log", &zone("Europe/Warsaw"));
     for other in [TimeZone::UTC, zone("America/New_York")] {
         assert_eq!(
-            timestamps(Preset::Spring3, "spring3.log", &other),
+            timestamps(built_in("spring3"), "spring3.log", &other),
             in_warsaw,
             "{other:?}"
         );
@@ -109,7 +113,7 @@ fn the_spring3_fixture_reads_the_same_in_any_zone() {
 
 #[test]
 fn a_fixture_without_offsets_reads_in_the_given_zone() {
-    let in_utc = timestamps(Preset::Logback, "logback.log", &TimeZone::UTC);
+    let in_utc = timestamps(built_in("logback"), "logback.log", &TimeZone::UTC);
     let (span, first) = &in_utc[0];
     assert_eq!(span, "2026-10-07 09:14:02.118");
     let expected = "2026-10-07T09:14:02.118Z".parse().unwrap();
@@ -119,7 +123,7 @@ fn a_fixture_without_offsets_reads_in_the_given_zone() {
 /// The fixture's entry timestamps as `resolve_timestamps` dates them in `zone`, the
 /// anchor taken from `path` and `mtime`, each with the span it was read from.
 fn dated(
-    preset: Preset,
+    preset: &'static Format,
     name: &str,
     path: &str,
     mtime: &str,
@@ -167,7 +171,7 @@ fn assert_dated_across_midnight(
 fn dates_the_logback_basic_fixture_across_midnight_from_its_mtime() {
     let warsaw = zone("Europe/Warsaw");
     let dated = dated(
-        Preset::LogbackBasic,
+        built_in("logback-basic"),
         "logback-basic.log",
         "/var/log/2026-01-01/logback-basic.log",
         "2026-10-07T22:10:00Z",
@@ -181,7 +185,7 @@ fn dates_the_logback_basic_fixture_across_midnight_from_its_mtime() {
 fn dates_the_wildfly_console_fixture_across_midnight_from_its_file_name() {
     let warsaw = zone("Europe/Warsaw");
     let dated = dated(
-        Preset::WildflyConsole,
+        built_in("wildfly-console"),
         "wildfly-console.log",
         "/var/log/wildfly/console.log.2026-10-08",
         "2026-10-09T05:00:00Z",

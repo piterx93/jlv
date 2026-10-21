@@ -17,15 +17,15 @@ use super::*;
 use crate::clipboard::{CopyError, Via};
 use crate::config::Config;
 use crate::filter::{Base, Classes, Filters, Levels, Rule, TimeFilter, TimeRange, TimeSpec};
-use crate::format::Level;
+use crate::format::{BUILT_IN, Format, Level};
 use crate::index::Progress;
 use crate::keymap::Keymap;
 use crate::matcher::{self, Matcher};
 use crate::test_support;
 use crate::test_support::{
-    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, action, app, app_in, char_key, ctrl, detected_app,
-    following_app, key, named_app, numbered_log, unindexed_app, wait_for_filter, wait_for_index,
-    wait_for_index_within, wait_for_search,
+    INDEX_DEADLINE, LARGE_INDEX_DEADLINE, action, app, app_in, built_in, char_key, ctrl,
+    detected_app, following_app, key, named_app, numbered_log, unindexed_app, wait_for_filter,
+    wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -364,7 +364,7 @@ const FRAME: &str = "\tat com.example.App.main(App.java:10)\n";
 const DONE: &str = "2026-10-07 12:00:02.000 [main] WARN  com.example.App - Done\n";
 
 fn logback(lines: &[&str]) -> App {
-    app_in(Preset::Logback, lines.concat().as_bytes())
+    app_in(built_in("logback"), lines.concat().as_bytes())
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn row_of_the_headless_entry_shows_the_first_line_of_the_file() {
 #[test]
 fn row_of_an_entry_with_crlf_endings_has_no_line_ending() {
     let text = [FAILED, FRAME, DONE].concat().replace('\n', "\r\n");
-    let app = app_in(Preset::Logback, text.as_bytes());
+    let app = app_in(built_in("logback"), text.as_bytes());
     assert_eq!(app.line(0), FAILED.trim_end());
     assert_eq!(app.line(1), DONE.trim_end());
 }
@@ -403,7 +403,7 @@ fn last_row_without_a_newline_shows_the_whole_line() {
 
 #[test]
 fn new_app_has_no_rows_before_the_index_is_polled() {
-    let app = unindexed_app(Preset::Raw, numbered_log(100).as_bytes());
+    let app = unindexed_app(built_in("raw"), numbered_log(100).as_bytes());
     assert_eq!(app.viewport().total(), 0);
     assert_eq!(app.viewport().selected(), None);
 }
@@ -415,13 +415,13 @@ fn app_indexes_in_the_preset_zone_and_anchor_it_was_given() {
     let app = App::new(
         Path::new("/var/log/console.log"),
         test_support::source(b"12:00:00,123 INFO  [org.jboss.as] (main) started\n"),
-        Some(Preset::WildflyConsole),
+        Some(built_in("wildfly-console")),
         zone.clone(),
         mtime,
         false,
     );
     let settings = app.settings();
-    assert_eq!(settings.preset, Preset::WildflyConsole);
+    assert_eq!(settings.format, built_in("wildfly-console"));
     assert_eq!(settings.zone, zone);
     assert_eq!(
         settings.anchor,
@@ -434,7 +434,7 @@ fn anchor_comes_from_a_date_in_the_file_name() {
     let app = App::new(
         Path::new("/var/log/server.log.2026-10-06"),
         test_support::source(b"x\n"),
-        Some(Preset::LogbackBasic),
+        Some(built_in("logback-basic")),
         test_support::zone(),
         test_support::mtime(),
         false,
@@ -452,14 +452,14 @@ fn app_without_a_format_reads_the_file_in_the_detected_preset() {
             .concat()
             .as_bytes(),
     );
-    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.settings().format, built_in("logback"));
     assert_eq!(app.viewport().total(), 3);
 }
 
 #[test]
 fn new_app_has_indexed_none_of_the_file() {
     let content = numbered_log(100);
-    let app = unindexed_app(Preset::Raw, content.as_bytes());
+    let app = unindexed_app(built_in("raw"), content.as_bytes());
     let total = content.len() as u64;
     assert_eq!(app.progress(), Progress { indexed: 0, total });
 }
@@ -467,7 +467,7 @@ fn new_app_has_indexed_none_of_the_file() {
 #[test]
 fn polling_the_index_to_the_end_brings_in_every_row() {
     let content = numbered_log(100);
-    let mut app = unindexed_app(Preset::Raw, content.as_bytes());
+    let mut app = unindexed_app(built_in("raw"), content.as_bytes());
     wait_for_index(&mut app);
     let total = content.len() as u64;
     assert_eq!(
@@ -490,7 +490,7 @@ fn empty_file_is_indexed_without_rows() {
 
 #[test]
 fn rows_taken_in_later_keep_the_selection() {
-    let mut app = unindexed_app(Preset::LogbackBasic, numbered_log(40_000).as_bytes());
+    let mut app = unindexed_app(built_in("logback-basic"), numbered_log(40_000).as_bytes());
     app.resize(10);
     let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
     while app.viewport().total() < 2 {
@@ -710,7 +710,7 @@ fn following_shows_the_last_screen_until_the_whole_index_takes_over() {
     // Several chunks of the index, so that some come in before it is complete.
     let log = numbered_log(10_000);
     let last_screen: Vec<&str> = log.lines().skip(9_990).collect();
-    let mut app = following_app(Preset::Raw, log.as_bytes());
+    let mut app = following_app(built_in("raw"), log.as_bytes());
     app.resize(10);
     let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
     loop {
@@ -734,7 +734,7 @@ fn following_shows_the_last_screen_until_the_whole_index_takes_over() {
 #[test]
 fn following_reads_the_last_entries_once_the_screen_has_lines() {
     let log = numbered_log(100);
-    let mut app = following_app(Preset::Raw, log.as_bytes());
+    let mut app = following_app(built_in("raw"), log.as_bytes());
     app.resize(0);
     app.resize(10);
     assert_eq!(screen(&app), log.lines().skip(90).collect::<Vec<_>>());
@@ -746,7 +746,7 @@ fn following_a_file_whose_tail_is_too_far_back_waits_for_the_whole_index() {
     // The last line starts further from the end than the tail may read.
     let mut log = b"first\nsecond\n".to_vec();
     log.resize(log.len() + TAIL_LIMIT + 1, b'x');
-    let mut app = following_app(Preset::Raw, &log);
+    let mut app = following_app(built_in("raw"), &log);
     app.resize(10);
     let deadline = Instant::now() + INDEX_DEADLINE;
     loop {
@@ -764,7 +764,7 @@ fn following_a_file_whose_tail_is_too_far_back_waits_for_the_whole_index() {
 #[test]
 fn following_a_file_shorter_than_the_screen_selects_its_last_entry() {
     let mut app = following_app(
-        Preset::Logback,
+        built_in("logback"),
         [STARTED, FAILED, EXCEPTION, FRAME, DONE]
             .concat()
             .as_bytes(),
@@ -785,15 +785,13 @@ fn cycled(mut app: App) -> App {
 }
 
 #[test]
-fn cycling_reads_the_file_in_the_next_preset() {
-    let app = cycled(logback(&[STARTED]));
-    assert_eq!(app.settings().preset, Preset::LogbackBasic);
-}
-
-#[test]
-fn cycling_past_raw_starts_again_at_the_first_preset() {
-    let app = cycled(app(STARTED.as_bytes()));
-    assert_eq!(app.settings().preset, Preset::Logback);
+fn cycling_reads_the_file_in_the_next_format_of_the_table_and_wraps_around() {
+    let ids: Vec<&str> = BUILT_IN.iter().map(|format| format.id).collect();
+    for (i, format) in BUILT_IN.iter().enumerate() {
+        let app = cycled(app_in(format, STARTED.as_bytes()));
+        let next = ids[(i + 1) % ids.len()];
+        assert_eq!(app.settings().format.id, next, "after {}", format.id);
+    }
 }
 
 #[test]
@@ -818,7 +816,7 @@ fn cycling_a_file_opened_at_the_top_selects_the_first_row_again() {
 #[test]
 fn cycling_a_followed_file_shows_its_last_entries_in_the_new_preset_at_once() {
     let log = [STARTED, FAILED, EXCEPTION, FRAME, DONE].concat();
-    let mut app = following_app(Preset::Raw, log.as_bytes());
+    let mut app = following_app(built_in("raw"), log.as_bytes());
     app.resize(10);
     wait_for_index(&mut app);
     assert_eq!(pos(&app), (0, Some(4)));
@@ -834,7 +832,7 @@ fn cycling_a_followed_file_shows_its_last_entries_in_the_new_preset_at_once() {
 
 /// A viewer over `content` in `preset` on a 10-line screen, opened at the end to
 /// follow it, with the whole file indexed.
-fn followed(preset: Preset, content: &str) -> App {
+fn followed(preset: &'static Format, content: &str) -> App {
     let mut app = following_app(preset, content.as_bytes());
     app.resize(10);
     wait_for_index(&mut app);
@@ -866,7 +864,7 @@ fn truncated(app: App, content: &str) -> App {
 
 /// 20 numbered lines, followed.
 fn twenty_lines_followed() -> App {
-    followed(Preset::Raw, &numbered_log(20))
+    followed(built_in("raw"), &numbered_log(20))
 }
 
 #[test]
@@ -932,7 +930,7 @@ fn appends_while_paused_count_as_new_entries() {
 
 #[test]
 fn lines_added_to_the_last_entry_are_not_new_entries() {
-    let app = followed(Preset::Logback, &[STARTED, FAILED].concat());
+    let app = followed(built_in("logback"), &[STARTED, FAILED].concat());
     let app = applied(app, &[Action::Up]);
     let app = grown(app, &[STARTED, FAILED, EXCEPTION, FRAME, DONE].concat());
     assert_eq!(app.new_entries(), 1);
@@ -985,7 +983,7 @@ fn growth_during_indexing_is_appended_to_the_complete_index() {
     // it. Indexed at once, 15:00 would be too far past noon for that day.
     let before = "11:00:00.000 [main] INFO  com.example.App - before\n";
     let after = "15:00:00.000 [main] INFO  com.example.App - after\n";
-    let mut app = unindexed_app(Preset::LogbackBasic, before.as_bytes());
+    let mut app = unindexed_app(built_in("logback-basic"), before.as_bytes());
     let grown = test_support::source([before, after].concat().as_bytes());
     app.file_changed(FileChange::Grew(grown));
     wait_for_index(&mut app);
@@ -1022,7 +1020,7 @@ fn truncation_while_paused_counts_the_new_content_as_new_entries() {
 #[test]
 fn toggling_the_fold_on_the_truncation_row_does_nothing() {
     let log = [FAILED, EXCEPTION].concat();
-    let app = truncated(followed(Preset::Logback, &log), &log);
+    let app = truncated(followed(built_in("logback"), &log), &log);
     let app = applied(app, &[Action::Top, Action::ToggleFold]);
     assert_eq!(app.viewport().total(), 2);
     assert_eq!(pos(&app), (0, Some(0)));
@@ -1040,7 +1038,7 @@ fn lines_are_read_from_the_new_content_after_truncation() {
 
 #[test]
 fn folded_entries_stay_folded_as_the_file_grows() {
-    let app = followed(Preset::Logback, &[STARTED, FAILED, EXCEPTION].concat());
+    let app = followed(built_in("logback"), &[STARTED, FAILED, EXCEPTION].concat());
     let app = grown(app, &[STARTED, FAILED, EXCEPTION, DONE].concat());
     assert_eq!(app.viewport().total(), 3);
 }
@@ -1048,7 +1046,7 @@ fn folded_entries_stay_folded_as_the_file_grows() {
 #[test]
 fn entry_gaining_lines_after_unfold_all_is_unfolded() {
     let app = applied(
-        followed(Preset::Logback, &[STARTED, FAILED].concat()),
+        followed(built_in("logback"), &[STARTED, FAILED].concat()),
         &[Action::UnfoldAll],
     );
     let app = grown(app, &[STARTED, FAILED, EXCEPTION, FRAME].concat());
@@ -1057,7 +1055,7 @@ fn entry_gaining_lines_after_unfold_all_is_unfolded() {
 
 #[test]
 fn unfolded_last_entry_shows_the_lines_appended_to_it() {
-    let app = followed(Preset::Logback, &[STARTED, FAILED, EXCEPTION].concat());
+    let app = followed(built_in("logback"), &[STARTED, FAILED, EXCEPTION].concat());
     let app = applied(app, &[Action::ToggleFold]);
     assert_eq!(app.viewport().total(), 3);
     let app = grown(app, &[STARTED, FAILED, EXCEPTION, FRAME].concat());
@@ -1069,7 +1067,7 @@ fn unfolded_last_entry_shows_the_lines_appended_to_it() {
 /// in the header's level counters or its size.
 #[test]
 fn deleted_file_empties_the_view_and_is_waited_for() {
-    let app = followed(Preset::LogbackBasic, &numbered_log(20));
+    let app = followed(built_in("logback-basic"), &numbered_log(20));
     let app = changed(app, FileChange::Gone);
     assert!(app.waiting_for_file());
     assert_eq!(app.viewport().total(), 0);
@@ -1091,7 +1089,7 @@ fn deleted_file_drops_the_new_entry_count_and_stays_paused() {
 #[test]
 fn deleted_file_drops_the_filters_results_but_keeps_the_filters() {
     let app = filtered(
-        followed(Preset::Logback, &[STARTED, FAILED, DONE].concat()),
+        followed(built_in("logback"), &[STARTED, FAILED, DONE].concat()),
         text_filter("Failed"),
     );
     let mut app = changed(app, FileChange::Gone);
@@ -1108,7 +1106,7 @@ fn deleted_file_drops_the_filters_results_but_keeps_the_filters() {
 
 #[test]
 fn deleted_file_stops_a_filter_still_evaluating_it() {
-    let mut app = unindexed_app(Preset::Raw, numbered_log(5_000).as_bytes());
+    let mut app = unindexed_app(built_in("raw"), numbered_log(5_000).as_bytes());
     app.set_filters(text_filter("step 4"));
     let deadline = Instant::now() + INDEX_DEADLINE;
     while !app.filtering() {
@@ -1343,7 +1341,7 @@ fn cycling_the_preset_of_a_gzip_file_opened_at_the_end_stays_at_the_end() {
     wait_for_index(&mut app);
     let mut app = cycled(app);
     wait_for_index(&mut app);
-    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.settings().format, built_in("logback"));
     assert_eq!(pos(&app), (90, Some(99)));
     assert!(!app.following());
 }
@@ -1365,7 +1363,7 @@ proptest! {
         start in some_log(),
         steps in vec(step(), 0..8),
     ) {
-        let mut app = following_app(Preset::Logback, &start);
+        let mut app = following_app(built_in("logback"), &start);
         app.resize(5);
         wait_for_index(&mut app);
         let mut content = start;
@@ -1403,7 +1401,7 @@ proptest! {
             prop_assert!(app.viewport().selected().is_none_or(|row| row < total));
         }
         app.apply(Action::UnfoldAll);
-        let mut fresh = app_in(Preset::Logback, &content);
+        let mut fresh = app_in(built_in("logback"), &content);
         fresh.apply(Action::UnfoldAll);
         let mut expected = all_lines(&fresh);
         if truncation_row {
@@ -1494,7 +1492,7 @@ fn the_last_line_number_counts_entries_the_filters_hide() {
 #[test]
 fn appended_entries_are_filtered_while_following() {
     let app = filtered(
-        followed(Preset::Logback, &[STARTED, FAILED].concat()),
+        followed(built_in("logback"), &[STARTED, FAILED].concat()),
         text_filter("boom"),
     );
     assert_eq!(app.viewport().total(), 0);
@@ -1512,7 +1510,7 @@ fn a_partial_line_that_joins_the_entry_before_is_filtered_with_it() {
     // continues the one before.
     let partial = "2026-10-07 12:00:02.000 [main] INFO  com.example.App -";
     let app = filtered(
-        followed(Preset::Logback, &[FAILED, partial].concat()),
+        followed(built_in("logback"), &[FAILED, partial].concat()),
         text_filter("boom"),
     );
     let mut app = grown(app, &[FAILED, partial, "boom\n"].concat());
@@ -1523,7 +1521,7 @@ fn a_partial_line_that_joins_the_entry_before_is_filtered_with_it() {
 #[test]
 fn a_truncated_file_is_filtered_from_its_start() {
     let app = filtered(
-        followed(Preset::Logback, &[STARTED, FAILED, DONE].concat()),
+        followed(built_in("logback"), &[STARTED, FAILED, DONE].concat()),
         text_filter("Failed"),
     );
     let mut app = truncated(app, &[DONE, FAILED].concat());
@@ -1535,7 +1533,7 @@ fn a_truncated_file_is_filtered_from_its_start() {
 /// returns how many rows pass and whether the filters were seen to catch up with the
 /// undated entries while indexing went on.
 fn filter_while_indexing(log: &str) -> (usize, bool) {
-    let mut app = unindexed_app(Preset::LogbackBasic, log.as_bytes());
+    let mut app = unindexed_app(built_in("logback-basic"), log.as_bytes());
     app.set_filters(Filters {
         time: Some(TimeRange {
             start: "2026-10-01T00:00:00Z".parse().unwrap(),
@@ -1633,7 +1631,7 @@ fn unfolding_all_while_filtered_unfolds_the_matches_of_new_filters() {
 
 #[test]
 fn unfolding_all_while_the_tail_is_shown_unfolds_the_matches() {
-    let mut app = following_app(Preset::Logback, TWO_TRACES.concat().as_bytes());
+    let mut app = following_app(built_in("logback"), TWO_TRACES.concat().as_bytes());
     app.set_filters(without_info());
     app.resize(10);
     app.apply(Action::UnfoldAll);
@@ -1644,11 +1642,14 @@ fn unfolding_all_while_the_tail_is_shown_unfolds_the_matches() {
 #[test]
 fn another_preset_is_filtered_anew() {
     // Under Raw the whole line is the message; under Logback `INFO` is the level.
-    let mut app = filtered(app_in(Preset::Raw, STARTED.as_bytes()), text_filter("INFO"));
+    let mut app = filtered(
+        app_in(built_in("raw"), STARTED.as_bytes()),
+        text_filter("INFO"),
+    );
     assert_eq!(rows(&app), [STARTED.trim_end()]);
     app.apply(Action::CyclePreset);
     wait_for_filter(&mut app);
-    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.settings().format, built_in("logback"));
     assert!(app.nothing_matches());
 }
 
@@ -1660,7 +1661,7 @@ fn an_empty_file_is_no_case_of_nothing_matching() {
 
 #[test]
 fn nothing_matches_only_once_the_index_and_the_results_are_complete() {
-    let mut app = unindexed_app(Preset::Raw, numbered_log(5_000).as_bytes());
+    let mut app = unindexed_app(built_in("raw"), numbered_log(5_000).as_bytes());
     app.set_filters(text_filter("boom"));
     let deadline = Instant::now() + LARGE_INDEX_DEADLINE;
     loop {
@@ -2086,7 +2087,7 @@ fn a_time_filter_shows_only_the_entries_from_its_start_to_the_end_of_its_last_mi
         "12:31:00.000",
         "13:00:00.000",
     ]);
-    let app = timed(app_in(Preset::Logback, log.as_bytes()), "12:00-12:30");
+    let app = timed(app_in(built_in("logback"), log.as_bytes()), "12:00-12:30");
     assert_eq!(rows(&app), rows_at(&["12:00:00.000", "12:30:59.999"]));
 }
 
@@ -2094,7 +2095,7 @@ fn a_time_filter_shows_only_the_entries_from_its_start_to_the_end_of_its_last_mi
 fn a_range_entirely_outside_the_file_matches_nothing() {
     let log = log_at(&["12:00:00.000", "13:00:00.000"]);
     for spec in ["2020-01-01 12:00..2020-01-01 13:00", "03:00-04:00"] {
-        let app = timed(app_in(Preset::Logback, log.as_bytes()), spec);
+        let app = timed(app_in(built_in("logback"), log.as_bytes()), spec);
         assert!(app.nothing_matches(), "{spec}");
     }
 }
@@ -2102,7 +2103,10 @@ fn a_range_entirely_outside_the_file_matches_nothing() {
 #[test]
 fn the_last_n_slides_as_entries_are_appended() {
     let app = timed(
-        followed(Preset::Logback, &log_at(&["12:00:00.000", "12:00:30.000"])),
+        followed(
+            built_in("logback"),
+            &log_at(&["12:00:00.000", "12:00:30.000"]),
+        ),
         "1m",
     );
     assert_eq!(rows(&app), rows_at(&["12:00:00.000", "12:00:30.000"]));
@@ -2149,7 +2153,7 @@ fn grown_unpolled(mut app: App, content: &str) -> App {
 #[test]
 fn the_last_n_drops_a_match_that_falls_out_of_it_well_before_the_appended_entries() {
     let times = long_window();
-    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    let app = timed(followed(built_in("logback"), &log_at(&times)), "1m");
     // The window now starts at 12:00:10.
     let mut app = grown(app, &log_at(&and_then(&times, "12:01:10.000")));
     wait_for_filter(&mut app);
@@ -2162,7 +2166,7 @@ fn the_last_n_drops_a_match_that_falls_out_of_it_well_before_the_appended_entrie
 #[test]
 fn a_slide_keeps_showing_the_matches_before_the_first_one_that_drops_out() {
     let times = long_window();
-    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    let app = timed(followed(built_in("logback"), &log_at(&times)), "1m");
     let app = grown_unpolled(app, &log_at(&and_then(&times, "12:01:10.000")));
     let shown = app.viewport().total();
     assert!(shown >= 2_990, "{shown} rows");
@@ -2171,7 +2175,7 @@ fn a_slide_keeps_showing_the_matches_before_the_first_one_that_drops_out() {
 #[test]
 fn a_slide_that_drops_nothing_keeps_every_row_shown() {
     let times = millis_from(30, 3_000);
-    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    let app = timed(followed(built_in("logback"), &log_at(&times)), "1m");
     // The window moves from 11:59:32.999 to 12:00:00 on.
     let app = grown_unpolled(app, &log_at(&and_then(&times, "12:01:00.000")));
     let shown = app.viewport().total();
@@ -2186,7 +2190,7 @@ fn a_window_whose_start_moves_earlier_takes_in_the_entries_it_reaches_again() {
         "12:00:40.000",
         "12:01:00.000",
     ];
-    let app = timed(followed(Preset::Logback, &log_at(&times)), "1m");
+    let app = timed(followed(built_in("logback"), &log_at(&times)), "1m");
     assert_eq!(rows(&app), rows_at(&times[1..]));
     // The last entry, out of order, moves the start back to 11:59:20.
     let times = and_then(&times.map(String::from), "12:00:20.000");
@@ -2203,7 +2207,10 @@ fn a_range_without_a_date_moves_to_the_date_of_a_new_last_entry() {
         on("2026-10-07", "12:10:00.000"),
         on("2026-10-07", "12:20:00.000"),
     ];
-    let app = timed(followed(Preset::Logback, &before.concat()), "12:00-12:30");
+    let app = timed(
+        followed(built_in("logback"), &before.concat()),
+        "12:00-12:30",
+    );
     assert_eq!(rows_of(&app), before[2..]);
     let next = on("2026-10-08", "12:25:00.000");
     let mut app = grown(app, &[before.concat(), next.clone()].concat());
@@ -2227,7 +2234,10 @@ fn set_wall_clock(at: &str) {
 #[test]
 fn the_last_n_on_the_wall_clock_follows_it_as_entries_are_appended() {
     set_wall_clock("2026-10-07T12:00:50Z");
-    let mut app = followed(Preset::Logback, &log_at(&["12:00:00.000", "12:00:40.000"]));
+    let mut app = followed(
+        built_in("logback"),
+        &log_at(&["12:00:00.000", "12:00:40.000"]),
+    );
     app.set_clock(wall_clock);
     app.set_time_filter(since("1m", Base::Now));
     wait_for_filter(&mut app);
@@ -2258,7 +2268,7 @@ fn entries_out_of_order_at_the_window_edge_pass_by_their_own_timestamps() {
         "12:00:01.000",
         "12:00:00.000",
     ]);
-    let app = timed(app_in(Preset::Logback, log.as_bytes()), "10m");
+    let app = timed(app_in(built_in("logback"), log.as_bytes()), "10m");
     assert_eq!(
         rows(&app),
         rows_at(&["11:50:00.500", "12:00:01.000", "12:00:00.000"])
@@ -2271,7 +2281,7 @@ fn a_time_filter_set_while_opening_counts_back_from_the_last_entry_once_indexed(
     let log = "11:00:00.000 [main] INFO  com.example.App - a\n\
                11:59:30.000 [main] INFO  com.example.App - b\n\
                12:00:00.000 [main] INFO  com.example.App - c\n";
-    let mut app = unindexed_app(Preset::LogbackBasic, log.as_bytes());
+    let mut app = unindexed_app(built_in("logback-basic"), log.as_bytes());
     app.set_time_filter(since("1m", Base::File));
     wait_for_filter(&mut app);
     assert_eq!(rows(&app), log.lines().skip(1).collect::<Vec<_>>());
@@ -2282,7 +2292,7 @@ fn the_time_filter_and_the_level_filter_apply_together() {
     let error = "2026-10-07 11:59:50.000 [main] ERROR com.example.App - boom\n";
     let log = [at("11:00:00.000"), error.to_string(), at("12:00:00.000")].concat();
     let app = applied(
-        app_in(Preset::Logback, log.as_bytes()),
+        app_in(built_in("logback"), log.as_bytes()),
         &[Action::ToggleLevel(Level::Info)],
     );
     let app = timed(app, "1m");
@@ -2359,7 +2369,7 @@ fn down_and_up_in_the_time_panel_step_through_the_presets_stopping_at_the_ends()
 #[test]
 fn enter_applies_the_time_panel_spec_and_base_and_closes_it() {
     let log = log_at(&["11:59:00.000", "11:59:45.000", "12:00:00.000"]);
-    let mut app = app_in(Preset::Logback, log.as_bytes());
+    let mut app = app_in(built_in("logback"), log.as_bytes());
     app.set_clock(|| "2026-10-07T12:00:30Z".parse().unwrap());
     let mut keys = typing("1m");
     keys.extend([key(KeyCode::Tab), key(KeyCode::Enter)]);
@@ -2373,7 +2383,10 @@ fn enter_applies_the_time_panel_spec_and_base_and_closes_it() {
 #[test]
 fn enter_on_an_empty_time_panel_clears_the_time_filter() {
     let times = ["11:00:00.000", "12:00:00.000"];
-    let app = timed(app_in(Preset::Logback, log_at(&times).as_bytes()), "12:00-");
+    let app = timed(
+        app_in(built_in("logback"), log_at(&times).as_bytes()),
+        "12:00-",
+    );
     let mut keys = vec![key(KeyCode::Backspace); "12:00-".len()];
     keys.push(key(KeyCode::Enter));
     let mut app = in_time_panel(app, &keys);
@@ -2587,7 +2600,7 @@ fn with_every_filter(mut app: App) -> App {
 #[test]
 fn every_filter_kind_applies_to_appended_entries_while_following() {
     let first = entry("12:00:00.000", "WARN", "com.myco.pay.PayClient", "timeout");
-    let app = with_every_filter(followed(Preset::Logback, &first));
+    let app = with_every_filter(followed(built_in("logback"), &first));
     assert_eq!(rows(&app), [first.trim_end()]);
     let passing = [
         entry(
@@ -2637,7 +2650,7 @@ fn every_filter_kind_applies_to_appended_entries_while_following() {
 #[test]
 fn clearing_the_filters_clears_every_kind_for_good() {
     let first = entry("12:00:00.000", "INFO", "org.example.App", "started");
-    let app = with_every_filter(followed(Preset::Logback, &first));
+    let app = with_every_filter(followed(built_in("logback"), &first));
     let mut app = applied(app, &[Action::ClearFilters]);
     assert_eq!(app.filters().levels, Levels::default());
     assert_eq!(app.filters().classes, Classes::default());
@@ -2723,7 +2736,7 @@ fn level_counters_count_only_the_entries_that_pass_the_other_filters() {
 #[test]
 fn a_last_line_completed_by_growth_is_counted_once() {
     let cut = &FAILED[..FAILED.len() - 3];
-    let app = followed(Preset::Logback, &[STARTED, cut].concat());
+    let app = followed(built_in("logback"), &[STARTED, cut].concat());
     let app = grown(app, &[STARTED, FAILED].concat());
     assert_eq!(
         app.level_counts(),
@@ -2736,7 +2749,7 @@ fn a_last_line_that_turns_out_to_continue_the_entry_before_is_no_longer_counted(
     // Cut short, the last line looks like the start of an INFO entry; written out, it
     // continues the one before.
     let partial = "2026-10-07 12:00:02.000 [main] INFO  com.example.App -";
-    let app = followed(Preset::Logback, &[FAILED, partial].concat());
+    let app = followed(built_in("logback"), &[FAILED, partial].concat());
     assert_eq!(
         app.level_counts(),
         counters(&[(Level::Info, 1), (Level::Error, 1)])
@@ -2747,7 +2760,7 @@ fn a_last_line_that_turns_out_to_continue_the_entry_before_is_no_longer_counted(
 
 #[test]
 fn level_counters_start_over_with_the_content_of_a_truncated_file() {
-    let app = followed(Preset::Logback, &[STARTED, FAILED, DONE].concat());
+    let app = followed(built_in("logback"), &[STARTED, FAILED, DONE].concat());
     let app = truncated(app, DONE);
     assert_eq!(app.level_counts(), counters(&[(Level::Warn, 1)]));
 }
@@ -2761,9 +2774,9 @@ fn level_counters_after_cycling_the_preset_are_those_of_the_new_preset() {
         "12:00:03.000 [main] WARN  com.example.App - Done\n",
     ]
     .concat();
-    let mut app = cycled(app_in(Preset::Logback, log.as_bytes()));
+    let mut app = cycled(app_in(built_in("logback"), log.as_bytes()));
     wait_for_index(&mut app);
-    let fresh = app_in(app.settings().preset, log.as_bytes());
+    let fresh = app_in(app.settings().format, log.as_bytes());
     assert_eq!(app.level_counts(), fresh.level_counts());
     assert_eq!(app.level_counts(), counters(&[(Level::Warn, 1)]));
 }
@@ -2771,7 +2784,7 @@ fn level_counters_after_cycling_the_preset_are_those_of_the_new_preset() {
 #[test]
 fn level_counters_under_a_text_filter_take_in_the_matching_appended_entries() {
     let app = filtered(
-        followed(Preset::Logback, &[STARTED, DONE].concat()),
+        followed(built_in("logback"), &[STARTED, DONE].concat()),
         text_filter("Done"),
     );
     assert_eq!(app.level_counts(), counters(&[(Level::Warn, 1)]));
@@ -2783,7 +2796,7 @@ fn level_counters_under_a_text_filter_take_in_the_matching_appended_entries() {
 #[test]
 fn level_counters_take_in_appended_entries() {
     let app = grown(
-        followed(Preset::Logback, STARTED),
+        followed(built_in("logback"), STARTED),
         &[STARTED, FAILED, DONE].concat(),
     );
     assert_eq!(
@@ -2920,7 +2933,7 @@ fn line_jump_selects_the_entry_of_that_line() {
 
 #[test]
 fn line_jump_while_the_tail_is_shown_stays_and_says_so() {
-    let mut app = following_app(Preset::Logback, TWO_TRACES.concat().as_bytes());
+    let mut app = following_app(built_in("logback"), TWO_TRACES.concat().as_bytes());
     app.resize(10);
     let before = pos(&app);
     let app = jumped(app, ':', "1");
@@ -3004,7 +3017,7 @@ fn time_jump_selects_the_first_entry_at_or_after_the_time() {
         "13:00:00.000",
     ];
     let app = applied(
-        app_in(Preset::Logback, log_at(&times).as_bytes()),
+        app_in(built_in("logback"), log_at(&times).as_bytes()),
         &[Action::Bottom],
     );
     let app = jumped(app, 't', "12:30");
@@ -3020,7 +3033,7 @@ fn a_time_without_a_date_is_on_the_date_of_the_last_entry() {
         on("2026-10-07", "12:00:00.000"),
     ]
     .concat();
-    let app = jumped(app_in(Preset::Logback, log.as_bytes()), 't', "00:30");
+    let app = jumped(app_in(built_in("logback"), log.as_bytes()), 't', "00:30");
     assert_eq!(app.viewport().selected(), Some(1));
 }
 
@@ -3031,7 +3044,10 @@ fn a_time_before_the_first_entry_selects_the_first_entry_with_a_timestamp() {
         log_at(&["11:00:00.000", "12:00:00.000"]),
     ]
     .concat();
-    let app = applied(app_in(Preset::Logback, log.as_bytes()), &[Action::Bottom]);
+    let app = applied(
+        app_in(built_in("logback"), log.as_bytes()),
+        &[Action::Bottom],
+    );
     let app = jumped(app, 't', "00:00");
     assert_eq!(app.viewport().selected(), Some(1));
 }
@@ -3039,14 +3055,14 @@ fn a_time_before_the_first_entry_selects_the_first_entry_with_a_timestamp() {
 #[test]
 fn a_time_after_the_last_entry_selects_the_last_row() {
     let log = log_at(&["11:00:00.000", "12:00:00.000", "13:00:00.000"]);
-    let app = jumped(app_in(Preset::Logback, log.as_bytes()), 't', "23:00");
+    let app = jumped(app_in(built_in("logback"), log.as_bytes()), 't', "23:00");
     assert_eq!(app.viewport().selected(), Some(2));
 }
 
 #[test]
 fn an_entry_without_a_timestamp_counts_as_the_time_of_the_one_before_it() {
     let log = [at("12:00:00.000"), UNDATED.to_string(), at("12:30:00.000")].concat();
-    let app = jumped(app_in(Preset::Logback, log.as_bytes()), 't', "12:10");
+    let app = jumped(app_in(built_in("logback"), log.as_bytes()), 't', "12:10");
     assert_eq!(selected_row(&app), at("12:30:00.000").trim_end());
 }
 
@@ -3061,7 +3077,7 @@ fn time_jump_passes_over_entries_the_filters_hide() {
     ]
     .concat();
     let mut app = applied(
-        app_in(Preset::Logback, log.as_bytes()),
+        app_in(built_in("logback"), log.as_bytes()),
         &[Action::ToggleLevel(Level::Error)],
     );
     wait_for_filter(&mut app);
@@ -3093,7 +3109,7 @@ proptest! {
         text in prop_oneof![any::<String>(), "[0-9: .dhm-]{0,24}"],
     ) {
         let log = [at("12:00:00.000"), UNDATED.to_string(), at("12:30:00.000")].concat();
-        jumped(app_in(Preset::Logback, log.as_bytes()), opener, &text);
+        jumped(app_in(built_in("logback"), log.as_bytes()), opener, &text);
     }
 }
 
@@ -3334,7 +3350,7 @@ fn the_count_and_n_cover_only_the_entries_the_filters_show() {
 
 #[test]
 fn entries_appended_while_following_are_searched() {
-    let app = followed(Preset::Logback, &[STARTED, FAILED, DONE].concat());
+    let app = followed(built_in("logback"), &[STARTED, FAILED, DONE].concat());
     let app = searched(app, '/', "Failed");
     assert_eq!(selected(&app), Some(1));
     assert!(!app.following());
@@ -3366,7 +3382,7 @@ fn counting_a_large_file_runs_in_the_background() {
 
 #[test]
 fn a_search_moves_only_once_the_matches_it_needs_are_counted() {
-    let mut app = following_app(Preset::Raw, numbered_log(5000).as_bytes());
+    let mut app = following_app(built_in("raw"), numbered_log(5000).as_bytes());
     app.resize(10);
     wait_for_index(&mut app);
     // From the last row, the match lies past the wrap, which takes every match.
@@ -3399,7 +3415,7 @@ fn matches_stay_counted_while_a_sliding_time_filter_takes_in_appended_entries() 
         "12:02:00.000",
         "12:03:00.000",
     ];
-    let app = timed(followed(Preset::Logback, &log_at(&times)), "10m");
+    let app = timed(followed(built_in("logback"), &log_at(&times)), "10m");
     let mut app = searched(app, '/', "at 12:0[015]");
     assert_eq!(app.match_count(), Some((1, 2)));
     let grown = [&times[..], &["12:04:00.000", "12:05:00.000"]].concat();
@@ -3475,7 +3491,7 @@ fn first_details_entry() -> String {
 /// `DETAILS_LOG` with the details pane shown, 2 lines high for an entry that takes
 /// 10, the first entry selected and the focus on the table.
 fn details_shown() -> App {
-    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), DETAILS_LOG.as_bytes());
     app.resize(10);
     app.apply(Action::Confirm);
     app.fit_details(2, 10);
@@ -3489,7 +3505,7 @@ fn details_focused() -> App {
 
 #[test]
 fn details_pane_is_hidden_at_first() {
-    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = app_in(built_in("logback"), DETAILS_LOG.as_bytes());
     assert!(!app.shows_details());
     assert_eq!(app.focus(), Focus::Table);
 }
@@ -3507,7 +3523,7 @@ fn confirm_hides_the_shown_details_pane() {
 
 #[test]
 fn confirm_in_a_panel_leaves_the_details_pane_hidden() {
-    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = app_in(built_in("logback"), DETAILS_LOG.as_bytes());
     let app = applied(app, &[Action::LevelPanel, Action::Confirm]);
     assert!(!app.shows_details());
 }
@@ -3523,7 +3539,7 @@ fn cycle_focus_moves_the_focus_to_the_details_pane_and_back() {
 
 #[test]
 fn cycle_focus_without_the_details_pane_keeps_the_focus_on_the_table() {
-    let app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let app = app_in(built_in("logback"), DETAILS_LOG.as_bytes());
     let app = applied(app, &[Action::CycleFocus]);
     assert_eq!(app.focus(), Focus::Table);
 }
@@ -3581,7 +3597,7 @@ fn details_taking_fewer_lines_scroll_back_to_their_last_line() {
 
 #[test]
 fn scrolling_the_details_up_keeps_following() {
-    let mut app = followed(Preset::Logback, DETAILS_LOG);
+    let mut app = followed(built_in("logback"), DETAILS_LOG);
     app.apply(Action::Confirm);
     app.fit_details(2, 10);
     let app = applied(app, &[Action::CycleFocus, Action::Down, Action::Up]);
@@ -3636,7 +3652,7 @@ fn details_entry_is_every_line_of_the_selected_entry_folded_or_not() {
 #[test]
 fn append_to_the_shown_entry_keeps_the_details_scroll_and_adds_its_lines() {
     let first = first_details_entry();
-    let mut app = followed(Preset::Logback, &first);
+    let mut app = followed(built_in("logback"), &first);
     app.apply(Action::Confirm);
     app.fit_details(2, 10);
     let app = applied(app, &[Action::CycleFocus, Action::Down]);
@@ -3769,7 +3785,7 @@ fn without_an_exception_in_view_the_jumps_say_no_exceptions_and_stay() {
 
 #[test]
 fn an_exception_jump_stops_following() {
-    let app = followed(Preset::Logback, &EXCEPTIONS.concat());
+    let app = followed(built_in("logback"), &EXCEPTIONS.concat());
     assert_eq!(selected(&app), Some(4));
     let app = pressed(app, &[char_key('[')]);
     assert_eq!(landed(&app), (Some(3), None));
@@ -3778,7 +3794,7 @@ fn an_exception_jump_stops_following() {
 
 #[test]
 fn exception_jumps_cover_the_last_entries_shown_before_the_index_is_complete() {
-    let mut app = following_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    let mut app = following_app(built_in("logback"), EXCEPTIONS.concat().as_bytes());
     app.resize(10);
     assert_eq!(selected(&app), Some(4));
     let app = pressed(app, &[char_key('['), char_key('[')]);
@@ -3909,7 +3925,7 @@ fn a_bookmark_the_filters_hide_is_kept_for_when_they_show_it_again() {
 #[test]
 fn a_bookmark_jump_stops_following() {
     let app = applied(
-        followed(Preset::Logback, &EXCEPTIONS.concat()),
+        followed(built_in("logback"), &EXCEPTIONS.concat()),
         &[Action::Up],
     );
     let app = pressed(app, &[char_key('m'), char_key('F')]);
@@ -3925,7 +3941,7 @@ fn cycling_the_preset_moves_a_bookmark_to_the_entry_that_holds_its_offset() {
     // row 5 starts entry 3.
     let mut app = cycled(marked(exception_lines(), &[2, 5]));
     wait_for_index(&mut app);
-    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.settings().format, built_in("logback"));
     assert_eq!(bookmarks(&app), [1, 3]);
 }
 
@@ -3959,7 +3975,7 @@ fn truncation_deletion_and_another_file_at_the_path_remove_every_bookmark() {
         FileChange::Replaced,
     ];
     for change in changes {
-        let app = pressed(followed(Preset::Logback, &content), &[char_key('m')]);
+        let app = pressed(followed(built_in("logback"), &content), &[char_key('m')]);
         assert_eq!(bookmarks(&app), [4]);
         let app = changed(app, change(test_support::source(content.as_bytes())));
         assert_eq!(bookmarks(&app), Vec::<usize>::new());
@@ -3968,7 +3984,7 @@ fn truncation_deletion_and_another_file_at_the_path_remove_every_bookmark() {
 
 #[test]
 fn a_bookmark_set_before_the_index_is_complete_stays_on_its_entry() {
-    let mut app = following_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    let mut app = following_app(built_in("logback"), EXCEPTIONS.concat().as_bytes());
     app.resize(10);
     let mut app = pressed(app, &[char_key('m')]);
     assert_eq!(bookmarks(&app), [4]);
@@ -3998,7 +4014,7 @@ fn traced_log(n: usize, traced: &[usize]) -> String {
 
 /// [`traced_log`] of `n` entries with traces at `traced`, on a 10-line screen.
 fn traced_app(n: usize, traced: &[usize]) -> App {
-    let mut app = app_in(Preset::Logback, traced_log(n, traced).as_bytes());
+    let mut app = app_in(built_in("logback"), traced_log(n, traced).as_bytes());
     app.resize(10);
     app
 }
@@ -4050,7 +4066,7 @@ fn an_exception_jump_to_an_entry_already_evaluated_moves_at_once() {
 
 #[test]
 fn an_exception_jump_waits_for_the_index_and_lands_on_the_exception_it_finds() {
-    let mut app = unindexed_app(Preset::Logback, EXCEPTIONS.concat().as_bytes());
+    let mut app = unindexed_app(built_in("logback"), EXCEPTIONS.concat().as_bytes());
     app.resize(10);
     let mut app = pressed(app, &[char_key(']')]);
     assert_eq!(app.notice(), Some("searching…"));
@@ -4117,7 +4133,7 @@ const HISTOGRAM_LOG: &str = concat!(
 );
 
 fn histogram_app() -> App {
-    let mut app = app_in(Preset::Logback, HISTOGRAM_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), HISTOGRAM_LOG.as_bytes());
     app.resize(10);
     app
 }
@@ -4190,7 +4206,7 @@ fn histogram_grown(app: App) -> App {
 
 #[test]
 fn histogram_counts_appended_entries_once() {
-    let mut app = histogram_grown(followed(Preset::Logback, HISTOGRAM_LOG));
+    let mut app = histogram_grown(followed(built_in("logback"), HISTOGRAM_LOG));
     assert_eq!(histogram_counts(&mut app), [0, 1, 1, 1, 0, 1]);
 }
 
@@ -4201,7 +4217,7 @@ fn filtered_histogram_counts_appended_entries_once() {
         classes,
         ..Filters::default()
     };
-    let app = filtered(followed(Preset::Logback, HISTOGRAM_LOG), filters);
+    let app = filtered(followed(built_in("logback"), HISTOGRAM_LOG), filters);
     let mut app = histogram_grown(app);
     wait_for_filter(&mut app);
     assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1, 0, 1]);
@@ -4209,14 +4225,14 @@ fn filtered_histogram_counts_appended_entries_once() {
 
 #[test]
 fn histogram_counts_only_what_a_truncated_file_holds_now() {
-    let app = with_histogram(followed(Preset::Logback, HISTOGRAM_LOG));
+    let app = with_histogram(followed(built_in("logback"), HISTOGRAM_LOG));
     let mut app = truncated(app, LATER_ERROR);
     assert_eq!(histogram_counts(&mut app), [1]);
 }
 
 #[test]
 fn histogram_counts_only_what_a_replacing_file_holds() {
-    let app = with_histogram(followed(Preset::Logback, HISTOGRAM_LOG));
+    let app = with_histogram(followed(built_in("logback"), HISTOGRAM_LOG));
     let replacing = test_support::source(LATER_ERROR.as_bytes());
     let mut app = changed(app, FileChange::Replaced(replacing));
     assert_eq!(histogram_counts(&mut app), [1]);
@@ -4230,12 +4246,12 @@ fn histogram_counts_each_entry_once_across_preset_cycles() {
         ..Filters::default()
     };
     let mut app = with_histogram(filtered(histogram_app(), filters));
-    for _ in Preset::ALL {
+    for _ in BUILT_IN {
         app.histogram(HISTOGRAM_WIDTH);
         app.apply(Action::CyclePreset);
         wait_for_filter(&mut app);
     }
-    assert_eq!(app.settings().preset, Preset::Logback);
+    assert_eq!(app.settings().format, built_in("logback"));
     assert_eq!(histogram_counts(&mut app), [0, 1, 0, 1]);
 }
 
@@ -4315,7 +4331,7 @@ fn histogram_fits_a_new_width() {
 
 #[test]
 fn a_shown_histogram_with_entries_left_to_count_expects_updates() {
-    let mut app = unindexed_app(Preset::Logback, HISTOGRAM_LOG.as_bytes());
+    let mut app = unindexed_app(built_in("logback"), HISTOGRAM_LOG.as_bytes());
     app.apply(Action::ToggleHistogram);
     wait_for_index(&mut app);
     assert!(app.expects_updates());
@@ -4342,7 +4358,7 @@ fn the_selected_bucket_stays_within_a_narrower_histogram() {
 #[test]
 fn confirming_a_bucket_without_entries_gives_the_focus_back_to_the_table() {
     let log = [HISTOGRAM_LOG, LATER_ERROR].concat();
-    let app = with_histogram(app_in(Preset::Logback, log.as_bytes()));
+    let app = with_histogram(app_in(built_in("logback"), log.as_bytes()));
     // The fifth bucket, 10:00:04, has no entry.
     let mut app = applied(
         app,
@@ -4404,7 +4420,7 @@ fn f8_opens_the_export_prompt() {
 
 /// A viewer over `content` in `preset`, opened from `app.log` in `dir`, where it is
 /// written, with `dir` as its current directory. Its index isn't complete yet.
-fn exporting(dir: &tempfile::TempDir, preset: Preset, content: &str) -> App {
+fn exporting(dir: &tempfile::TempDir, preset: &'static Format, content: &str) -> App {
     let path = dir.path().join("app.log");
     fs::write(&path, content).unwrap();
     let mut app = App::new(
@@ -4421,7 +4437,7 @@ fn exporting(dir: &tempfile::TempDir, preset: Preset, content: &str) -> App {
 
 /// [`TWO_TRACES`] in Logback, exporting to `dir`, with the whole file indexed.
 fn exporting_traces(dir: &tempfile::TempDir) -> App {
-    let mut app = exporting(dir, Preset::Logback, &TWO_TRACES.concat());
+    let mut app = exporting(dir, built_in("logback"), &TWO_TRACES.concat());
     wait_for_index(&mut app);
     app
 }
@@ -4498,7 +4514,7 @@ fn wait_for_export(app: &mut App) {
 /// [`TWO_TRACES`] without INFO, exported to `out.log` in `dir` before the index and
 /// the filter are polled even once.
 fn export_before_polling(dir: &tempfile::TempDir) -> App {
-    let mut app = exporting(dir, Preset::Logback, &TWO_TRACES.concat());
+    let mut app = exporting(dir, built_in("logback"), &TWO_TRACES.concat());
     app.set_filters(without_info());
     exported_to(app, "out.log")
 }
@@ -4822,7 +4838,7 @@ fn mapped(mut app: App) -> App {
 
 /// [`DETAILS_LOG`], every entry folded, so that it has 2 rows, mapped from line 1.
 fn foldable() -> App {
-    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), DETAILS_LOG.as_bytes());
     app.resize(10);
     mapped(app)
 }
@@ -5008,7 +5024,7 @@ fn copied(mut app: App, answer: fn() -> Result<Via, CopyError>) -> (App, Vec<Str
 
 /// `DETAILS_LOG` on a 10-line screen, every entry folded, the first one selected.
 fn folded_details_log() -> App {
-    let mut app = app_in(Preset::Logback, DETAILS_LOG.as_bytes());
+    let mut app = app_in(built_in("logback"), DETAILS_LOG.as_bytes());
     app.resize(10);
     app.apply(Action::FoldAll);
     app

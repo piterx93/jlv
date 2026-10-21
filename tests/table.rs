@@ -1,4 +1,4 @@
-//! The table of every preset fixture at 80×24 and 120×30, opened at the top.
+//! The table of every format fixture at 80×24 and 120×30, opened at the top.
 
 use std::path::Path;
 use std::thread;
@@ -9,23 +9,26 @@ use jiff::tz::TimeZone;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use vilog::app::{Action, App};
-use vilog::format::Preset;
 use vilog::source;
 use vilog::ui::{Theme, render};
 
-/// The `width`×`height` screen of the fixture `name` read in `preset`, opened at the
-/// top with the whole file indexed, without line numbers. The header ends with the
-/// level counters of the whole file. Timestamps are shown in
+mod common;
+
+use common::built_in;
+
+/// The `width`×`height` screen of the fixture `<id>.log` read in the built-in format
+/// `id`, opened at the top with the whole file indexed, without line numbers. The
+/// header ends with the level counters of the whole file. Timestamps are shown in
 /// Warsaw time, the offset the Spring Boot 3 fixture writes; time-only logs are
 /// dated from a modification time on the morning of 2026-10-08.
-fn screen(preset: Preset, name: &str, width: u16, height: u16) -> String {
+fn screen(id: &str, width: u16, height: u16) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
-        .join(name);
+        .join(format!("{id}.log"));
     let mut app = App::new(
         &path,
         source::open(&path).unwrap(),
-        Some(preset),
+        Some(built_in(id)),
         TimeZone::get("Europe/Warsaw").unwrap(),
         "2026-10-08T06:00:00Z".parse().unwrap(),
         false,
@@ -47,7 +50,7 @@ fn screen(preset: Preset, name: &str, width: u16, height: u16) -> String {
 
 #[test]
 fn logback_at_80_by_24() {
-    let screen = screen(Preset::Logback, "logback.log", 80, 24);
+    let screen = screen("logback", 80, 24);
     assert_snapshot!(screen, @r#"
     "vilog ─ logback.log ─ 4.7 KB ─ Logback ─ PAUSED ●           E:3 W:4 I:11 D:3 T:1"
     "▶09:14:02.118 INFO  c.e.shop.ShopApplication Starting ShopApplication v1.4.2 usi"
@@ -78,7 +81,7 @@ fn logback_at_80_by_24() {
 
 #[test]
 fn logback_at_120_by_30() {
-    let screen = screen(Preset::Logback, "logback.log", 120, 30);
+    let screen = screen("logback", 120, 30);
     assert_snapshot!(screen, @r#"
     "vilog ─ logback.log ─ 4.7 KB ─ Logback ─ PAUSED ●                                                   E:3 W:4 I:11 D:3 T:1"
     "▶2026-10-07 09:14:02.118 INFO  com.example.shop.ShopApplication     Starting ShopApplication v1.4.2 using Java 21.0.4 wi"
@@ -115,7 +118,7 @@ fn logback_at_120_by_30() {
 
 #[test]
 fn logback_basic_at_80_by_24() {
-    let screen = screen(Preset::LogbackBasic, "logback-basic.log", 80, 24);
+    let screen = screen("logback-basic", 80, 24);
     assert_snapshot!(screen, @r#"
     "vilog ─ logback-basic.log ─ 3.0 KB ─ Logback basic ─ PAUSED ●                   "
     "▶23:58:41.007 INFO  c.example.batch.BatchApp Starting nightly import            "
@@ -146,7 +149,7 @@ fn logback_basic_at_80_by_24() {
 
 #[test]
 fn logback_basic_at_120_by_30() {
-    let screen = screen(Preset::LogbackBasic, "logback-basic.log", 120, 30);
+    let screen = screen("logback-basic", 120, 30);
     assert_snapshot!(screen, @r#"
     "vilog ─ logback-basic.log ─ 3.0 KB ─ Logback basic ─ PAUSED ●                                       E:2 W:2 I:11 D:6 T:1"
     "▶2026-10-07 23:58:41.007 INFO  com.example.batch.BatchApp           Starting nightly import                             "
@@ -183,7 +186,7 @@ fn logback_basic_at_120_by_30() {
 
 #[test]
 fn spring3_at_80_by_24() {
-    let screen = screen(Preset::Spring3, "spring3.log", 80, 24);
+    let screen = screen("spring3", 80, 24);
     assert_snapshot!(screen, @r#"
     "vilog ─ spring3.log ─ 6.3 KB ─ Spring Boot 3 ─ PAUSED ●     E:3 W:3 I:19 D:1 T:2"
     "▶                                             [+9]                              "
@@ -214,7 +217,7 @@ fn spring3_at_80_by_24() {
 
 #[test]
 fn spring3_at_120_by_30() {
-    let screen = screen(Preset::Spring3, "spring3.log", 120, 30);
+    let screen = screen("spring3", 120, 30);
     assert_snapshot!(screen, @r#"
     "vilog ─ spring3.log ─ 6.3 KB ─ Spring Boot 3 ─ PAUSED ●                                             E:3 W:3 I:19 D:1 T:2"
     "▶                                                                    [+9]                                               "
@@ -251,7 +254,7 @@ fn spring3_at_120_by_30() {
 
 #[test]
 fn spring2_at_80_by_24() {
-    let screen = screen(Preset::Spring2, "spring2.log", 80, 24);
+    let screen = screen("spring2", 80, 24);
     assert_snapshot!(screen, @r#"
     "vilog ─ spring2.log ─ 4.2 KB ─ Spring Boot 2 ─ PAUSED ●     E:2 W:2 I:14 D:2 T:1"
     "▶09:14:02.118 INFO  c.e.shop.ShopApplication Starting ShopApplication v1.2.0 usi"
@@ -282,7 +285,7 @@ fn spring2_at_80_by_24() {
 
 #[test]
 fn spring2_at_120_by_30() {
-    let screen = screen(Preset::Spring2, "spring2.log", 120, 30);
+    let screen = screen("spring2", 120, 30);
     assert_snapshot!(screen, @r#"
     "vilog ─ spring2.log ─ 4.2 KB ─ Spring Boot 2 ─ PAUSED ●                                             E:2 W:2 I:14 D:2 T:1"
     "▶2026-10-07 09:14:02.118 INFO  com.example.shop.ShopApplication     Starting ShopApplication v1.2.0 using Java 11.0.24 o"
@@ -319,7 +322,7 @@ fn spring2_at_120_by_30() {
 
 #[test]
 fn wildfly_at_80_by_24() {
-    let screen = screen(Preset::Wildfly, "wildfly.log", 80, 24);
+    let screen = screen("wildfly", 80, 24);
     assert_snapshot!(screen, @r#"
     "vilog ─ wildfly.log ─ 5.3 KB ─ WildFly ─ PAUSED ●           E:4 W:4 I:17 D:1 T:1"
     "▶09:13:51.202 INFO  org.jboss.modules        JBoss Modules version 2.1.5.Final  "
@@ -350,7 +353,7 @@ fn wildfly_at_80_by_24() {
 
 #[test]
 fn wildfly_at_120_by_30() {
-    let screen = screen(Preset::Wildfly, "wildfly.log", 120, 30);
+    let screen = screen("wildfly", 120, 30);
     assert_snapshot!(screen, @r#"
     "vilog ─ wildfly.log ─ 5.3 KB ─ WildFly ─ PAUSED ●                                                   E:4 W:4 I:17 D:1 T:1"
     "▶2026-10-07 09:13:51.202 INFO  org.jboss.modules                    JBoss Modules version 2.1.5.Final                   "
@@ -387,7 +390,7 @@ fn wildfly_at_120_by_30() {
 
 #[test]
 fn wildfly_console_at_80_by_24() {
-    let screen = screen(Preset::WildflyConsole, "wildfly-console.log", 80, 24);
+    let screen = screen("wildfly-console", 80, 24);
     assert_snapshot!(screen, @r#"
     "vilog ─ wildfly-console.log ─ 5.6 KB ─ WildFly console ─ PAUSED ●               "
     "▶                                            ============================= [+11]"
@@ -418,7 +421,7 @@ fn wildfly_console_at_80_by_24() {
 
 #[test]
 fn wildfly_console_at_120_by_30() {
-    let screen = screen(Preset::WildflyConsole, "wildfly-console.log", 120, 30);
+    let screen = screen("wildfly-console", 120, 30);
     assert_snapshot!(screen, @r#"
     "vilog ─ wildfly-console.log ─ 5.6 KB ─ WildFly console ─ PAUSED ●                                       E:3 W:2 I:18 D:1"
     "▶                                                                   ============================================== [+11]"

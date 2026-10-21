@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use regex::bytes::{CaptureLocations, Regex};
 
-use super::{EntryHead, EntryParser, Preset, strip_ansi};
+use super::{EntryHead, EntryParser, Format, strip_ansi};
 
 #[cfg(test)]
 mod tests;
@@ -40,10 +40,10 @@ pub struct EntryGrouper {
 }
 
 impl EntryGrouper {
-    /// A grouper for `preset`'s entry-start lines. Under `Raw` every line is an entry.
-    pub fn new(preset: Preset) -> Self {
+    /// A grouper for `format`'s entry-start lines. Under `raw` every line is an entry.
+    pub fn new(format: &'static Format) -> Self {
         EntryGrouper {
-            parser: preset
+            parser: format
                 .entry_parser()
                 .map(|parser| (parser, parser.locations())),
             open: None,

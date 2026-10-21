@@ -7,7 +7,8 @@ use clap::{CommandFactory, Parser};
 
 use super::*;
 use crate::filter::{Classes, Levels, TimeSpec};
-use crate::format::{Level, Preset};
+use crate::format::{BUILT_IN, Level};
+use crate::test_support::built_in;
 
 fn parse(args: &[&str]) -> Result<Args, clap::Error> {
     Args::try_parse_from(std::iter::once("vilog").chain(args.iter().copied()))
@@ -39,35 +40,35 @@ fn file_alone_leaves_every_option_at_its_default() {
 #[test]
 fn short_f_forces_a_format() {
     let args = parse(&["-f", "spring3", "app.log"]).unwrap();
-    assert_eq!(args.format, Some(Preset::Spring3));
+    assert_eq!(args.format, Some(built_in("spring3")));
 }
 
 #[test]
 fn long_format_forces_a_format() {
     let args = parse(&["--format", "wildfly", "app.log"]).unwrap();
-    assert_eq!(args.format, Some(Preset::Wildfly));
+    assert_eq!(args.format, Some(built_in("wildfly")));
 }
 
 #[test]
 fn format_accepts_the_equals_form() {
     let args = parse(&["--format=raw", "app.log"]).unwrap();
-    assert_eq!(args.format, Some(Preset::Raw));
+    assert_eq!(args.format, Some(built_in("raw")));
 }
 
 #[test]
-fn every_preset_name_maps_to_its_preset() {
-    let presets = [
-        ("logback", Preset::Logback),
-        ("logback-basic", Preset::LogbackBasic),
-        ("spring3", Preset::Spring3),
-        ("spring2", Preset::Spring2),
-        ("wildfly", Preset::Wildfly),
-        ("wildfly-console", Preset::WildflyConsole),
-        ("raw", Preset::Raw),
+fn every_format_name_of_1x_still_works() {
+    let names = [
+        "logback",
+        "logback-basic",
+        "spring3",
+        "spring2",
+        "wildfly",
+        "wildfly-console",
+        "raw",
     ];
-    for (name, preset) in presets {
+    for name in names {
         let args = parse(&["-f", name, "app.log"]).unwrap();
-        assert_eq!(args.format, Some(preset), "-f {name}");
+        assert_eq!(args.format.map(|format| format.id), Some(name), "-f {name}");
     }
 }
 
@@ -107,7 +108,7 @@ fn options_may_follow_the_file() {
     assert_eq!(
         args,
         Args {
-            format: Some(Preset::Logback),
+            format: Some(built_in("logback")),
             no_follow: true,
             no_mouse: true,
             ..defaults("app.log")
@@ -164,14 +165,11 @@ fn unknown_format_is_an_invalid_value() {
 }
 
 #[test]
-fn unknown_format_error_lists_every_preset_name() {
+fn unknown_format_error_lists_every_built_in_id_in_table_order() {
     let message = parse(&["-f", "log4j", "app.log"]).unwrap_err().to_string();
-    assert!(
-        message.contains(
-            "[possible values: logback, logback-basic, spring3, spring2, wildfly, wildfly-console, raw]"
-        ),
-        "{message}"
-    );
+    let ids: Vec<&str> = BUILT_IN.iter().map(|format| format.id).collect();
+    let expected = format!("[possible values: {}]", ids.join(", "));
+    assert!(message.contains(&expected), "{message}");
 }
 
 /// The levels `-l <arg>` turns on.

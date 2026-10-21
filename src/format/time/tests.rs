@@ -4,26 +4,21 @@ use jiff::{Timestamp, Zoned};
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::{EntryParser, Preset};
+use crate::format::{EntryParser, Format};
+use crate::test_support::{built_in, text_formats};
 
-/// Every preset but `Raw`, which comes last in [`Preset::ALL`].
-const STRUCTURED: [Preset; 6] = {
-    let [structured @ .., _raw] = Preset::ALL;
-    structured
-};
+/// The formats whose timestamp has a date but no offset.
+const LOCAL_DATE_PRESETS: [&str; 3] = ["logback", "spring2", "wildfly"];
 
-/// The presets whose timestamp has a date but no offset.
-const LOCAL_DATE_PRESETS: [Preset; 3] = [Preset::Logback, Preset::Spring2, Preset::Wildfly];
+const TIME_ONLY_PRESETS: [&str; 2] = ["logback-basic", "wildfly-console"];
 
-const TIME_ONLY_PRESETS: [Preset; 2] = [Preset::LogbackBasic, Preset::WildflyConsole];
-
-fn parser(preset: Preset) -> EntryParser {
+fn parser(preset: &'static Format) -> EntryParser {
     preset
         .entry_parser()
         .unwrap_or_else(|| panic!("{preset:?} has no entry parser"))
 }
 
-fn parse(preset: Preset, span: &str, zone: &TimeZone) -> Option<LogTime> {
+fn parse(preset: &'static Format, span: &str, zone: &TimeZone) -> Option<LogTime> {
     parser(preset).timestamp(span.as_bytes(), zone)
 }
 
@@ -49,13 +44,13 @@ fn time_of_day(text: &str) -> Option<LogTime> {
 
 /// `date_time` (`yyyy-MM-dd HH:mm:ss.SSS`, no offset) as each preset with a date
 /// writes it. Spring 3 always adds an offset, so it gets `Z`.
-fn date_spans(date_time: &str) -> [(Preset, String); 4] {
+fn date_spans(date_time: &str) -> [(&'static Format, String); 4] {
     let with_t = date_time.replacen(' ', "T", 1);
     [
-        (Preset::Logback, date_time.to_string()),
-        (Preset::Spring3, format!("{with_t}Z")),
-        (Preset::Spring2, date_time.to_string()),
-        (Preset::Wildfly, date_time.replace('.', ",")),
+        (built_in("logback"), date_time.to_string()),
+        (built_in("spring3"), format!("{with_t}Z")),
+        (built_in("spring2"), date_time.to_string()),
+        (built_in("wildfly"), date_time.replace('.', ",")),
     ]
 }
 
@@ -63,7 +58,7 @@ fn date_spans(date_time: &str) -> [(Preset, String); 4] {
 
 #[test]
 fn a_timestamp_without_offset_is_local_time_in_the_given_zone() {
-    for preset in LOCAL_DATE_PRESETS {
+    for preset in LOCAL_DATE_PRESETS.map(built_in) {
         assert_eq!(
             parse(preset, "2026-10-07 12:00:00.123", &warsaw()),
             instant("2026-10-07T10:00:00.123Z"),
@@ -82,7 +77,7 @@ fn the_same_wall_clock_time_is_another_instant_in_another_zone() {
     ];
     for (zone, expected) in cases {
         assert_eq!(
-            parse(Preset::Logback, span, &zone),
+            parse(built_in("logback"), span, &zone),
             instant(expected),
             "{zone:?}"
         );
@@ -94,7 +89,7 @@ fn an_explicit_offset_wins_over_the_given_zone() {
     let span = "2026-10-07T12:00:00.123+02:00";
     for zone in [TimeZone::UTC, warsaw(), zone("America/New_York")] {
         assert_eq!(
-            parse(Preset::Spring3, span, &zone),
+            parse(built_in("spring3"), span, &zone),
             instant("2026-10-07T10:00:00.123Z"),
             "{zone:?}"
         );
@@ -106,7 +101,7 @@ fn z_means_utc_whatever_the_given_zone() {
     let span = "2026-10-07T12:00:00.123Z";
     for zone in [TimeZone::UTC, warsaw(), zone("America/New_York")] {
         assert_eq!(
-            parse(Preset::Spring3, span, &zone),
+            parse(built_in("spring3"), span, &zone),
             instant("2026-10-07T12:00:00.123Z"),
             "{zone:?}"
         );
@@ -122,7 +117,7 @@ fn reads_negative_offsets_and_offsets_with_minutes() {
     ];
     for (span, expected) in cases {
         assert_eq!(
-            parse(Preset::Spring3, span, &warsaw()),
+            parse(built_in("spring3"), span, &warsaw()),
             instant(expected),
             "{span}"
         );
@@ -133,7 +128,7 @@ fn reads_negative_offsets_and_offsets_with_minutes() {
 fn an_offset_crossing_midnight_moves_the_date() {
     assert_eq!(
         parse(
-            Preset::Spring3,
+            built_in("spring3"),
             "2026-10-07T00:30:00.000+02:00",
             &TimeZone::UTC
         ),
@@ -145,7 +140,7 @@ fn an_offset_crossing_midnight_moves_the_date() {
 fn a_wall_clock_time_in_a_dst_gap_is_read_with_the_offset_before_the_gap() {
     // Warsaw jumps from 02:00 to 03:00 on 2026-03-29: 02:30 doesn't exist and
     // `compatible` takes it as 03:30 summer time.
-    for preset in LOCAL_DATE_PRESETS {
+    for preset in LOCAL_DATE_PRESETS.map(built_in) {
         assert_eq!(
             parse(preset, "2026-03-29 02:30:00.000", &warsaw()),
             instant("2026-03-29T01:30:00Z"),
@@ -158,7 +153,7 @@ fn a_wall_clock_time_in_a_dst_gap_is_read_with_the_offset_before_the_gap() {
 fn an_ambiguous_wall_clock_time_in_a_dst_fold_is_the_earlier_instant() {
     // Warsaw falls back from 03:00 to 02:00 on 2026-10-25: 02:30 happens twice and
     // `compatible` takes the first, still summer time.
-    for preset in LOCAL_DATE_PRESETS {
+    for preset in LOCAL_DATE_PRESETS.map(built_in) {
         assert_eq!(
             parse(preset, "2026-10-25 02:30:00.000", &warsaw()),
             instant("2026-10-25T00:30:00Z"),
@@ -170,7 +165,11 @@ fn an_ambiguous_wall_clock_time_in_a_dst_fold_is_the_earlier_instant() {
 #[test]
 fn an_explicit_offset_picks_the_later_of_two_ambiguous_wall_clock_times() {
     assert_eq!(
-        parse(Preset::Spring3, "2026-10-25T02:30:00.000+01:00", &warsaw()),
+        parse(
+            built_in("spring3"),
+            "2026-10-25T02:30:00.000+01:00",
+            &warsaw()
+        ),
         instant("2026-10-25T01:30:00Z")
     );
 }
@@ -180,18 +179,18 @@ fn an_explicit_offset_picks_the_later_of_two_ambiguous_wall_clock_times() {
 #[test]
 fn time_only_presets_give_a_time_of_day() {
     assert_eq!(
-        parse(Preset::LogbackBasic, "23:59:58.996", &warsaw()),
+        parse(built_in("logback-basic"), "23:59:58.996", &warsaw()),
         time_of_day("23:59:58.996")
     );
     assert_eq!(
-        parse(Preset::WildflyConsole, "00:00:01,338", &warsaw()),
+        parse(built_in("wildfly-console"), "00:00:01,338", &warsaw()),
         time_of_day("00:00:01.338")
     );
 }
 
 #[test]
 fn a_time_of_day_does_not_depend_on_the_zone() {
-    for preset in TIME_ONLY_PRESETS {
+    for preset in TIME_ONLY_PRESETS.map(built_in) {
         for zone in [TimeZone::UTC, warsaw(), TimeZone::fixed(tz::offset(-11))] {
             assert_eq!(
                 parse(preset, "12:00:00.123", &zone),
@@ -206,7 +205,7 @@ fn a_time_of_day_does_not_depend_on_the_zone() {
 
 #[test]
 fn a_comma_before_the_fraction_works_like_a_dot() {
-    for preset in LOCAL_DATE_PRESETS {
+    for preset in LOCAL_DATE_PRESETS.map(built_in) {
         assert_eq!(
             parse(preset, "2026-10-07 12:00:00,123", &TimeZone::UTC),
             instant("2026-10-07T12:00:00.123Z"),
@@ -214,10 +213,14 @@ fn a_comma_before_the_fraction_works_like_a_dot() {
         );
     }
     assert_eq!(
-        parse(Preset::Spring3, "2026-10-07T12:00:00,123Z", &TimeZone::UTC),
+        parse(
+            built_in("spring3"),
+            "2026-10-07T12:00:00,123Z",
+            &TimeZone::UTC
+        ),
         instant("2026-10-07T12:00:00.123Z")
     );
-    for preset in TIME_ONLY_PRESETS {
+    for preset in TIME_ONLY_PRESETS.map(built_in) {
         assert_eq!(
             parse(preset, "12:00:00,123", &TimeZone::UTC),
             time_of_day("12:00:00.123"),
@@ -243,14 +246,14 @@ fn a_fraction_of_one_to_nine_digits_is_a_decimal_fraction_of_a_second() {
         let date_span = format!("2026-10-07 12:00:00{fraction}");
         let expected = format!("2026-10-07T12:00:0{seconds}Z");
         assert_eq!(
-            parse(Preset::Logback, &date_span, &TimeZone::UTC),
+            parse(built_in("logback"), &date_span, &TimeZone::UTC),
             instant(&expected),
             "{date_span}"
         );
         let time_span = format!("12:00:00{fraction}");
         let expected = format!("12:00:0{seconds}");
         assert_eq!(
-            parse(Preset::LogbackBasic, &time_span, &TimeZone::UTC),
+            parse(built_in("logback-basic"), &time_span, &TimeZone::UTC),
             time_of_day(&expected),
             "{time_span}"
         );
@@ -261,14 +264,18 @@ fn a_fraction_of_one_to_nine_digits_is_a_decimal_fraction_of_a_second() {
 fn a_fraction_of_more_than_nine_digits_is_none() {
     assert_eq!(
         parse(
-            Preset::Logback,
+            built_in("logback"),
             "2026-10-07 12:00:00.1234567890",
             &TimeZone::UTC
         ),
         None
     );
     assert_eq!(
-        parse(Preset::LogbackBasic, "12:00:00.1234567890", &TimeZone::UTC),
+        parse(
+            built_in("logback-basic"),
+            "12:00:00.1234567890",
+            &TimeZone::UTC
+        ),
         None
     );
 }
@@ -318,7 +325,7 @@ fn an_impossible_time_is_none() {
         for (preset, span) in date_spans(&format!("2026-10-07 {time}")) {
             assert_eq!(parse(preset, &span, &warsaw()), None, "{preset:?} {span}");
         }
-        for preset in TIME_ONLY_PRESETS {
+        for preset in TIME_ONLY_PRESETS.map(built_in) {
             assert_eq!(parse(preset, time, &warsaw()), None, "{preset:?} {time}");
         }
     }
@@ -327,7 +334,11 @@ fn an_impossible_time_is_none() {
 #[test]
 fn an_impossible_offset_is_none() {
     assert_eq!(
-        parse(Preset::Spring3, "2026-10-07T12:00:00.123+02:60", &warsaw()),
+        parse(
+            built_in("spring3"),
+            "2026-10-07T12:00:00.123+02:60",
+            &warsaw()
+        ),
         None
     );
 }
@@ -335,12 +346,16 @@ fn an_impossible_offset_is_none() {
 #[test]
 fn an_instant_beyond_what_jiff_can_represent_is_none() {
     assert_eq!(
-        parse(Preset::Logback, "9999-12-31 23:59:59.999", &TimeZone::UTC),
+        parse(
+            built_in("logback"),
+            "9999-12-31 23:59:59.999",
+            &TimeZone::UTC
+        ),
         None
     );
     assert_eq!(
         parse(
-            Preset::Spring3,
+            built_in("spring3"),
             "9999-12-31T23:59:59.999-05:00",
             &TimeZone::UTC
         ),
@@ -368,7 +383,7 @@ fn a_span_that_is_not_a_whole_timestamp_is_none() {
     ];
     for span in spans {
         assert_eq!(
-            parse(Preset::Logback, span, &TimeZone::UTC),
+            parse(built_in("logback"), span, &TimeZone::UTC),
             None,
             "{span:?}"
         );
@@ -389,7 +404,7 @@ fn a_time_only_span_that_is_not_a_whole_time_is_none() {
     ];
     for span in spans {
         assert_eq!(
-            parse(Preset::WildflyConsole, span, &TimeZone::UTC),
+            parse(built_in("wildfly-console"), span, &TimeZone::UTC),
             None,
             "{span:?}"
         );
@@ -409,7 +424,7 @@ fn a_spring3_timestamp_with_a_broken_separator_or_offset_is_none() {
     ];
     for span in spans {
         assert_eq!(
-            parse(Preset::Spring3, span, &TimeZone::UTC),
+            parse(built_in("spring3"), span, &TimeZone::UTC),
             None,
             "{span:?}"
         );
@@ -418,8 +433,8 @@ fn a_spring3_timestamp_with_a_broken_separator_or_offset_is_none() {
 
 // --- properties ---
 
-fn structured() -> impl Strategy<Value = Preset> {
-    prop::sample::select(STRUCTURED.as_slice())
+fn structured() -> impl Strategy<Value = &'static Format> {
+    prop::sample::select(text_formats())
 }
 
 fn zones() -> impl Strategy<Value = TimeZone> {
@@ -506,7 +521,7 @@ proptest! {
 
     #[test]
     fn reads_back_any_local_date_and_time(
-        preset in prop::sample::select(LOCAL_DATE_PRESETS.as_slice()),
+        preset in prop::sample::select(LOCAL_DATE_PRESETS.map(built_in).to_vec()),
         zone in zones(),
         (date_time, digits) in date_time(),
         separator in prop::sample::select(vec!['.', ',']),
@@ -547,7 +562,7 @@ proptest! {
         let expected = offset.to_timestamp(date_time).ok();
         prop_assume!(expected.is_some());
         prop_assert_eq!(
-            parse(Preset::Spring3, &span, &zone),
+            parse(built_in("spring3"), &span, &zone),
             expected.map(LogTime::Instant),
             "{}", span
         );
@@ -555,7 +570,7 @@ proptest! {
 
     #[test]
     fn reads_back_any_time_of_day(
-        preset in prop::sample::select(TIME_ONLY_PRESETS.as_slice()),
+        preset in prop::sample::select(TIME_ONLY_PRESETS.map(built_in).to_vec()),
         zone in zones(),
         (date_time, digits) in date_time(),
         separator in prop::sample::select(vec!['.', ',']),

@@ -18,7 +18,7 @@ use jiff::tz::TimeZone;
 use memchr::memchr;
 
 use crate::format::{
-    Anchor, DatesBackward, EntryGrouper, EntryHead, EntryParser, Level, LogTime, Preset,
+    Anchor, DatesBackward, EntryGrouper, EntryHead, EntryParser, Format, Level, LogTime,
     strip_ansi_into,
 };
 use crate::source;
@@ -37,7 +37,7 @@ mod tests;
 /// How to read a file's entries.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub preset: Preset,
+    pub format: &'static Format,
     /// The time zone of timestamps without an offset.
     pub zone: TimeZone,
     /// Where dating a time-only preset's entries starts (see
@@ -293,12 +293,12 @@ struct ChunkReader<'a> {
 
 impl<'a> ChunkReader<'a> {
     fn new(settings: &'a Settings) -> Self {
-        let parser = settings.preset.entry_parser();
+        let parser = settings.format.entry_parser();
         ChunkReader {
             zone: &settings.zone,
             parser,
             time_only: parser.is_some_and(|parser| !parser.has_date()),
-            grouper: EntryGrouper::new(settings.preset),
+            grouper: EntryGrouper::new(settings.format),
             stripped: Vec::new(),
             chunk: Chunk::empty(),
         }

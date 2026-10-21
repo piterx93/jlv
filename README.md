@@ -43,16 +43,16 @@ Arguments:
   <FILE>  Log file to open
 
 Options:
-  -f, --format <PRESET>  Force a format instead of detecting it [possible values: logback,
-                         logback-basic, spring3, spring2, wildfly, wildfly-console, raw]
-      --no-follow        Open at the top, don't follow
-  -l, --level <LEVELS>   Initial level filter, e.g. WARN,ERROR
-  -c, --class <RULES>    Initial class filter, e.g. 'com.myco.*,!org.hibernate'
-  -s, --since <SPEC>     Initial time filter, e.g. 10m or 12:00-12:30
-      --no-mouse         Disable mouse
-      --config <PATH>    Config file path
-  -h, --help             Print help
-  -V, --version          Print version
+  -f, --format <NAME>   Force a format instead of detecting it [possible values: logback,
+                        logback-basic, spring3, spring2, wildfly, wildfly-console, raw]
+      --no-follow       Open at the top, don't follow
+  -l, --level <LEVELS>  Initial level filter, e.g. WARN,ERROR
+  -c, --class <RULES>   Initial class filter, e.g. 'com.myco.*,!org.hibernate'
+  -s, --since <SPEC>    Initial time filter, e.g. 10m or 12:00-12:30
+      --no-mouse        Disable mouse
+      --config <PATH>   Config file path
+  -h, --help            Print help
+  -V, --version         Print version
 ```
 
 ```sh

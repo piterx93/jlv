@@ -29,7 +29,7 @@ use crate::filter::{
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Liveness, Options, Watcher};
-use crate::format::{Anchor, Level, Preset, detect, strip_ansi};
+use crate::format::{Anchor, BUILT_IN, Format, Level, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::keymap::{Keymap, normalized};
@@ -69,7 +69,7 @@ pub enum Action {
     /// Shows or hides the gutter of file line numbers.
     ToggleLineNumbers,
     ToggleWrap,
-    /// Reads the file in the next preset of [`Preset::ALL`].
+    /// Reads the file in the next format of [`BUILT_IN`].
     CyclePreset,
     /// Unfolds the selected entry if it is folded, folds it if it is not.
     ToggleFold,
@@ -643,14 +643,14 @@ struct Filter {
 }
 
 impl Filter {
-    /// The filter of `index`, read in `preset`, whose matches fold as `all`, the
+    /// The filter of `index`, read in `format`, whose matches fold as `all`, the
     /// index's fold state, folds them.
-    fn spawn(index: &SharedIndex, preset: Preset, filters: Filters, all: &Folds) -> Self {
+    fn spawn(index: &SharedIndex, format: &'static Format, filters: Filters, all: &Folds) -> Self {
         let options = filter::Options {
             chunk: FILTER_CHUNK,
         };
         Filter {
-            engine: Engine::spawn(Arc::clone(index), preset, filters, options),
+            engine: Engine::spawn(Arc::clone(index), format, filters, options),
             // In the index's mode, only the matches it excepts are exceptions here.
             folds: all.empty_like(),
         }
@@ -999,7 +999,7 @@ impl Timestamps {
 
 impl App {
     /// A viewer over `source`, which starts indexing it in the background in the
-    /// preset `format` names. Without one the preset is detected from the file's first
+    /// format `format` names. Without one the format is detected from the file's first
     /// lines ([`detect`](crate::format::detect)); when none fits, the file is read in
     /// `Raw` and [`format_unrecognized`](Self::format_unrecognized) says so. `path` is
     /// where the file was opened from; its name and `mtime`, the file's modification
@@ -1022,7 +1022,7 @@ impl App {
     pub fn new(
         path: &Path,
         source: Source,
-        format: Option<Preset>,
+        format: Option<&'static Format>,
         zone: TimeZone,
         mtime: Timestamp,
         follow: bool,
@@ -1035,7 +1035,8 @@ impl App {
         let anchor = Anchor::for_file(path, mtime, &zone);
         let source = Arc::new(source);
         let settings = Settings {
-            preset: picked.unwrap_or(Preset::Raw),
+            format: picked
+                .unwrap_or_else(|| Format::by_id("raw").expect("the built-in formats include raw")),
             zone,
             anchor,
         };
@@ -1150,7 +1151,7 @@ impl App {
             let dated = self.progress.is_complete()
                 && self
                     .settings
-                    .preset
+                    .format
                     .entry_parser()
                     .is_some_and(|parser| !parser.has_date());
             if dated {
@@ -1189,7 +1190,7 @@ impl App {
         self.progress
     }
 
-    /// How the file is indexed: the preset, the zone and the anchor `new` made of
+    /// How the file is indexed: the format, the zone and the anchor `new` made of
     /// its arguments.
     pub fn settings(&self) -> &Settings {
         &self.settings
@@ -2305,14 +2306,16 @@ impl App {
         self.quit
     }
 
-    /// Indexes the file again in the preset after the current one in
-    /// [`Preset::ALL`]. It opens again at the end while following, at the top
-    /// otherwise; a file that can't be followed opens again as `new` opened it.
+    /// Indexes the file again in the format after the current one in
+    /// [`BUILT_IN`], the first after the last. It opens again at the end while
+    /// following, at the top otherwise; a file that can't be followed opens again as
+    /// `new` opened it.
     fn cycle_preset(&mut self) {
-        let presets = Preset::ALL;
-        // `ALL` holds every preset, so the current one is always found.
-        let current = presets.iter().position(|&p| p == self.settings.preset);
-        self.settings.preset = presets[current.map_or(0, |i| (i + 1) % presets.len())];
+        let at = BUILT_IN
+            .iter()
+            .position(|format| *format == *self.settings.format)
+            .map_or(0, |at| at + 1);
+        self.settings.format = &BUILT_IN[at % BUILT_IN.len()];
         self.unrecognized = false;
         self.folds = Folds::default();
         self.truncated = false;
@@ -2361,7 +2364,7 @@ impl App {
             };
             Engine::spawn_search(
                 Arc::clone(&self.index),
-                self.settings.preset,
+                self.settings.format,
                 self.filters.clone(),
                 search.matcher.clone(),
                 options,
@@ -2586,8 +2589,8 @@ impl App {
     fn start_filter(&mut self) {
         self.cancel_jump();
         let filters = self.filters.clone();
-        let preset = self.settings.preset;
-        self.filter = Some(Filter::spawn(&self.index, preset, filters, &self.folds));
+        let format = self.settings.format;
+        self.filter = Some(Filter::spawn(&self.index, format, filters, &self.folds));
     }
 
     /// Indexes the source from the start, the rows opening as `opening` says.

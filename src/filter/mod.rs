@@ -23,7 +23,7 @@ use jiff::Timestamp;
 use memchr::memmem;
 use regex::bytes::CaptureLocations;
 
-use crate::format::{self, EntryParser, Level, Preset, strip_ansi_into};
+use crate::format::{self, EntryParser, Format, Level, strip_ansi_into};
 use crate::index::Record;
 use crate::matcher::Matcher;
 use crate::source;
@@ -258,24 +258,24 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Starts evaluating `filters` over the entries of `indexed`, read in `preset`.
+    /// Starts evaluating `filters` over the entries of `indexed`, read in `format`.
     pub fn spawn<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        preset: Preset,
+        format: &'static Format,
         filters: Filters,
         options: Options,
     ) -> Engine
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
-        Self::spawn_with(indexed, preset, filters, None, options)
+        Self::spawn_with(indexed, format, filters, None, options)
     }
 
     /// Like [`spawn`](Self::spawn), but an entry passes only if one of its lines, with
     /// ANSI escape codes stripped, also matches `search`.
     pub fn spawn_search<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        preset: Preset,
+        format: &'static Format,
         filters: Filters,
         search: Matcher,
         options: Options,
@@ -283,12 +283,12 @@ impl Engine {
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
-        Self::spawn_with(indexed, preset, filters, Some(Arc::new(search)), options)
+        Self::spawn_with(indexed, format, filters, Some(Arc::new(search)), options)
     }
 
     fn spawn_with<B>(
         indexed: Arc<RwLock<Indexed<B>>>,
-        preset: Preset,
+        format: &'static Format,
         filters: Filters,
         search: Option<Arc<Matcher>>,
         options: Options,
@@ -300,7 +300,7 @@ impl Engine {
         let (update_sender, updates) = mpsc::channel();
         let worker = Worker {
             indexed,
-            parser: preset.entry_parser(),
+            parser: format.entry_parser(),
             chunk: options.chunk.max(1),
             jobs: job_receiver,
             updates: update_sender,
