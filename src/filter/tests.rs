@@ -418,23 +418,39 @@ impl Model {
         class_passes && time_passes && text_passes
     }
 
-    fn naive(&self, entries: &[Entry]) -> Filtered {
-        let mut filtered = Filtered {
-            evaluated: entries.len(),
-            ..Filtered::default()
-        };
-        for (i, entry) in entries.iter().enumerate() {
-            if !self.passes_others(entry) {
-                continue;
-            }
-            if let Some(level) = entry.head.as_ref().and_then(|head| head.level) {
-                filtered.counts[level as usize] += 1;
-            }
-            if self.passes_level(entry) {
-                filtered.entries.push(i as u32);
+    /// What a naive filter finds in the entries `run`, with a search for `search`
+    /// if given.
+    fn naive_run(
+        &self,
+        entries: &[Entry],
+        run: std::ops::Range<usize>,
+        search: Option<&str>,
+    ) -> Evaluated {
+        let mut found = Evaluated::default();
+        for (i, entry) in run.clone().zip(&entries[run]) {
+            let passes = self.passes_others(entry);
+            let level = entry.head.as_ref().and_then(|head| head.level);
+            found.counted.push(level.filter(|_| passes));
+            let searched =
+                search.is_none_or(|word| render(std::slice::from_ref(entry)).contains(word));
+            if passes && self.passes_level(entry) && searched {
+                found.entries.push(i as u32);
             }
         }
-        filtered
+        found
+    }
+
+    fn naive(&self, entries: &[Entry]) -> Filtered {
+        let run = self.naive_run(entries, 0..entries.len(), None);
+        let mut counts = [0; 6];
+        for level in run.counted.into_iter().flatten() {
+            counts[level as usize] += 1;
+        }
+        Filtered {
+            evaluated: entries.len(),
+            entries: run.entries,
+            counts,
+        }
     }
 }
 
@@ -571,6 +587,110 @@ proptest! {
         let found = finish(&mut engine, entries.len(), |_| {});
         prop_assert_eq!(found, model.naive(&entries));
     }
+}
+
+/// What [`evaluate`] finds in the entries `run` of the log `entries` make, on
+/// `threads` threads.
+fn evaluate_run(
+    entries: &[Entry],
+    model: &Model,
+    search: Option<&str>,
+    run: std::ops::Range<usize>,
+    threads: usize,
+) -> Evaluated {
+    let indexed = indexed(built_in("logback"), render(entries).as_bytes());
+    let search = search.map(|word| Matcher::new(word, matcher::Options::default()).unwrap());
+    evaluate(
+        &indexed.read().unwrap(),
+        built_in("logback"),
+        &model.filters(),
+        search.as_ref(),
+        run,
+        threads,
+    )
+}
+
+proptest! {
+    #[test]
+    fn evaluating_a_run_on_any_number_of_threads_matches_a_naive_filter(
+        entries in entries(),
+        model in model(),
+        search in prop::option::of(word()),
+        ends in (any::<prop::sample::Index>(), any::<prop::sample::Index>()),
+        threads in 0..6usize,
+    ) {
+        let (a, b) = (ends.0.index(entries.len() + 1), ends.1.index(entries.len() + 1));
+        let run = a.min(b)..a.max(b);
+        prop_assert_eq!(
+            evaluate_run(&entries, &model, search, run.clone(), threads),
+            model.naive_run(&entries, run, search)
+        );
+    }
+}
+
+/// Long enough that each of the threads has thousands of entries to evaluate.
+#[test]
+fn a_long_run_split_across_threads_matches_a_naive_filter() {
+    let entries: Vec<Entry> = (0..20_000)
+        .map(|i| Entry {
+            head: Some(Head {
+                second: (i % 6) as u8,
+                level: LEVELS.get(i % 7).copied(),
+                class: CLASSES[i % 3],
+                message: WORDS[i / 3 % 4],
+            }),
+            lines: WORDS[..i % 5 % 3].to_vec(),
+        })
+        .collect();
+    let model = Model {
+        levels: [true, false, true, true, true, true],
+        include: vec!["myco"],
+        exclude: vec!["Client"],
+        time: Some((1, None)),
+        text: Some("beta"),
+    };
+    let run = 3..entries.len() - 2;
+    let expected = model.naive_run(&entries, run.clone(), Some("alpha"));
+    // The pattern of the entries repeats every 420, so matches are all over the run.
+    assert!(expected.entries.len() > 900, "{}", expected.entries.len());
+    assert_eq!(
+        evaluate_run(&entries, &model, Some("alpha"), run, 4),
+        expected
+    );
+}
+
+#[test]
+fn only_a_text_filter_a_class_filter_or_a_search_read_the_entry_bytes() {
+    let job = |filters: Filters, search: Option<&str>| Job {
+        generation: 0,
+        filters: Arc::new(filters),
+        search: search.map(|word| Arc::new(text(word).unwrap())),
+        from: 0,
+    };
+    let index_only = Filters {
+        levels: Levels::only(&[Level::Error]),
+        time: Some(TimeRange {
+            start: at_second(0),
+            end: None,
+        }),
+        ..Filters::default()
+    };
+    let message = Filters {
+        text: text("boom"),
+        ..Filters::default()
+    };
+    let class = Filters {
+        classes: classes(&["com.myco.*"]),
+        ..Filters::default()
+    };
+    let reads = [
+        job(index_only.clone(), None),
+        job(index_only, Some("boom")),
+        job(message, None),
+        job(class, None),
+    ]
+    .map(|job| job.reads_entries());
+    assert_eq!(reads, [false, true, true, true]);
 }
 
 // --- class rules ---

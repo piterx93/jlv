@@ -114,4 +114,7 @@ exclude_re = [
     # A handler that does nothing returns to an access that faults again, forever; the
     # test hangs until the timeout.
     'src/source/guard\.rs:\d+:\d+: replace on_sigbus with \(\)$',
+    # The size of a filter batch only changes how many entries each update carries; the
+    # results after every update are the same.
+    'src/filter/mod\.rs:\d+:\d+: replace \* with \+ in Worker<B>::run$',
 ]

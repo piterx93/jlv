@@ -577,8 +577,9 @@ const TAIL_WINDOW: usize = 65_536;
 /// the viewer gives up on the tail and waits for the whole index.
 const TAIL_LIMIT: usize = 4_194_304;
 
-/// How many entries the filter engine evaluates per chunk. It holds the index for a
-/// chunk at a time, and taking in what the followed file appends has to wait for it.
+/// How many entries the filter engine evaluates per chunk, and a chunk per
+/// core at once. It holds the index for a batch at a time, and taking in what the
+/// followed file appends has to wait for it.
 const FILTER_CHUNK: usize = 1024;
 
 /// How long the viewer waits for the filter engine to evaluate the few entries that

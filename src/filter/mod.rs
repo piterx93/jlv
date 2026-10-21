@@ -2,8 +2,9 @@
 //! level counters of the header (PRD §7.1).
 //!
 //! The filters combine with AND. An [`Engine`] evaluates them on a background
-//! thread, a chunk of entries at a time, and publishes what it found after each
-//! chunk. Setting new filters starts a new generation and cancels the one running.
+//! thread, a batch of entries at a time (a chunk per core, evaluated in parallel),
+//! and publishes what it found after each batch. Setting new filters starts a new
+//! generation and cancels the one running.
 //! Entries appended to the index are evaluated as they come, and an entry the index
 //! read again is evaluated again.
 //!
@@ -13,6 +14,7 @@
 //! have a line the search matches.
 
 use std::fmt;
+use std::num::NonZero;
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, RwLock};
@@ -222,8 +224,9 @@ pub struct Indexed<B> {
 /// How an [`Engine`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// Entries per chunk, at least 1. Results are published and cancellation is
-    /// noticed between chunks.
+    /// Entries per chunk and thread, at least 1. The engine evaluates a batch of
+    /// one chunk per thread at once; results are published and cancellation is
+    /// noticed between batches.
     pub chunk: usize,
 }
 
@@ -238,6 +241,72 @@ pub struct Filtered {
     /// Per level, indexed by `Level as usize`: the evaluated entries of that level
     /// that pass every filter but the level filter.
     pub counts: [u32; 6],
+}
+
+/// What [`evaluate`] found in a run of entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Evaluated {
+    /// The entries of the run that pass every filter, and the search if there is
+    /// one, as indices into the records, in ascending order.
+    pub entries: Vec<u32>,
+    /// Per entry of the run, in order: its level if it passes every filter but the
+    /// level filter, which is what it adds to [`Filtered::counts`].
+    pub counted: Vec<Option<Level>>,
+}
+
+/// Evaluates `filters`, and `search` if given, over the entries `entries` of
+/// `indexed`, read in `format`, as an [`Engine`] does: the run is split into parts
+/// evaluated on up to `threads` threads at once (0 counts as 1). The result is the
+/// same for any number of threads.
+fn evaluate<B: AsRef<[u8]> + Sync>(
+    indexed: &Indexed<B>,
+    format: &'static Format,
+    filters: &Filters,
+    search: Option<&Matcher>,
+    entries: Range<usize>,
+    threads: usize,
+) -> Evaluated {
+    let check = Check { filters, search };
+    let parser = format.entry_parser();
+    // Borrowed apart because `Indexed` as a whole would need `B: Send` to cross threads.
+    let (records, bytes) = (&indexed.records[..], indexed.bytes.as_ref().as_ref());
+    let run = |part: Range<usize>| {
+        let mut scratch = Scratch::new(parser);
+        check.run(records, bytes, part, &mut scratch)
+    };
+    let part_len = entries.len().div_ceil(threads.max(1)).max(1);
+    let parts: Vec<Range<usize>> = (entries.start..entries.end)
+        .step_by(part_len)
+        .map(|start| start..entries.end.min(start + part_len))
+        .collect();
+    let Some((last, rest)) = parts.split_last() else {
+        return Evaluated::default();
+    };
+    thread::scope(|scope| {
+        let handles: Vec<_> = rest
+            .iter()
+            .map(|part| scope.spawn(|| run(part.clone())))
+            .collect();
+        // The calling thread takes a part too, instead of only waiting.
+        let mut found = Vec::with_capacity(parts.len());
+        let tail = run(last.clone());
+        for handle in handles {
+            // A panic in a part is a bug in the filters; pass it on.
+            found.push(
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            );
+        }
+        found.push(tail);
+        found
+            .into_iter()
+            .fold(Evaluated::default(), |mut all, part| {
+                all.entries.extend(part.entries);
+                all.counted.extend(part.counted);
+                all
+            })
+    })
 }
 
 /// Evaluates the filters over an index on a background thread. Dropping it stops
@@ -296,11 +365,13 @@ impl Engine {
     where
         B: AsRef<[u8]> + Send + Sync + 'static,
     {
+        let threads = thread::available_parallelism().map_or(1, NonZero::get);
         let (jobs, job_receiver) = mpsc::channel();
         let (update_sender, updates) = mpsc::channel();
         let worker = Worker {
             indexed,
-            parser: format.entry_parser(),
+            format,
+            threads,
             chunk: options.chunk.max(1),
             jobs: job_receiver,
             updates: update_sender,
@@ -405,12 +476,13 @@ impl Engine {
     }
 
     fn take_in(&mut self, update: Update) {
-        for level in update.counted.iter().flatten() {
+        let found = update.found;
+        for level in found.counted.iter().flatten() {
             self.filtered.counts[*level as usize] += 1;
         }
-        self.filtered.evaluated += update.counted.len();
-        self.filtered.entries.extend(update.entries);
-        self.counted.extend(update.counted);
+        self.filtered.evaluated += found.counted.len();
+        self.filtered.entries.extend(found.entries);
+        self.counted.extend(found.counted);
     }
 }
 
@@ -422,32 +494,35 @@ struct Job {
     from: usize,
 }
 
-/// What the thread found in the chunk of entries that follows the ones published
+impl Job {
+    fn reads_entries(&self) -> bool {
+        self.search.is_some() || self.filters.text.is_some() || !self.filters.classes.is_empty()
+    }
+}
+
+/// What the threads found in the batch of entries that follows the ones published
 /// before in the same generation.
 struct Update {
     generation: u64,
-    /// The indices of the entries that pass every filter.
-    entries: Vec<u32>,
-    /// Per entry of the chunk, the level it adds to the counters, if any.
-    counted: Vec<Option<Level>>,
+    found: Evaluated,
 }
 
 struct Worker<B> {
     indexed: Arc<RwLock<Indexed<B>>>,
-    parser: Option<EntryParser>,
+    /// Entries per chunk, which one thread evaluates.
     chunk: usize,
+    format: &'static Format,
+    /// The most threads a batch of a chunk each is evaluated on.
+    threads: usize,
     jobs: Receiver<Job>,
     updates: Sender<Update>,
 }
 
-impl<B: AsRef<[u8]>> Worker<B> {
-    /// Evaluates a chunk at a time until the job is done, then waits for the next.
+impl<B: AsRef<[u8]> + Sync> Worker<B> {
+    /// Evaluates a batch, a chunk per thread, at a time until the job is done, then
+    /// waits for the next.
     /// Ends when the engine is dropped, or when the viewer panicked holding the index.
     fn run(self) {
-        let mut scratch = Scratch {
-            buffer: Vec::new(),
-            parser: self.parser.map(|parser| (parser, parser.locations())),
-        };
         let Ok(job) = self.jobs.recv() else {
             return;
         };
@@ -467,17 +542,31 @@ impl<B: AsRef<[u8]>> Worker<B> {
                 job = next;
                 continue;
             }
-            let chunk = job.from..total.min(job.from + self.chunk);
-            let check = Check {
-                filters: &job.filters,
-                search: job.search.as_deref(),
+            let batch = job.from..total.min(job.from + self.chunk * self.threads);
+            // Threads cost more than they save when no entry bytes are read, or
+            // when the batch is a few entries.
+            let threads = if job.reads_entries() {
+                self.threads.min(batch.len().div_ceil(self.chunk))
+            } else {
+                1
             };
-            let update = check.chunk(&indexed, chunk.clone(), job.generation, &mut scratch);
+            let found = evaluate(
+                &indexed,
+                self.format,
+                &job.filters,
+                job.search.as_deref(),
+                batch.clone(),
+                threads,
+            );
+            let update = Update {
+                generation: job.generation,
+                found,
+            };
             drop(indexed);
             if self.updates.send(update).is_err() {
                 return;
             }
-            job.from = chunk.end;
+            job.from = batch.end;
             let Some(newest) = self.newest(job) else {
                 return;
             };
@@ -505,6 +594,15 @@ struct Scratch {
     parser: Option<(EntryParser, CaptureLocations)>,
 }
 
+impl Scratch {
+    fn new(parser: Option<EntryParser>) -> Scratch {
+        Scratch {
+            buffer: Vec::new(),
+            parser: parser.map(|parser| (parser, parser.locations())),
+        }
+    }
+}
+
 /// The filters at work on entries.
 struct Check<'a> {
     filters: &'a Filters,
@@ -512,20 +610,18 @@ struct Check<'a> {
 }
 
 impl Check<'_> {
-    fn chunk<B: AsRef<[u8]>>(
+    fn run(
         &self,
-        indexed: &Indexed<B>,
-        chunk: Range<usize>,
-        generation: u64,
+        records: &[Record],
+        bytes: &[u8],
+        run: Range<usize>,
         scratch: &mut Scratch,
-    ) -> Update {
-        let bytes = indexed.bytes.as_ref().as_ref();
-        let mut update = Update {
-            generation,
+    ) -> Evaluated {
+        let mut update = Evaluated {
             entries: Vec::new(),
-            counted: Vec::with_capacity(chunk.len()),
+            counted: Vec::with_capacity(run.len()),
         };
-        for (index, record) in chunk.clone().zip(&indexed.records[chunk]) {
+        for (index, record) in run.clone().zip(&records[run]) {
             let range = record.bytes();
             let entry = bytes
                 .get(range.start as usize..range.end as usize)
