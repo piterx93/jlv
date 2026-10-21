@@ -1,6 +1,6 @@
 //! Format detection on the fixture logs in `tests/fixtures`, one per preset.
 
-use vilog::format::{Format, detect};
+use vilog::format::{Format, Mapping, detect};
 
 mod common;
 
@@ -16,6 +16,120 @@ fn detect_bytes(bytes: &[u8]) -> Option<&'static Format> {
 fn every_fixture_is_detected_as_its_own_preset() {
     for (preset, name) in fixtures() {
         assert_eq!(detect_bytes(&fixture(name)), Some(preset), "{name}");
+    }
+}
+
+/// The JSON fixtures in `tests/fixtures/json` and the mapping each is read with:
+/// timestamp, level, logger, thread and message key.
+const JSON_FIXTURES: [(&str, [Option<&str>; 5]); 11] = [
+    (
+        "zap",
+        [Some("ts"), Some("level"), Some("logger"), None, Some("msg")],
+    ),
+    (
+        "slog",
+        [Some("time"), Some("level"), None, None, Some("msg")],
+    ),
+    (
+        "pino",
+        [Some("time"), Some("level"), Some("name"), None, Some("msg")],
+    ),
+    (
+        "winston",
+        [
+            Some("timestamp"),
+            Some("level"),
+            None,
+            None,
+            Some("message"),
+        ],
+    ),
+    (
+        "structlog",
+        [
+            Some("timestamp"),
+            Some("level"),
+            Some("logger"),
+            None,
+            Some("event"),
+        ],
+    ),
+    (
+        "python-json-logger",
+        [
+            Some("asctime"),
+            Some("levelname"),
+            Some("name"),
+            None,
+            Some("message"),
+        ],
+    ),
+    (
+        "serilog-clef",
+        [
+            Some("@t"),
+            Some("@l"),
+            Some("SourceContext"),
+            None,
+            Some("@mt"),
+        ],
+    ),
+    (
+        "ms-json-console",
+        [
+            Some("Timestamp"),
+            Some("LogLevel"),
+            Some("Category"),
+            None,
+            Some("Message"),
+        ],
+    ),
+    (
+        "logstash-logback",
+        [
+            Some("@timestamp"),
+            Some("level"),
+            Some("logger_name"),
+            Some("thread_name"),
+            Some("message"),
+        ],
+    ),
+    (
+        "ecs",
+        [
+            Some("@timestamp"),
+            Some("log.level"),
+            Some("log.logger"),
+            Some("process.thread.name"),
+            Some("message"),
+        ],
+    ),
+    (
+        "docker-json-file",
+        [Some("time"), None, None, None, Some("log")],
+    ),
+];
+
+#[test]
+fn every_json_fixture_is_detected_as_json() {
+    for (name, _) in JSON_FIXTURES {
+        let bytes = fixture(&format!("json/{name}.log"));
+        assert_eq!(detect_bytes(&bytes), Some(built_in("json")), "{name}");
+    }
+}
+
+#[test]
+fn every_json_fixture_maps_the_keys_its_library_writes() {
+    for (name, [timestamp, level, logger, thread, message]) in JSON_FIXTURES {
+        let bytes = fixture(&format!("json/{name}.log"));
+        let expected = Mapping {
+            timestamp,
+            level,
+            logger,
+            thread,
+            message,
+        };
+        assert_eq!(Mapping::choose(lines(&bytes)), expected, "{name}");
     }
 }
 

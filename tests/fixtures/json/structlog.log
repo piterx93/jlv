@@ -1,0 +1,8 @@
+{"event": "server started", "level": "info", "logger": "app.main", "timestamp": "2026-03-14T09:12:01.104213Z", "port": 8080}
+{"event": "loading config", "level": "debug", "logger": "app.config", "timestamp": "2026-03-14T09:12:01.310877Z"}
+{"event": "order created", "level": "info", "logger": "app.orders", "timestamp": "2026-03-14T09:12:02.020451Z", "order_id": 42}
+{"event": "slow upstream", "level": "warning", "logger": "app.http", "timestamp": "2026-03-14T09:12:03.481002Z", "elapsed": 1.4}
+{"event": "payment failed for \"Alice\"", "level": "error", "logger": "app.payments", "timestamp": "2026-03-14T09:12:04.775390Z", "exception": "Traceback (most recent call last):\n  File \"/app/payments.py\", line 31, in charge\n    gateway.charge(card)\nValueError: card declined"}
+{"event": "Zamówienie przyjęte", "level": "info", "logger": "app.orders", "timestamp": "2026-03-14T09:12:05.002118Z", "order_id": 43}
+{"event": "cache miss", "level": "debug", "logger": "app.cache", "timestamp": "2026-03-14T09:12:06.450660Z"}
+{"event": "disk almost full", "level": "critical", "logger": "app.main", "timestamp": "2026-03-14T09:12:07.900001Z"}

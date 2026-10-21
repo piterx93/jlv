@@ -1,0 +1,8 @@
+{"asctime": "2026-03-14 09:12:01,104", "levelname": "INFO", "name": "app.main", "message": "server started"}
+{"asctime": "2026-03-14 09:12:01,310", "levelname": "DEBUG", "name": "app.config", "message": "loading config from /etc/app.ini"}
+{"asctime": "2026-03-14 09:12:02,020", "levelname": "INFO", "name": "app.orders", "message": "order 42 created"}
+{"asctime": "2026-03-14 09:12:03,481", "levelname": "WARNING", "name": "app.http", "message": "slow upstream, retrying"}
+{"asctime": "2026-03-14 09:12:04,775", "levelname": "ERROR", "name": "app.payments", "message": "payment failed: \"card declined\"", "exc_info": "Traceback (most recent call last):\n  File \"/app/payments.py\", line 31, in charge\n    gateway.charge(card)\nValueError: card declined"}
+{"asctime": "2026-03-14 09:12:05,002", "levelname": "INFO", "name": "app.orders", "message": "order 43 created"}
+{"asctime": "2026-03-14 09:12:06,450", "levelname": "CRITICAL", "name": "app.main", "message": "database unreachable"}
+{"asctime": "2026-03-14 09:12:07,900", "levelname": "INFO", "name": "app.main", "message": "shutting down"}

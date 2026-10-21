@@ -1,0 +1,8 @@
+{"@t":"2026-03-14T09:12:01.1042130Z","@mt":"Now listening on {Address}","Address":"http://localhost:5000","SourceContext":"Microsoft.Hosting.Lifetime"}
+{"@t":"2026-03-14T09:12:01.3108770Z","@mt":"Loading configuration from {Path}","@l":"Debug","Path":"appsettings.json","SourceContext":"MyApp.Program"}
+{"@t":"2026-03-14T09:12:02.0204510Z","@mt":"Order {OrderId} created for {Customer}","OrderId":42,"Customer":"Alice","SourceContext":"MyApp.Orders.OrderService"}
+{"@t":"2026-03-14T09:12:03.4810020Z","@mt":"Slow upstream, retry {Attempt}","@l":"Warning","Attempt":2,"SourceContext":"MyApp.Http.Client"}
+{"@t":"2026-03-14T09:12:04.7753900Z","@mt":"Payment failed for \"{Customer}\"","@l":"Error","@x":"System.InvalidOperationException: Card declined\n   at MyApp.Payments.Gateway.Charge(Card card) in /src/Payments/Gateway.cs:line 31\n   at MyApp.Orders.OrderService.Create(Order order) in /src/Orders/OrderService.cs:line 97","Customer":"Alice","SourceContext":"MyApp.Payments.Gateway"}
+{"@t":"2026-03-14T09:12:05.0021180Z","@mt":"Zamówienie {OrderId} przyjęte","OrderId":43,"SourceContext":"MyApp.Orders.OrderService"}
+{"@t":"2026-03-14T09:12:06.4506600Z","@mt":"Cache probe","@l":"Verbose","SourceContext":"MyApp.Cache"}
+{"@t":"2026-03-14T09:12:07.9000010Z","@mt":"Unrecoverable failure","@l":"Fatal","SourceContext":"MyApp.Program"}

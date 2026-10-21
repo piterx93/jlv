@@ -10,7 +10,8 @@ use clap::builder::PossibleValue;
 use jiff::tz::TimeZone;
 use regex::bytes::{CaptureLocations, Regex};
 
-use crate::format::{LogTime, time};
+use crate::format::mapping::{lookup, object};
+use crate::format::{LogTime, Mapping, time};
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +32,9 @@ pub struct Format {
 pub enum Kind {
     /// A regex over the start of a line finds an entry's first line and its columns.
     Regex(Layout),
+    /// One JSON object per line; which keys are the columns is chosen per file, see
+    /// [`Mapping`].
+    Json,
     /// No structure: every line is an entry of its own.
     Raw,
 }
@@ -59,6 +63,7 @@ pub struct Layout {
 ///   `2026-10-07 12:00:00,123 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0025: started`
 /// - `wildfly-console`, WildFly on the console, time only and often coloured:
 ///   `12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: starting`
+/// - `json`, one JSON object per line: `{"time":"2026-10-07T12:00:00.123Z","level":"INFO","msg":"Started"}`
 /// - `raw`, no structure: every line is an entry of its own.
 pub static BUILT_IN: &[Format] = &[
     text("logback", "Logback", &LOGBACK, true),
@@ -72,6 +77,11 @@ pub static BUILT_IN: &[Format] = &[
         &WILDFLY_CONSOLE,
         false,
     ),
+    Format {
+        id: "json",
+        name: "JSON",
+        kind: Kind::Json,
+    },
     Format {
         id: "raw",
         name: "Raw",
@@ -118,6 +128,8 @@ impl Format {
     pub fn has(&self, column: Column) -> bool {
         match &self.kind {
             Kind::Regex(layout) => layout.pattern.groups.has(column),
+            // Which columns a file has depends on its mapping.
+            Kind::Json => true,
             Kind::Raw => false,
         }
     }
@@ -133,9 +145,12 @@ impl Format {
     pub fn entry_parser(&'static self) -> Option<EntryParser> {
         match &self.kind {
             Kind::Regex(layout) => Some(EntryParser {
-                layout,
-                pattern: layout.pattern,
+                source: Source::Text {
+                    layout,
+                    pattern: layout.pattern,
+                },
             }),
+            Kind::Json => Some(EntryParser::json(Mapping::default())),
             Kind::Raw => None,
         }
     }
@@ -176,12 +191,31 @@ impl ValueEnum for &'static Format {
 /// Recognises the first line of an entry in one format and finds its columns.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryParser {
-    layout: &'static Layout,
-    // Forced once here, so that `parse` doesn't go through the LazyLock on every line.
-    pattern: &'static EntryPattern,
+    source: Source,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    Text {
+        layout: &'static Layout,
+        // Forced once here, so that `parse` doesn't go through the LazyLock on every line.
+        pattern: &'static EntryPattern,
+    },
+    Json(Mapping),
 }
 
 impl EntryParser {
+    /// The parser of JSON lines read with `mapping`. A line that is a JSON object,
+    /// starting with `{` after any spaces and tabs or a UTF-8 byte order mark, starts
+    /// an entry; any other line continues one. The message is the value of the mapped
+    /// message key, the text between its quotes for a string without a trailing `\n`
+    /// escape, and the whole line when the line or the mapping has no message key.
+    pub fn json(mapping: Mapping) -> EntryParser {
+        EntryParser {
+            source: Source::Json(mapping),
+        }
+    }
+
     /// The columns of `line` if it starts an entry, else `None`. `line` has no line
     /// ending and is already ANSI-stripped; the spans are byte ranges into it.
     /// Only the layout counts: a line with an impossible date such as `2026-13-45`
@@ -195,7 +229,11 @@ impl EntryParser {
 
     /// Room for [`parse_with`](Self::parse_with) to find the columns in.
     pub(crate) fn locations(self) -> CaptureLocations {
-        self.pattern.regex.capture_locations()
+        match self.source {
+            Source::Text { pattern, .. } => pattern.regex.capture_locations(),
+            // JSON lines have no regex groups to find.
+            Source::Json(_) => NO_GROUPS.capture_locations(),
+        }
     }
 
     /// [`parse`](Self::parse) in `locations`, which [`locations`](Self::locations)
@@ -207,27 +245,19 @@ impl EntryParser {
         line: &[u8],
         locations: &mut CaptureLocations,
     ) -> Option<EntryHead> {
-        let matched = self.pattern.regex.captures_read(locations, line)?;
-        let span = |group: Option<usize>| {
-            let (start, end) = locations.get(group?)?;
-            Some(start..end)
-        };
-        let groups = &self.pattern.groups;
-        Some(EntryHead {
-            timestamp: span(groups.timestamp),
-            level: span(groups.level),
-            thread: span(groups.thread),
-            logger: span(groups.logger),
-            // Matching the message too would cost time proportional to its length on
-            // every line, for a span that is known anyway.
-            message: matched.end()..line.len(),
-        })
+        match self.source {
+            Source::Text { pattern, .. } => parse_text(pattern, line, locations),
+            Source::Json(mapping) => parse_json(mapping, line),
+        }
     }
 
     /// Whether the timestamp has a date. Without one (`logback-basic`,
     /// `wildfly-console`) it is only a time of day.
     pub fn has_date(self) -> bool {
-        self.layout.has_date
+        match self.source {
+            Source::Text { layout, .. } => layout.has_date,
+            Source::Json(_) => true,
+        }
     }
 
     /// What the timestamp span `span` (the bytes of [`EntryHead::timestamp`]) says, as
@@ -235,6 +265,70 @@ impl EntryParser {
     pub fn timestamp(self, span: &[u8], zone: &TimeZone) -> Option<LogTime> {
         time::read(span, zone)
     }
+}
+
+static NO_GROUPS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("").expect("the empty regex is valid"));
+
+fn parse_text(
+    pattern: &EntryPattern,
+    line: &[u8],
+    locations: &mut CaptureLocations,
+) -> Option<EntryHead> {
+    let matched = pattern.regex.captures_read(locations, line)?;
+    let span = |group: Option<usize>| {
+        let (start, end) = locations.get(group?)?;
+        Some(start..end)
+    };
+    let groups = &pattern.groups;
+    Some(EntryHead {
+        timestamp: span(groups.timestamp),
+        level: span(groups.level),
+        thread: span(groups.thread),
+        logger: span(groups.logger),
+        // Matching the message too would cost time proportional to its length on
+        // every line, for a span that is known anyway.
+        message: matched.end()..line.len(),
+    })
+}
+
+/// Where a string ending at `text`'s end stops once a trailing `\n` escape is dropped,
+/// as Docker's json-file driver keeps the newline the container printed. The `n` only
+/// escapes when an odd number of backslashes precede it: `\\n` is a backslash and an `n`.
+fn end_before_newline_escape(text: &[u8]) -> usize {
+    let Some(rest) = text.strip_suffix(b"n") else {
+        return text.len();
+    };
+    let backslashes = rest.iter().rev().take_while(|&&byte| byte == b'\\').count();
+    if backslashes % 2 == 1 {
+        rest.len() - 1
+    } else {
+        text.len()
+    }
+}
+
+fn parse_json(mapping: Mapping, line: &[u8]) -> Option<EntryHead> {
+    let at = object(line)?;
+    let object = &line[at..];
+    let message =
+        mapping
+            .message
+            .and_then(|key| lookup(object, key))
+            .map_or(0..line.len(), |field| {
+                let end = if field.string {
+                    end_before_newline_escape(&object[..field.value.end])
+                } else {
+                    field.value.end
+                };
+                field.value.start + at..end + at
+            });
+    Some(EntryHead {
+        timestamp: None,
+        level: None,
+        thread: None,
+        logger: None,
+        message,
+    })
 }
 
 /// An [`EntryPattern`] compiled the first time it is used, so that a format can be

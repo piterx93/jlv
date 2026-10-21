@@ -15,14 +15,14 @@ pub fn built_in(id: &str) -> &'static Format {
     Format::by_id(id).unwrap_or_else(|| panic!("no built-in format {id}"))
 }
 
-/// Every built-in format but `raw`, in table order, with the name of its fixture in
+/// Every built-in text format, in table order, with the name of its fixture in
 /// `tests/fixtures`: `<id>.log`. A format without one fails the first test that reads
-/// it.
+/// it. The JSON fixtures are in `tests/fixtures/json`, one per logging library.
 pub fn fixtures() -> impl Iterator<Item = (&'static Format, &'static str)> {
     static FIXTURES: LazyLock<Vec<(&Format, String)>> = LazyLock::new(|| {
         BUILT_IN
             .iter()
-            .filter(|format| !matches!(format.kind, Kind::Raw))
+            .filter(|format| matches!(format.kind, Kind::Regex(_)))
             .map(|format| (format, format!("{}.log", format.id)))
             .collect()
     });

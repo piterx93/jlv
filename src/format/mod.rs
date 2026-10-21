@@ -10,6 +10,7 @@ mod dates;
 mod detect;
 mod entry;
 pub mod json;
+mod mapping;
 mod preset;
 mod time;
 
@@ -17,6 +18,7 @@ pub(crate) use dates::DatesForward;
 pub use dates::{Anchor, DatesBackward, midnights_between, resolve_timestamps};
 pub use detect::detect;
 pub use entry::{Entry, EntryGrouper, is_exception_line};
+pub use mapping::Mapping;
 pub use preset::{BUILT_IN, Column, EntryHead, EntryParser, Format, Kind, Layout};
 #[cfg(test)]
 pub(crate) use preset::{EntryPattern, Pattern, text};

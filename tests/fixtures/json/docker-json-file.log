@@ -1,0 +1,8 @@
+{"log":"2026-03-14 09:12:01 INFO  server started on :8080\n","stream":"stdout","time":"2026-03-14T09:12:01.104213456Z"}
+{"log":"listening for connections\n","stream":"stdout","time":"2026-03-14T09:12:01.310877123Z"}
+{"log":"GET /health 200 3ms\n","stream":"stdout","time":"2026-03-14T09:12:02.020451789Z"}
+{"log":"warning: config key \"timeout\" missing, using default\n","stream":"stderr","time":"2026-03-14T09:12:03.481002345Z"}
+{"log":"error: connection refused\n","stream":"stderr","time":"2026-03-14T09:12:04.775390012Z"}
+{"log":"Zamówienie 43 przyjęte\n","stream":"stdout","time":"2026-03-14T09:12:05.002118678Z"}
+{"log":"cache probe\n","stream":"stdout","time":"2026-03-14T09:12:06.450660901Z"}
+{"log":"shutting down\n","stream":"stdout","time":"2026-03-14T09:12:07.900001234Z"}

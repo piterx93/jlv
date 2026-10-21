@@ -285,6 +285,7 @@ fn every_format_has_a_name_for_the_header() {
             "Spring Boot 2",
             "WildFly",
             "WildFly console",
+            "JSON",
             "Raw",
         ]
     );
@@ -935,6 +936,79 @@ fn thread_never_runs_past_a_closing_bracket_and_space() {
     }
 }
 
+// --- JSON lines ---
+
+fn message_mapping() -> Mapping {
+    Mapping {
+        message: Some("msg"),
+        ..Mapping::default()
+    }
+}
+
+/// The message a JSON parser with `mapping` finds on `line`, which must start an entry.
+fn json_message(mapping: Mapping, line: &str) -> &str {
+    let head = EntryParser::json(mapping)
+        .parse(line.as_bytes())
+        .unwrap_or_else(|| panic!("{line:?} doesn't start an entry"));
+    &line[head.message]
+}
+
+#[test]
+fn json_message_is_the_text_of_the_mapped_key() {
+    let line = r#"{"level":"info","msg":"Order \"42\" created","order":42}"#;
+    assert_eq!(
+        json_message(message_mapping(), line),
+        r#"Order \"42\" created"#
+    );
+}
+
+#[test]
+fn json_message_ends_before_a_trailing_newline_escape() {
+    // Docker's json-file driver keeps the newline the container printed.
+    let mapping = Mapping {
+        message: Some("log"),
+        ..Mapping::default()
+    };
+    let line = r#"{"log":"Order 42 created\n","stream":"stdout"}"#;
+    assert_eq!(json_message(mapping, line), "Order 42 created");
+    // An escaped backslash followed by `n` is not a newline.
+    let line = r#"{"log":"saved to C:\\n","stream":"stdout"}"#;
+    assert_eq!(json_message(mapping, line), r"saved to C:\\n");
+}
+
+#[test]
+fn json_line_without_the_mapped_message_key_has_the_whole_line_as_message() {
+    let line = r#"{"level":"info","text":"Order 42 created"}"#;
+    assert_eq!(json_message(message_mapping(), line), line);
+}
+
+#[test]
+fn json_mapping_without_a_message_key_has_the_whole_line_as_message() {
+    let line = r#"{"level":"info","msg":"Order 42 created"}"#;
+    assert_eq!(json_message(Mapping::default(), line), line);
+}
+
+#[test]
+fn json_object_after_spaces_or_a_byte_order_mark_starts_an_entry() {
+    for line in ["  {\"msg\":\"a\"}", "\u{feff}{\"msg\":\"a\"}"] {
+        assert_eq!(json_message(message_mapping(), line), "a", "{line:?}");
+    }
+}
+
+#[test]
+fn json_line_that_is_not_an_object_does_not_start_an_entry() {
+    let parser = EntryParser::json(message_mapping());
+    for line in [
+        "\tat com.acme.OrderService.place(OrderService.java:88)",
+        "Starting orders v1.4.2",
+        "[1,2]",
+        "\"msg\"",
+        "",
+    ] {
+        assert_eq!(parser.parse(line.as_bytes()), None, "{line:?}");
+    }
+}
+
 // --- properties ---
 
 fn level() -> impl Strategy<Value = String> {
@@ -1054,6 +1128,16 @@ proptest! {
     #[test]
     fn parse_never_panics_on_log_like_bytes(preset in structured(), bytes in log_soup()) {
         parser(preset).parse(&bytes);
+    }
+
+    #[test]
+    fn json_parse_never_panics_and_keeps_the_message_in_the_line(
+        rest in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let bytes = [b"{".as_slice(), &rest].concat();
+        if let Some(head) = EntryParser::json(message_mapping()).parse(&bytes) {
+            prop_assert!(head.message.start <= head.message.end && head.message.end <= bytes.len());
+        }
     }
 
     #[test]
