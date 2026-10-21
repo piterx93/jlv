@@ -41,8 +41,6 @@ pub struct Layout {
     pattern: &'static Pattern,
     /// Whether the timestamp has a date. Without one it is only a time of day.
     has_date: bool,
-    /// Whether the timestamp ends in an offset.
-    has_offset: bool,
 }
 
 /// The built-in formats in a fixed order: within a family the one with a date comes
@@ -63,22 +61,15 @@ pub struct Layout {
 ///   `12:00:00,123 INFO  [org.jboss.as] (MSC service thread 1-2) WFLYSRV0049: starting`
 /// - `raw`, no structure: every line is an entry of its own.
 pub static BUILT_IN: &[Format] = &[
-    text("logback", "Logback", &LOGBACK, true, false),
-    text(
-        "logback-basic",
-        "Logback basic",
-        &LOGBACK_BASIC,
-        false,
-        false,
-    ),
-    text("spring3", "Spring Boot 3", &SPRING3, true, true),
-    text("spring2", "Spring Boot 2", &SPRING2, true, false),
-    text("wildfly", "WildFly", &WILDFLY, true, false),
+    text("logback", "Logback", &LOGBACK, true),
+    text("logback-basic", "Logback basic", &LOGBACK_BASIC, false),
+    text("spring3", "Spring Boot 3", &SPRING3, true),
+    text("spring2", "Spring Boot 2", &SPRING2, true),
+    text("wildfly", "WildFly", &WILDFLY, true),
     text(
         "wildfly-console",
         "WildFly console",
         &WILDFLY_CONSOLE,
-        false,
         false,
     ),
     Format {
@@ -96,16 +87,11 @@ pub(crate) const fn text(
     name: &'static str,
     pattern: &'static Pattern,
     has_date: bool,
-    has_offset: bool,
 ) -> Format {
     Format {
         id,
         name,
-        kind: Kind::Regex(Layout {
-            pattern,
-            has_date,
-            has_offset,
-        }),
+        kind: Kind::Regex(Layout { pattern, has_date }),
     }
 }
 
@@ -244,27 +230,10 @@ impl EntryParser {
         self.layout.has_date
     }
 
-    /// What the timestamp span `span` (the bytes of [`EntryHead::timestamp`]) says:
-    /// an instant if this format writes a date, else a time of day. The fraction of a
-    /// second follows a `.` or a `,` and has 1 to 9 digits. A timestamp without an
-    /// offset is local time in `zone`; one that falls into a gap or a fold of `zone`
-    /// is resolved the way jiff's `compatible` disambiguation does. `None` if `span`
-    /// isn't a timestamp or names a date or time that doesn't exist (`2026-02-30`,
-    /// `25:00`, `12:60`) or that jiff can't represent.
+    /// What the timestamp span `span` (the bytes of [`EntryHead::timestamp`]) says, as
+    /// [`time::read`] reads it.
     pub fn timestamp(self, span: &[u8], zone: &TimeZone) -> Option<LogTime> {
-        if !self.has_date() {
-            time::time_of_day(span).map(LogTime::TimeOfDay)
-        } else if self.has_offset() {
-            time::instant_with_offset(span).map(LogTime::Instant)
-        } else {
-            time::local_instant(span, zone).map(LogTime::Instant)
-        }
-    }
-
-    /// Whether the timestamp ends in an offset. Only Spring Boot 3 writes one, in
-    /// ISO 8601 with a `T` before the time.
-    fn has_offset(self) -> bool {
-        self.layout.has_offset
+        time::read(span, zone)
     }
 }
 

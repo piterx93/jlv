@@ -44,13 +44,8 @@ pub fn no_thread_or_logger() -> &'static Format {
             r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(?P<level>[A-Z]+)\] ",
         )
     });
-    static FORMAT: Format = format::text(
-        "no-thread-or-logger",
-        "No thread or logger",
-        &PATTERN,
-        true,
-        false,
-    );
+    static FORMAT: Format =
+        format::text("no-thread-or-logger", "No thread or logger", &PATTERN, true);
     &FORMAT
 }
 
@@ -59,7 +54,7 @@ pub fn no_thread_or_logger() -> &'static Format {
 pub fn no_timestamp() -> &'static Format {
     static PATTERN: Pattern =
         Pattern::new(|| EntryPattern::from_regex(r"^(?P<level>[A-Z]+):(?P<logger>[^:]*):"));
-    static FORMAT: Format = format::text("no-timestamp", "No timestamp", &PATTERN, false, false);
+    static FORMAT: Format = format::text("no-timestamp", "No timestamp", &PATTERN, false);
     &FORMAT
 }
 
@@ -72,7 +67,7 @@ pub fn no_logger() -> &'static Format {
             r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(?P<thread>\d+)\] \[(?P<level>[A-Z]+)\] ",
         )
     });
-    static FORMAT: Format = format::text("no-logger", "No logger", &PATTERN, true, false);
+    static FORMAT: Format = format::text("no-logger", "No logger", &PATTERN, true);
     &FORMAT
 }
 
