@@ -199,8 +199,8 @@ fn level_comes_from_the_level_column() {
 
 #[test]
 fn level_word_that_is_no_level_gives_none() {
-    let notice = "2026-10-07 12:00:00.123 [main] NOTICE com.example.App - Hello\n";
-    let records = index_in(built_in("logback"), notice.as_bytes());
+    let audit = "2026-10-07 12:00:00.123 [main] AUDIT com.example.App - Hello\n";
+    let records = index_in(built_in("logback"), audit.as_bytes());
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].level(), None);
     assert!(records[0].class().is_some());

@@ -155,7 +155,7 @@ fn only_shows_just_the_levels_it_names() {
 const WITHOUT_LEVELS: &str = "\
 started
 2026-10-07 12:00:00.000 [main] INFO  com.myco.Order - created
-2026-10-07 12:00:01.000 [main] SEVERE com.myco.Order - failed
+2026-10-07 12:00:01.000 [main] AUDIT com.myco.Order - failed
 ";
 
 #[test]
@@ -348,7 +348,7 @@ struct Entry {
 #[derive(Debug, Clone)]
 struct Head {
     second: u8,
-    /// `None` is written as `SEVERE`, a level word vilog doesn't know.
+    /// `None` is written as `AUDIT`, a level word vilog doesn't know.
     level: Option<Level>,
     class: &'static str,
     message: &'static str,
@@ -441,7 +441,7 @@ fn render(entries: &[Entry]) -> String {
     let mut log = String::new();
     for entry in entries {
         if let Some(head) = &entry.head {
-            let level = head.level.map_or("SEVERE", |level| {
+            let level = head.level.map_or("AUDIT", |level| {
                 ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"][level as usize]
             });
             log.push_str(&format!(

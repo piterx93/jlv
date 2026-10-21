@@ -198,7 +198,7 @@ fn unknown_format_exits_with_2() {
 fn unknown_level_exits_with_2() {
     let dir = TempDir::new().unwrap();
     let file = log_file(&dir, "app.log");
-    let out = vilog(&[OsStr::new("-l"), OsStr::new("VERBOSE"), file.as_os_str()]);
+    let out = vilog(&[OsStr::new("-l"), OsStr::new("ERRORS"), file.as_os_str()]);
     assert_eq!(out.exit_code(), Some(2));
     assert_eq!(out.stdout, "");
     assert!(

@@ -489,6 +489,29 @@ fn without_filters_the_header_shows_the_level_counters_and_there_is_no_filter_ba
     "#);
 }
 
+/// `-l crit,wrn` on entries written with level aliases: the FATAL and WARN entries
+/// stay, under their canonical names.
+#[test]
+fn level_aliases_of_the_level_option_show_the_entries_under_canonical_names() {
+    let log = "\
+2026-10-07 12:00:00.000 [main] Information com.myco.App - Started
+2026-10-07 12:00:01.000 [main] wrn com.myco.App - Pool almost full
+2026-10-07 12:00:02.000 [main] ERR com.myco.App - Payment failed
+2026-10-07 12:00:03.000 [main] CRITICAL com.myco.App - Out of memory
+";
+    let mut app = app_in(built_in("logback"), log.as_bytes());
+    app.set_filters(Filters {
+        levels: crate::cli::parse_levels("crit,wrn").unwrap(),
+        ..Filters::default()
+    });
+    wait_for_filter(&mut app);
+    assert_snapshot!(lines_after(&mut app, &[], 1..=3), @r"
+    Filters: level[W F]
+    ▶12:00:01.000 WARN  com.myco.App             Pool almost full
+     12:00:03.000 FATAL com.myco.App             Out of memory
+    ");
+}
+
 /// The counters count the INFO entry the level filter hides, but none of the entries
 /// the other filters hide.
 #[test]

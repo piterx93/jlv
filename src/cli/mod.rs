@@ -48,7 +48,7 @@ pub struct Args {
 }
 
 /// The levels `-l/--level` names, comma-separated, the only ones shown at first.
-/// Names are case-insensitive and `WARNING` means `WARN`; empty items are skipped and
+/// Names are read as `Level::parse` reads them, aliases included; empty items are skipped and
 /// a level named twice counts once. An unknown name, or no name at all, is an error
 /// that lists the valid names.
 pub fn parse_levels(arg: &str) -> Result<Levels, String> {

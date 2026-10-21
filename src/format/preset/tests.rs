@@ -481,7 +481,7 @@ fn every_level_name_parses() {
 /// The level column shows these as unknown (PRD §6.4); the line still starts an entry.
 #[test]
 fn unknown_level_word_still_starts_an_entry() {
-    for level in ["SEVERE", "NOTICE", "FINE"] {
+    for level in ["AUDIT", "STATS", "VERB"] {
         assert_every_preset_parses(&Parts {
             level: level.into(),
             ..Parts::default()

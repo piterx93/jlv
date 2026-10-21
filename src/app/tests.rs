@@ -1707,6 +1707,21 @@ fn level_key_hides_that_level_on_top_of_the_other_filters() {
 }
 
 #[test]
+fn level_panel_filters_an_entry_written_with_an_alias_by_its_level() {
+    let severe = "2026-10-07 12:00:01.500 [main] SEVERE com.example.App - Failed\n";
+    let mut app = applied(
+        logback(&[STARTED, severe]),
+        &[
+            Action::LevelPanel,
+            Action::ToggleLevel(Level::Info),
+            Action::Confirm,
+        ],
+    );
+    wait_for_filter(&mut app);
+    assert_eq!(rows(&app), [severe.trim_end()]);
+}
+
+#[test]
 fn level_panel_opens_with_the_current_levels_and_the_cursor_on_trace() {
     let app = applied(
         logback(&[STARTED]),

@@ -179,7 +179,7 @@ impl EntryParser {
     /// ending and is already ANSI-stripped; the spans are byte ranges into it.
     /// Only the layout counts: a line with an impossible date such as `2026-13-45`
     /// still starts an entry, and so does one whose level is a word [`Level`] doesn't
-    /// know, such as `SEVERE`.
+    /// know, such as `AUDIT`.
     ///
     /// [`Level`]: crate::format::Level
     pub fn parse(self, line: &[u8]) -> Option<EntryHead> {

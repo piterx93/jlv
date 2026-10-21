@@ -84,7 +84,8 @@ All filters combine. Each one can be set from the command line, from its panel o
 with a quick key; `x` clears them all.
 
 - **Level**: `1`–`6` toggle TRACE, DEBUG, INFO, WARN, ERROR and FATAL; `F2` opens
-  a panel. `--level` takes a comma-separated list; `WARNING` means `WARN`.
+  a panel. `--level` takes a comma-separated list of level names or aliases such
+  as `WRN`, `SEVERE` or `CRIT`.
 - **Class**: `com.myco.*` keeps a package and everything below it, `OrderService`
   keeps classes containing the text, `!` in front excludes. Includes are or-ed,
   and an exclude always wins. `c` keeps only the selected entry's class, `C` hides

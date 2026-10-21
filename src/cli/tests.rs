@@ -209,8 +209,11 @@ fn level_names_ignore_case() {
 }
 
 #[test]
-fn warning_means_warn() {
-    assert_eq!(levels("WARNING"), Levels::only(&[Level::Warn]));
+fn level_aliases_name_their_level() {
+    assert_eq!(
+        levels("crit,wrn"),
+        Levels::only(&[Level::Fatal, Level::Warn])
+    );
 }
 
 #[test]
@@ -228,8 +231,8 @@ fn a_level_named_twice_counts_once() {
 
 #[test]
 fn unknown_level_error_names_it_and_lists_the_valid_ones() {
-    let message = level_error("WARN,VERBOSE");
-    assert!(message.contains("VERBOSE"), "{message}");
+    let message = level_error("WARN,ERRORS");
+    assert!(message.contains("ERRORS"), "{message}");
     assert!(message.contains(VALID_LEVELS), "{message}");
 }
 
