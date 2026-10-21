@@ -243,6 +243,19 @@ fn groups_the_wildfly_console_fixture() {
     ");
 }
 
+/// A Python traceback with a chained exception, a Go panic with two goroutines, a
+/// Node.js `TypeError` and a .NET exception with an inner one, each under an entry.
+#[test]
+fn trace_of_every_ecosystem_is_one_entry_with_an_exception() {
+    assert_snapshot!(outline(built_in("logback"), "traces.log"), @r"
+     1 2026-10-07 09:20:01.100 ERROR +14 exception
+    16 2026-10-07 09:20:02.200 ERROR +13 exception
+    30 2026-10-07 09:20:03.300 ERROR +5 exception
+    36 2026-10-07 09:20:04.400 ERROR +8 exception
+    45 2026-10-07 09:20:05.500 INFO
+    ");
+}
+
 #[test]
 fn raw_makes_every_fixture_line_an_entry_without_exceptions() {
     for (_, name) in fixtures() {

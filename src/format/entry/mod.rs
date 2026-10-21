@@ -97,10 +97,12 @@ impl EntryGrouper {
     }
 }
 
-/// Whether `line` looks like part of a Java stack trace: a frame (`\tat …`), a cause
-/// (`Caused by: …`), omitted frames (`\t... 5 more`, `\t... 3 common frames omitted`)
-/// or an exception header (`java.lang.IllegalStateException: …`). `line` has no line
-/// ending and is already ANSI-stripped.
+/// Whether `line` looks like part of a stack trace (PRD §6.5). Java and Node.js: a
+/// frame (`\tat …`), a cause (`Caused by: …`), omitted frames (`\t... 5 more`) or an
+/// exception header (`java.lang.IllegalStateException: …`). Python: `Traceback`, `File`
+/// and chaining lines. Go: `panic: `, `goroutine N [` and tab-indented `.go:N` frames.
+/// .NET: ` ---> ` and the `--- End of …` markers. `line` has no line ending and is
+/// already ANSI-stripped.
 pub fn is_exception_line(line: &[u8]) -> bool {
     // Anchored, so matching stops at the first byte no alternative can take: a long
     // line costs no more than its leading whitespace and first word. Unlike the preset
@@ -110,7 +112,16 @@ pub fn is_exception_line(line: &[u8]) -> bool {
             r"^(?:\s+at ",
             r"|Caused by: ",
             r"|\s+\.\.\. \d+ (?:more|common frames omitted)",
-            r"|[\w.$]+(?:Exception|Error)(?:: |$))",
+            r"|[\w.$]+(?:Exception|Error)(?:: |$)",
+            r"|Traceback \(most recent call last\):",
+            r#"|\s+File "[^"]*", line \d+"#,
+            r"|During handling of the above exception",
+            r"|The above exception was the direct cause",
+            r"|panic: ",
+            r"|goroutine \d+ \[",
+            r"|\t/[^:\s]*\.go:\d+",
+            r"|\s+---> ",
+            r"|\s*--- End of (?:inner exception stack trace|stack trace from previous location) ---)",
         ))
         .expect("the exception pattern is a valid regex")
     });

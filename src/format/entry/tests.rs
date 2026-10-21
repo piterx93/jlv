@@ -346,6 +346,68 @@ fn unqualified_header_is_an_exception_line() {
     assert!(is("PSQLException: duplicate key"));
 }
 
+#[test]
+fn python_traceback_header_is_an_exception_line() {
+    assert!(is("Traceback (most recent call last):"));
+}
+
+#[test]
+fn python_file_line_is_an_exception_line() {
+    assert!(is(r#"  File "/app/shop/orders.py", line 12, in load"#));
+}
+
+#[test]
+fn python_exception_during_handling_is_an_exception_line() {
+    assert!(is(
+        "During handling of the above exception, another exception occurred:"
+    ));
+}
+
+#[test]
+fn python_direct_cause_is_an_exception_line() {
+    assert!(is(
+        "The above exception was the direct cause of the following exception:"
+    ));
+}
+
+#[test]
+fn go_panic_is_an_exception_line() {
+    assert!(is(
+        "panic: runtime error: index out of range [5] with length 3"
+    ));
+}
+
+#[test]
+fn go_goroutine_header_is_an_exception_line() {
+    assert!(is("goroutine 1 [running]:"));
+    assert!(is("goroutine 7 [chan receive, 2 minutes]:"));
+}
+
+#[test]
+fn go_frame_is_an_exception_line() {
+    assert!(is("\t/usr/local/go/src/runtime/panic.go:770 +0x132"));
+}
+
+#[test]
+fn go_frame_without_an_offset_is_an_exception_line() {
+    assert!(is("\t/app/cmd/shop/main.go:12"));
+}
+
+#[test]
+fn dotnet_inner_exception_is_an_exception_line() {
+    assert!(is(" ---> System.IO.IOException: The disk is full"));
+}
+
+#[test]
+fn dotnet_end_of_inner_exception_is_an_exception_line() {
+    assert!(is("   --- End of inner exception stack trace ---"));
+}
+
+#[test]
+fn dotnet_end_of_stack_trace_from_previous_location_is_an_exception_line() {
+    assert!(is("--- End of stack trace from previous location ---"));
+}
+
 // --- is_exception_line: what doesn't ---
 
 #[test]
@@ -394,6 +456,32 @@ fn class_name_that_only_contains_exception_is_not_a_header() {
 #[test]
 fn exception_named_mid_line_is_not_a_header() {
     assert!(!is("Request failed: java.lang.IllegalStateException: boom"));
+}
+
+#[test]
+fn message_about_a_missing_file_is_not_a_python_file_line() {
+    assert!(!is("File not found"));
+    assert!(!is("  File not found: /data/inbox/orders.csv"));
+}
+
+#[test]
+fn indented_path_that_is_not_a_go_file_is_not_a_go_frame() {
+    assert!(!is("\t/data/inbox/orders.csv:12"));
+}
+
+#[test]
+fn word_goroutine_without_a_number_and_state_is_not_a_goroutine_header() {
+    assert!(!is("goroutine leak detected in worker pool"));
+    assert!(!is("goroutine 12 finished"));
+}
+
+/// Like the Java lines, the lines of the other ecosystems count only at the start.
+#[test]
+fn ecosystem_markers_mid_line_are_not_exception_lines() {
+    assert!(!is("worker said: Traceback (most recent call last):"));
+    assert!(!is("recovered from panic: nil map"));
+    assert!(!is("stock 12 ---> 11"));
+    assert!(!is("note --- End of inner exception stack trace ---"));
 }
 
 #[test]
