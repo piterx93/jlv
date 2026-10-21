@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use vilog::format::Anchor;
+use vilog::format::{Anchor, Mapping};
 use vilog::index::{Indexer, Record, Settings};
 
 mod common;
@@ -104,6 +104,7 @@ fn index() -> Grown {
         format: built_in("logback"),
         anchor: Anchor::for_file(Path::new("app.log"), Timestamp::UNIX_EPOCH, &zone),
         zone,
+        mapping: Mapping::default(),
     };
     let mut indexer = Indexer::spawn(Arc::new(log()), settings);
     GROWTHS.set(0);

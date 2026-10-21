@@ -19,6 +19,10 @@ cargo bench --bench engine && cargo bench --bench nfr
 rm "$VILOG_BENCH_LOG"
 ```
 
+`VILOG_BENCH_FORMAT` picks the layout the benchmarks' log is written in, by the id
+`--format` takes (`logback` if unset). `json` writes pino lines, with each stack trace in
+`err.stack`: `VILOG_BENCH_FORMAT=json VILOG_BENCH_LOG=/tmp/vilog-bench-pino.log cargo bench --bench nfr`.
+
 `VILOG_BENCH_LOG` is written only if nothing is there yet. The same log, or one in
 another preset's layout, comes from
 `cargo run --release --example generate_log -- <path> 2G [--format spring3]`.

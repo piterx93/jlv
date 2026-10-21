@@ -3,7 +3,8 @@
 //! The log is `VILOG_BENCH_LOG` if that is set, written there first if no file is
 //! there yet and kept afterwards, so that several runs share one big log. Otherwise
 //! it is written to the temp dir and removed when the benchmark ends. Either way it
-//! is a Logback log of about `VILOG_BENCH_SIZE` bytes (`2G`, `64M`, …; 32M if unset).
+//! is a log of about `VILOG_BENCH_SIZE` bytes (`2G`, `64M`, …; 32M if unset) in the
+//! layout of the format `VILOG_BENCH_FORMAT` names (`logback` if unset, `json` for pino).
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use tempfile::TempPath;
 use vilog::app::App;
-use vilog::format::{Anchor, Format, detect};
+use vilog::format::{Anchor, Format, Mapping, detect};
 use vilog::index::{Indexer, Record, Settings};
 use vilog::source::{self, Source};
 
@@ -24,6 +25,12 @@ pub mod generator;
 use generator::{Spec, generate, parse_size};
 
 const DEFAULT_SIZE: &str = "32M";
+
+/// The format `VILOG_BENCH_FORMAT` names, panicking on an unknown id.
+fn bench_format() -> &'static Format {
+    let id = env::var("VILOG_BENCH_FORMAT").unwrap_or_else(|_| "logback".to_owned());
+    Format::by_id(&id).unwrap_or_else(|| panic!("VILOG_BENCH_FORMAT: no built-in format {id:?}"))
+}
 
 pub struct BenchLog {
     path: PathBuf,
@@ -51,7 +58,7 @@ impl BenchLog {
         };
         if temp.is_some() || !path.exists() {
             let spec = Spec {
-                preset: Format::by_id("logback").expect("logback is built in"),
+                preset: bench_format(),
                 size,
                 seed: 1,
             };
@@ -102,6 +109,7 @@ pub fn settings(path: &Path, source: &Source) -> Settings {
             .unwrap_or_else(|| Format::by_id("raw").expect("raw is built in")),
         anchor: Anchor::for_file(path, Timestamp::now(), &zone),
         zone,
+        mapping: Mapping::choose(source::lines(source.bytes())),
     }
 }
 

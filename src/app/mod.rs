@@ -29,7 +29,7 @@ use crate::filter::{
 };
 use crate::fold::Folds;
 use crate::follow::{Event, Liveness, Options, Watcher};
-use crate::format::{Anchor, BUILT_IN, Column, Format, Level, detect, strip_ansi};
+use crate::format::{Anchor, BUILT_IN, Column, Format, Level, Mapping, detect, strip_ansi};
 use crate::histogram::{Counter, Histogram};
 use crate::index::{self, Indexer, Progress, Record, Settings};
 use crate::keymap::{Keymap, normalized};
@@ -1042,6 +1042,7 @@ impl App {
                 .unwrap_or_else(|| Format::by_id("raw").expect("the built-in formats include raw")),
             zone,
             anchor,
+            mapping: Mapping::choose(source::lines(source.bytes())),
         };
         let progress = Progress {
             indexed: 0,

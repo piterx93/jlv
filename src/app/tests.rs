@@ -24,8 +24,8 @@ use crate::matcher::{self, Matcher};
 use crate::test_support;
 use crate::test_support::{
     INDEX_DEADLINE, LARGE_INDEX_DEADLINE, action, app, app_in, built_in, char_key, ctrl,
-    detected_app, following_app, key, named_app, no_thread_or_logger, numbered_log, unindexed_app,
-    wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
+    detected_app, following_app, json_fixture, key, named_app, no_thread_or_logger, numbered_log,
+    unindexed_app, wait_for_filter, wait_for_index, wait_for_index_within, wait_for_search,
 };
 
 /// `(top, selected)`: the first line on screen and the selected line.
@@ -5256,4 +5256,91 @@ fn configure_takes_the_ui_toggles_from_the_config() {
         );
         assert_eq!(shown, (on, on, on, on));
     }
+}
+
+// --- JSON lines ---
+
+/// The JSON fixture `name`, its format detected, on a 10-line screen, with the whole
+/// file indexed.
+fn json_app(name: &str) -> App {
+    let mut app = detected_app(&json_fixture(name));
+    app.resize(10);
+    app
+}
+
+/// The line numbers in the file of the rows of `app`.
+fn row_numbers(app: &App) -> Vec<u64> {
+    (0..app.viewport().total())
+        .map(|i| app.row(i).and_then(|row| row.number).unwrap())
+        .collect()
+}
+
+/// pino's levels are numbers.
+const PINO_LEVEL_COUNTS: [u32; 6] = [1, 1, 3, 1, 1, 1];
+
+#[test]
+fn level_filter_on_a_json_log_reads_the_levels_from_its_level_key() {
+    let filters = Filters {
+        levels: Levels::only(&[Level::Error, Level::Fatal]),
+        ..Filters::default()
+    };
+    let app = filtered(json_app("pino.log"), filters);
+    assert_eq!(row_numbers(&app), [5, 7]);
+}
+
+#[test]
+fn time_filter_on_a_json_log_reads_the_timestamps_from_its_timestamp_key() {
+    // zap writes epoch seconds.
+    let time = TimeRange {
+        start: "2026-03-14T09:12:02Z".parse().unwrap(),
+        end: Some("2026-03-14T09:12:05Z".parse().unwrap()),
+    };
+    let filters = Filters {
+        time: Some(time),
+        ..Filters::default()
+    };
+    let app = filtered(json_app("zap.log"), filters);
+    assert_eq!(row_numbers(&app), [3, 4, 5]);
+}
+
+#[test]
+fn logger_filter_on_a_json_log_reads_the_loggers_from_its_logger_key() {
+    let filters = Filters {
+        classes: Classes::parse(["com.acme.orders.OrderService"]).unwrap(),
+        ..Filters::default()
+    };
+    let app = filtered(json_app("logstash-logback.log"), filters);
+    assert_eq!(row_numbers(&app), [3, 6]);
+}
+
+#[test]
+fn exception_jump_on_a_json_log_lands_on_the_entry_with_an_exception_field() {
+    let app = pressed(json_app("ms-json-console.log"), &[char_key(']')]);
+    assert_eq!(selected(&app), Some(4));
+}
+
+#[test]
+fn histogram_of_a_json_log_counts_its_warnings_and_errors_over_its_timestamps() {
+    // slog: 08:12:01 to 08:12:07 UTC in 1 s buckets, a WARN at :03 and an ERROR at :04.
+    let mut app = json_app("slog.log");
+    let histogram = app.histogram(HISTOGRAM_WIDTH).unwrap();
+    assert_eq!(histogram.start, "2026-03-14T08:12:01Z".parse().unwrap());
+    assert_eq!(histogram.counts, [0, 0, 1, 1, 0, 0, 0]);
+}
+
+#[test]
+fn json_named_by_the_format_reads_the_keys_the_file_uses() {
+    let app = app_in(built_in("json"), &json_fixture("pino.log"));
+    assert_eq!(app.level_counts(), PINO_LEVEL_COUNTS);
+}
+
+#[test]
+fn cycling_into_json_reads_the_keys_the_file_uses() {
+    let mut app = cycled(app_in(
+        built_in("wildfly-console"),
+        &json_fixture("pino.log"),
+    ));
+    wait_for_index(&mut app);
+    assert_eq!(app.settings().format, built_in("json"));
+    assert_eq!(app.level_counts(), PINO_LEVEL_COUNTS);
 }

@@ -7,7 +7,7 @@ use jiff::tz::TimeZone;
 use proptest::prelude::*;
 
 use super::*;
-use crate::format::{Anchor, Format, Level};
+use crate::format::{Anchor, Format, Level, Mapping};
 use crate::index::{self, Chunk, Settings};
 use crate::matcher::{self, Matcher};
 use crate::test_support::built_in;
@@ -33,6 +33,7 @@ fn settings(preset: &'static Format) -> Settings {
         format: preset,
         anchor: Anchor::Modified(zone.to_datetime(mtime)),
         zone,
+        mapping: Mapping::default(),
     }
 }
 

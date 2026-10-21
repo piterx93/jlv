@@ -4,6 +4,9 @@
 use super::detect::sample;
 use super::json::{self, Field};
 
+pub use read::JsonColumns;
+
+mod read;
 #[cfg(test)]
 mod tests;
 
